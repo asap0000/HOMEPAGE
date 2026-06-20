@@ -3,10 +3,18 @@ name: Android Build
 on:
   push:
     branches: ["**"]
+    # Only build when the app (or this workflow) actually changes — README-only
+    # commits won't spend a run.
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:
+
+# If you push several times quickly, cancel the older in-flight run on the same
+# branch so only the latest builds. Saves time and keeps things tidy.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -28,6 +36,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # Caches Gradle dependencies & wrapper between runs -> much faster builds.
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+
       - name: Install SDK packages
         run: |
           yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
@@ -44,3 +58,5 @@ jobs:
           name: app-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          # Auto-delete old APKs so they don't pile up against the storage quota.
+          retention-days: 14
