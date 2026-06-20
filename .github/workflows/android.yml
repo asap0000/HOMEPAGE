@@ -45,8 +45,6 @@ jobs:
       # Caches Gradle dependencies & wrapper between runs -> much faster builds.
       - name: Set up Gradle (with caching)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: android
 
       - name: Install SDK packages
         run: |
@@ -55,16 +53,19 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Decode release keystore
+      - name: Decrypt release keystore
         env:
-          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
         run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_PASSPHRASE" ]; then
+            gpg --quiet --batch --yes --decrypt \
+              --passphrase "$KEYSTORE_PASSPHRASE" \
+              --output "$RUNNER_TEMP/release.keystore" \
+              app/release.keystore.gpg
             echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-            echo "Release keystore decoded — release APK will be signed."
+            echo "Release keystore decrypted — release APK will be signed."
           else
-            echo "No RELEASE_KEYSTORE_BASE64 secret set — release APK will be UNSIGNED."
+            echo "No KEYSTORE_PASSPHRASE secret set — release APK will be UNSIGNED."
           fi
 
       - name: Build debug & release APKs
