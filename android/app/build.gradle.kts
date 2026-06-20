@@ -18,6 +18,26 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // Release signing is driven entirely by environment variables (provided by CI
+    // from GitHub Secrets, or set locally). The keystore is never committed.
+    // If no keystore is available, the release build is simply left unsigned so
+    // the build never breaks.
+    val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_PATH") ?: "release.keystore"
+    val releaseKeystoreFile = file(releaseKeystorePath)
+    val hasReleaseSigning = releaseKeystoreFile.exists() &&
+        !System.getenv("RELEASE_STORE_PASSWORD").isNullOrEmpty()
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -25,6 +45,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

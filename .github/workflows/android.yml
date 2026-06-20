@@ -22,6 +22,12 @@ jobs:
     defaults:
       run:
         working-directory: android
+    env:
+      # Release signing material, pulled from repository Secrets. When these are
+      # empty the release APK is built unsigned (the build still succeeds).
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -49,14 +55,37 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Decode release keystore
+        env:
+          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "Release keystore decoded — release APK will be signed."
+          else
+            echo "No RELEASE_KEYSTORE_BASE64 secret set — release APK will be UNSIGNED."
+          fi
 
-      - name: Upload APK
+      - name: Build debug & release APKs
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          # Auto-delete old APKs so they don't pile up against the storage quota.
+          retention-days: 14
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          # Picks up the signed app-release.apk when secrets are set, otherwise
+          # the app-release-unsigned.apk.
+          path: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: warn
           retention-days: 14
