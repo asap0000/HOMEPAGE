@@ -1,5 +1,7 @@
 package com.privacycamera.ui
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -32,7 +34,9 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.privacycamera.auth.BiometricGate
 import com.privacycamera.viewmodel.PhotoViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -47,17 +51,19 @@ fun ViewerScreen(
     viewModel: PhotoViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findFragmentActivity() }
     val scope = rememberCoroutineScope()
 
-    // Default to the revealed (decrypted) original — this is the app-only privilege.
-    var showOriginal by remember { mutableStateOf(true) }
+    // The original is masked until the user passes device authentication.
+    var revealed by remember { mutableStateOf(false) }
 
     val item = remember(photoId) {
         viewModel.photos.value.firstOrNull { it.id == photoId }
     }
 
-    val originalBitmap by produceState<ImageBitmap?>(initialValue = null, photoId) {
-        value = viewModel.revealOriginal(photoId)?.asImageBitmap()
+    // Only decrypt the original into memory AFTER authentication succeeds.
+    val originalBitmap by produceState<ImageBitmap?>(initialValue = null, photoId, revealed) {
+        value = if (revealed) viewModel.revealOriginal(photoId)?.asImageBitmap() else null
     }
     val maskedBitmap by produceState<ImageBitmap?>(initialValue = null, photoId) {
         value = item?.let {
@@ -67,20 +73,46 @@ fun ViewerScreen(
         }
     }
 
+    fun requestReveal() {
+        val act = activity
+        if (act == null) {
+            Toast.makeText(context, "認証を開始できませんでした", Toast.LENGTH_SHORT).show()
+            return
+        }
+        BiometricGate.authenticate(act) { result ->
+            when (result) {
+                is BiometricGate.Result.Success -> revealed = true
+                is BiometricGate.Result.Failed ->
+                    Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
+                is BiometricGate.Result.NotConfigured -> {
+                    // No biometric and no screen lock configured: nothing to verify against.
+                    Toast.makeText(
+                        context,
+                        "端末にロックが未設定のため認証なしで表示します。設定 > セキュリティ で画面ロックの設定を推奨します。",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    revealed = true
+                }
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (showOriginal) "正規表示（アプリ内のみ）" else "マスク表示") },
+                title = { Text(if (revealed) "正規表示（アプリ内のみ）" else "マスク表示") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showOriginal = !showOriginal }) {
+                    IconButton(onClick = {
+                        if (revealed) revealed = false else requestReveal()
+                    }) {
                         Icon(
-                            if (showOriginal) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                            contentDescription = "表示切替"
+                            if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (revealed) "マスクに戻す" else "認証して正規表示"
                         )
                     }
                     IconButton(onClick = {
@@ -112,11 +144,11 @@ fun ViewerScreen(
                 .padding(padding),
             contentAlignment = Alignment.Center
         ) {
-            val shown = if (showOriginal) originalBitmap else maskedBitmap
+            val shown = if (revealed) originalBitmap else maskedBitmap
             if (shown != null) {
                 Image(
                     bitmap = shown,
-                    contentDescription = if (showOriginal) "正規の内容" else "マスク済み",
+                    contentDescription = if (revealed) "正規の内容" else "マスク済み",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
@@ -125,4 +157,14 @@ fun ViewerScreen(
             }
         }
     }
+}
+
+/** Walks the ContextWrapper chain to find the hosting FragmentActivity. */
+private fun Context.findFragmentActivity(): FragmentActivity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is FragmentActivity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
