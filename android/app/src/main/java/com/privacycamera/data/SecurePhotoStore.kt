@@ -8,14 +8,17 @@ import android.graphics.Matrix
 import android.os.Environment
 import android.provider.MediaStore
 import com.privacycamera.crypto.CryptoManager
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 
-/** A single stored photo: id plus the on-disk masked preview file. */
+/** A single stored photo: the masked preview plus its user-added metadata. */
 data class PhotoItem(
     val id: String,
     val maskedFile: File,
-    val createdAt: Long
+    val createdAt: Long,
+    val caption: String = "",
+    val category: String = PhotoCategories.UNCLASSIFIED
 )
 
 /**
@@ -24,13 +27,15 @@ data class PhotoItem(
  * Layout (all under the app-private internal storage, which media scanners and cloud
  * photo apps like Google Photos / Amazon Photos cannot see or upload):
  *   filesDir/secure/originals/<id>.enc   -> AES-GCM encrypted full-resolution JPEG
- *   filesDir/secure/masked/<id>.jpg      -> masked preview (safe to display anywhere)
+ *   filesDir/secure/masked/<id>.jpg      -> masked (mosaic) preview, safe to display
+ *   filesDir/secure/meta/<id>.json       -> { caption, category, createdAt }
  */
 class SecurePhotoStore(private val context: Context) {
 
     private val baseDir = File(context.filesDir, "secure").apply { mkdirs() }
     private val originalsDir = File(baseDir, "originals").apply { mkdirs() }
     private val maskedDir = File(baseDir, "masked").apply { mkdirs() }
+    private val metaDir = File(baseDir, "meta").apply { mkdirs() }
 
     init {
         // Defence in depth: even though internal storage is never media-scanned,
@@ -39,16 +44,21 @@ class SecurePhotoStore(private val context: Context) {
     }
 
     /**
-     * Persists a freshly captured JPEG: encrypts the original and writes a masked preview.
-     * [jpegBytes] should already be correctly rotated/upright.
+     * Persists a freshly captured JPEG: encrypts the original, writes a masked preview,
+     * and stores initial metadata. [jpegBytes] should already be upright.
      */
-    fun save(jpegBytes: ByteArray): PhotoItem {
+    fun save(
+        jpegBytes: ByteArray,
+        caption: String = "",
+        category: String = PhotoCategories.UNCLASSIFIED
+    ): PhotoItem {
         val id = "IMG_${System.currentTimeMillis()}"
+        val createdAt = System.currentTimeMillis()
 
         // Encrypt and store the original.
         File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
 
-        // Build and store the masked preview.
+        // Build and store the masked (mosaic) preview.
         val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
         val masked = MaskingEngine.mask(source)
         val maskedFile = File(maskedDir, "$id.jpg")
@@ -58,18 +68,35 @@ class SecurePhotoStore(private val context: Context) {
         source.recycle()
         masked.recycle()
 
-        return PhotoItem(id = id, maskedFile = maskedFile, createdAt = System.currentTimeMillis())
+        writeMeta(id, caption, category, createdAt)
+
+        return PhotoItem(id, maskedFile, createdAt, caption, category)
     }
 
-    /** Lists stored photos, newest first. */
+    /** Lists stored photos, newest first, with metadata applied. */
     fun list(): List<PhotoItem> {
         return maskedDir.listFiles { f -> f.extension == "jpg" }
             ?.map { f ->
                 val id = f.nameWithoutExtension
-                PhotoItem(id = id, maskedFile = f, createdAt = f.lastModified())
+                val meta = readMeta(id)
+                PhotoItem(
+                    id = id,
+                    maskedFile = f,
+                    createdAt = meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified(),
+                    caption = meta?.optString("caption", "") ?: "",
+                    category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
+                        ?: PhotoCategories.UNCLASSIFIED
+                )
             }
             ?.sortedByDescending { it.createdAt }
             ?: emptyList()
+    }
+
+    /** Updates the caption/category for a photo, preserving its original timestamp. */
+    fun updateMeta(id: String, caption: String, category: String) {
+        val createdAt = readMeta(id)?.optLong("createdAt", System.currentTimeMillis())
+            ?: System.currentTimeMillis()
+        writeMeta(id, caption, category, createdAt)
     }
 
     /** Decrypts and decodes the original (unmasked) image. App-only reveal. */
@@ -83,12 +110,12 @@ class SecurePhotoStore(private val context: Context) {
     fun delete(id: String) {
         File(originalsDir, "$id.enc").delete()
         File(maskedDir, "$id.jpg").delete()
+        File(metaDir, "$id.json").delete()
     }
 
     /**
      * Exports ONLY the masked preview to the shared gallery (Pictures/PrivacyCamera).
-     * This is the deliberately-safe copy: even if Google/Amazon Photos upload it,
-     * only the masked image leaves the device. The original is never exported.
+     * The original is never exported.
      */
     fun exportMaskedToGallery(item: PhotoItem): Boolean {
         // Scoped-storage MediaStore writes (no permission needed) require API 29+.
@@ -113,6 +140,25 @@ class SecurePhotoStore(private val context: Context) {
             resolver.delete(uri, null, null)
             false
         }
+    }
+
+    private fun readMeta(id: String): JSONObject? {
+        val f = File(metaDir, "$id.json")
+        if (!f.exists()) return null
+        return try {
+            JSONObject(f.readText())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun writeMeta(id: String, caption: String, category: String, createdAt: Long) {
+        val json = JSONObject().apply {
+            put("caption", caption)
+            put("category", category)
+            put("createdAt", createdAt)
+        }
+        File(metaDir, "$id.json").writeText(json.toString())
     }
 
     companion object {

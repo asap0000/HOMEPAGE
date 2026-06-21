@@ -5,12 +5,15 @@ import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -18,10 +21,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -56,16 +61,17 @@ fun ViewerScreen(
 
     // The original is masked until the user passes device authentication.
     var revealed by remember { mutableStateOf(false) }
+    var showMemo by remember { mutableStateOf(false) }
 
-    val item = remember(photoId) {
-        viewModel.photos.value.firstOrNull { it.id == photoId }
-    }
+    // Derive from the live list so caption/category edits reflect immediately.
+    val photos by viewModel.photos.collectAsState()
+    val item = photos.firstOrNull { it.id == photoId }
 
     // Only decrypt the original into memory AFTER authentication succeeds.
     val originalBitmap by produceState<ImageBitmap?>(initialValue = null, photoId, revealed) {
         value = if (revealed) viewModel.revealOriginal(photoId)?.asImageBitmap() else null
     }
-    val maskedBitmap by produceState<ImageBitmap?>(initialValue = null, photoId) {
+    val maskedBitmap by produceState<ImageBitmap?>(initialValue = null, item?.maskedFile?.path) {
         value = item?.let {
             withContext(Dispatchers.IO) {
                 BitmapFactory.decodeFile(it.maskedFile.path)?.asImageBitmap()
@@ -107,6 +113,9 @@ fun ViewerScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showMemo = true }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
+                    }
                     IconButton(onClick = {
                         if (revealed) revealed = false else requestReveal()
                     }) {
@@ -155,7 +164,36 @@ fun ViewerScreen(
             } else {
                 CircularProgressIndicator()
             }
+
+            // Caption/category overlay so you can tell what the photo is.
+            item?.let { i ->
+                if (i.caption.isNotBlank() || i.category != com.privacycamera.data.PhotoCategories.UNCLASSIFIED) {
+                    Text(
+                        text = listOf(i.category, i.caption).filter { it.isNotBlank() }.joinToString("｜"),
+                        color = androidx.compose.ui.graphics.Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(androidx.compose.ui.graphics.Color(0x99000000))
+                            .padding(12.dp)
+                    )
+                }
+            }
         }
+    }
+
+    if (showMemo && item != null) {
+        MemoDialog(
+            initialCaption = item.caption,
+            initialCategory = item.category,
+            title = "メモを編集",
+            onDismiss = { showMemo = false },
+            onSave = { caption, category ->
+                viewModel.updateMeta(item.id, caption, category)
+                showMemo = false
+            }
+        )
     }
 }
 

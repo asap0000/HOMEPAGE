@@ -21,6 +21,10 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val _photos = MutableStateFlow<List<PhotoItem>>(emptyList())
     val photos: StateFlow<List<PhotoItem>> = _photos.asStateFlow()
 
+    /** Currently selected category filter (null = show all). */
+    private val _selectedCategory = MutableStateFlow<String?>(null)
+    val selectedCategory: StateFlow<String?> = _selectedCategory.asStateFlow()
+
     init {
         refresh()
     }
@@ -31,18 +35,30 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setCategoryFilter(category: String?) {
+        _selectedCategory.value = category
+    }
+
     /**
      * Saves a captured JPEG on a background thread (applying [rotationDegrees] so the
-     * stored image is upright), then refreshes the gallery.
+     * stored image is upright), refreshes the gallery, then reports the new photo id so
+     * the UI can prompt for a memo.
      */
-    fun onCaptured(jpegBytes: ByteArray, rotationDegrees: Int, onDone: () -> Unit = {}) {
+    fun onCaptured(jpegBytes: ByteArray, rotationDegrees: Int, onSaved: (String) -> Unit = {}) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val item = withContext(Dispatchers.IO) {
                 val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
                 store.save(upright)
             }
             refresh()
-            onDone()
+            onSaved(item.id)
+        }
+    }
+
+    fun updateMeta(id: String, caption: String, category: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.updateMeta(id, caption, category) }
+            refresh()
         }
     }
 

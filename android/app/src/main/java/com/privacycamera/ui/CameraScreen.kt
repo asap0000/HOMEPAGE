@@ -105,6 +105,8 @@ private fun CameraContent(
             .build()
     }
     var isSaving by remember { mutableStateOf(false) }
+    // Id of the just-captured photo awaiting an optional memo.
+    var pendingMemoId by remember { mutableStateOf<String?>(null) }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         val cameraProvider = context.awaitCameraProvider()
@@ -155,7 +157,10 @@ private fun CameraContent(
                             val rotation = image.imageInfo.rotationDegrees
                             val bytes = image.toJpegBytes()
                             image.close()
-                            viewModel.onCaptured(bytes, rotation) { isSaving = false }
+                            viewModel.onCaptured(bytes, rotation) { id ->
+                                isSaving = false
+                                pendingMemoId = id
+                            }
                         }
 
                         override fun onError(exception: ImageCaptureException) {
@@ -181,6 +186,19 @@ private fun CameraContent(
                 )
             }
         }
+    }
+
+    pendingMemoId?.let { id ->
+        MemoDialog(
+            initialCaption = "",
+            initialCategory = com.privacycamera.data.PhotoCategories.UNCLASSIFIED,
+            title = "メモを追加",
+            onDismiss = { pendingMemoId = null },
+            onSave = { caption, category ->
+                viewModel.updateMeta(id, caption, category)
+                pendingMemoId = null
+            }
+        )
     }
 }
 
