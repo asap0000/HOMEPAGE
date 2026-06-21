@@ -11,6 +11,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.privacycamera.ui.AppLockGate
 import com.privacycamera.ui.CameraScreen
 import com.privacycamera.ui.GalleryScreen
 import com.privacycamera.ui.ViewerScreen
@@ -31,7 +32,9 @@ class MainActivity : FragmentActivity() {
         setContent {
             PrivacyCameraTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppNavHost()
+                    AppLockGate(activity = this) {
+                        AppNavHost()
+                    }
                 }
             }
         }
