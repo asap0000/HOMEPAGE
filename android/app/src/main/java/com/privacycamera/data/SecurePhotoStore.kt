@@ -102,6 +102,21 @@ class SecurePhotoStore(private val context: Context) {
         writeMeta(id, caption, category, createdAt)
     }
 
+    /**
+     * Replaces the original of an existing photo with [jpegBytes] (e.g. after editing):
+     * re-encrypts the original and regenerates the masked preview. Metadata is kept.
+     */
+    fun replaceOriginal(id: String, jpegBytes: ByteArray) {
+        File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
+        val src = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+        val masked = MaskingEngine.mask(src)
+        File(maskedDir, "$id.jpg").outputStream().use { out ->
+            masked.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        }
+        src.recycle()
+        masked.recycle()
+    }
+
     /** Decrypts and decodes the original (unmasked) image. App-only reveal. */
     fun decryptOriginal(id: String): Bitmap? {
         val enc = File(originalsDir, "$id.enc")
