@@ -173,10 +173,9 @@ fun ViewerScreen(
         ) {
             val shown = if (revealed) originalBitmap else maskedBitmap
             if (shown != null) {
-                Image(
+                ZoomableImage(
                     bitmap = shown,
                     contentDescription = if (revealed) "正規の内容" else "マスク済み",
-                    contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
