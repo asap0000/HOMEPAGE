@@ -14,12 +14,14 @@ object AccessActions {
     const val REVEAL = "REVEAL"   // original decrypted & shown
     const val EXPORT = "EXPORT"   // masked copy exported to gallery
     const val DELETE = "DELETE"   // photo deleted
+    const val EDIT = "EDIT"       // original edited (brightness/contrast/crop) & re-saved
 
     fun label(code: String): String = when (code) {
         OPEN -> "閲覧（マスク）"
         REVEAL -> "正規表示（復号）"
         EXPORT -> "マスク版を書き出し"
         DELETE -> "削除"
+        EDIT -> "編集"
         else -> code
     }
 }

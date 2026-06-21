@@ -166,7 +166,11 @@ fun GalleryScreen(
 
 @Composable
 private fun PhotoCard(item: PhotoItem, onClick: () -> Unit) {
-    val thumb by produceState<ImageBitmap?>(initialValue = null, item.maskedFile.path) {
+    val thumb by produceState<ImageBitmap?>(
+        initialValue = null,
+        item.maskedFile.path,
+        item.maskedFile.lastModified()
+    ) {
         value = withContext(Dispatchers.IO) { decodeSampled(item.maskedFile, 300) }
     }
     Column(

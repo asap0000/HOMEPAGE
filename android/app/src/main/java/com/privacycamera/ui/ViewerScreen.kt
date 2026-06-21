@@ -15,6 +15,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -56,6 +57,7 @@ fun ViewerScreen(
     photoId: String,
     onBack: () -> Unit,
     onDeleted: () -> Unit,
+    onEdit: (String) -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -129,6 +131,12 @@ fun ViewerScreen(
                 actions = {
                     IconButton(onClick = { showMemo = true }) {
                         Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
+                    }
+                    // Image editing requires the original, so only after reveal.
+                    if (revealed) {
+                        IconButton(onClick = { onEdit(photoId) }) {
+                            Icon(Icons.Filled.Tune, contentDescription = "画像を編集")
+                        }
                     }
                     IconButton(onClick = {
                         if (revealed) revealed = false else requestReveal()

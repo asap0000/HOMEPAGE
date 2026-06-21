@@ -89,6 +89,15 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun revealOriginal(id: String): Bitmap? =
         withContext(Dispatchers.IO) { store.decryptOriginal(id) }
 
+    /** Overwrites the original with edited [jpegBytes], then refreshes the gallery. */
+    fun replaceOriginal(id: String, jpegBytes: ByteArray, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.replaceOriginal(id, jpegBytes) }
+            refresh()
+            onDone()
+        }
+    }
+
     fun delete(id: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.delete(id) }
