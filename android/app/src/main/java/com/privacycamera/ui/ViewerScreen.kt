@@ -26,6 +26,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.privacycamera.auth.BiometricGate
+import com.privacycamera.data.AccessActions
 import com.privacycamera.viewmodel.PhotoViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -81,15 +83,24 @@ fun ViewerScreen(
         }
     }
 
+    // Record that this photo was opened (masked view).
+    LaunchedEffect(photoId) {
+        viewModel.logAccess(photoId, AccessActions.OPEN, item?.caption.orEmpty())
+    }
+
     fun requestReveal() {
         val act = activity
         if (act == null) {
             Toast.makeText(context, "認証を開始できませんでした", Toast.LENGTH_SHORT).show()
             return
         }
+        val cap = item?.caption.orEmpty()
         BiometricGate.authenticate(act) { result ->
             when (result) {
-                is BiometricGate.Result.Success -> revealed = true
+                is BiometricGate.Result.Success -> {
+                    revealed = true
+                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap)
+                }
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
                 is BiometricGate.Result.NotConfigured -> {
@@ -100,6 +111,7 @@ fun ViewerScreen(
                         Toast.LENGTH_LONG
                     ).show()
                     revealed = true
+                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap)
                 }
             }
         }
@@ -130,6 +142,9 @@ fun ViewerScreen(
                         val target = item ?: return@IconButton
                         scope.launch {
                             val ok = viewModel.exportMasked(target)
+                            if (ok) {
+                                viewModel.logAccess(target.id, AccessActions.EXPORT, target.caption)
+                            }
                             Toast.makeText(
                                 context,
                                 if (ok) "マスク版をギャラリーに保存しました" else "保存できませんでした",
@@ -140,6 +155,7 @@ fun ViewerScreen(
                         Icon(Icons.Filled.Save, contentDescription = "マスク版を書き出し")
                     }
                     IconButton(onClick = {
+                        viewModel.logAccess(photoId, AccessActions.DELETE, item?.caption.orEmpty())
                         viewModel.delete(photoId)
                         onDeleted()
                     }) {

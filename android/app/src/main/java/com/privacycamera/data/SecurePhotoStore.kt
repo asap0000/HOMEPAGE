@@ -38,6 +38,7 @@ class SecurePhotoStore(private val context: Context) {
     private val maskedDir = File(baseDir, "masked").apply { mkdirs() }
     private val metaDir = File(baseDir, "meta").apply { mkdirs() }
     private val categoriesFile = File(baseDir, "categories.json")
+    private val accessLogFile = File(baseDir, "access_log.json")
 
     init {
         // Defence in depth: even though internal storage is never media-scanned,
@@ -167,6 +168,50 @@ class SecurePhotoStore(private val context: Context) {
         categoriesFile.writeText(arr.toString())
     }
 
+    /** Appends an access-log entry (kept in the secure area, never leaves the device). */
+    fun logAccess(photoId: String, action: String, caption: String) {
+        val arr = try {
+            if (accessLogFile.exists()) JSONArray(accessLogFile.readText()) else JSONArray()
+        } catch (e: Exception) {
+            JSONArray()
+        }
+        arr.put(
+            JSONObject()
+                .put("t", System.currentTimeMillis())
+                .put("a", action)
+                .put("id", photoId)
+                .put("c", caption)
+        )
+        // Keep only the most recent MAX_LOG_ENTRIES.
+        val start = maxOf(0, arr.length() - MAX_LOG_ENTRIES)
+        val trimmed = JSONArray()
+        for (i in start until arr.length()) trimmed.put(arr.get(i))
+        accessLogFile.writeText(trimmed.toString())
+    }
+
+    /** Loads the access log, newest first. */
+    fun loadAccessLog(): List<AccessEntry> {
+        if (!accessLogFile.exists()) return emptyList()
+        return try {
+            val arr = JSONArray(accessLogFile.readText())
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                AccessEntry(
+                    timestamp = o.optLong("t"),
+                    action = o.optString("a"),
+                    photoId = o.optString("id"),
+                    caption = o.optString("c")
+                )
+            }.sortedByDescending { it.timestamp }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun clearAccessLog() {
+        accessLogFile.delete()
+    }
+
     private fun readMeta(id: String): JSONObject? {
         val f = File(metaDir, "$id.json")
         if (!f.exists()) return null
@@ -187,6 +232,8 @@ class SecurePhotoStore(private val context: Context) {
     }
 
     companion object {
+        private const val MAX_LOG_ENTRIES = 1000
+
         /** Rotates the given JPEG bytes by [rotationDegrees] and re-encodes as JPEG. */
         fun rotateJpeg(jpegBytes: ByteArray, rotationDegrees: Int): ByteArray {
             if (rotationDegrees == 0) return jpegBytes

@@ -11,6 +11,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.privacycamera.ui.AccessLogScreen
 import com.privacycamera.ui.AppLockGate
 import com.privacycamera.ui.CameraScreen
 import com.privacycamera.ui.GalleryScreen
@@ -45,6 +46,7 @@ private object Routes {
     const val CAMERA = "camera"
     const val GALLERY = "gallery"
     const val VIEWER = "viewer/{id}"
+    const val LOG = "log"
     fun viewer(id: String) = "viewer/$id"
 }
 
@@ -65,6 +67,13 @@ private fun AppNavHost() {
             GalleryScreen(
                 onBack = { navController.popBackStack() },
                 onOpenPhoto = { id -> navController.navigate(Routes.viewer(id)) },
+                onOpenLog = { navController.navigate(Routes.LOG) },
+                viewModel = viewModel
+            )
+        }
+        composable(Routes.LOG) {
+            AccessLogScreen(
+                onBack = { navController.popBackStack() },
                 viewModel = viewModel
             )
         }

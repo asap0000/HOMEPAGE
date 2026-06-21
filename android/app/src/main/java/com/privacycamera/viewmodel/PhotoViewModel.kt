@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.privacycamera.PrivacyCameraApplication
+import com.privacycamera.data.AccessEntry
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.data.SecurePhotoStore
@@ -97,4 +98,28 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun exportMasked(item: PhotoItem): Boolean =
         withContext(Dispatchers.IO) { store.exportMaskedToGallery(item) }
+
+    // ---- Access log ----
+
+    private val _accessLog = MutableStateFlow<List<AccessEntry>>(emptyList())
+    val accessLog: StateFlow<List<AccessEntry>> = _accessLog.asStateFlow()
+
+    fun logAccess(photoId: String, action: String, caption: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.logAccess(photoId, action, caption) }
+        }
+    }
+
+    fun refreshAccessLog() {
+        viewModelScope.launch {
+            _accessLog.value = withContext(Dispatchers.IO) { store.loadAccessLog() }
+        }
+    }
+
+    fun clearAccessLog() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.clearAccessLog() }
+            refreshAccessLog()
+        }
+    }
 }

@@ -1,5 +1,6 @@
 package com.privacycamera.ui
 
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -16,12 +17,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -29,21 +34,23 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.privacycamera.auth.BiometricGate
+import kotlinx.coroutines.delay
 
 private enum class LockState { LOCKED, AUTHENTICATING, UNLOCKED }
+
+/** Auto-lock after this much inactivity (no touch). Adjust to taste. */
+private const val AUTO_LOCK_MS = 120_000L
 
 /**
  * Wraps the whole app behind device authentication.
  *
- * The app starts LOCKED and prompts on launch. It re-locks whenever it is sent to
- * the background (ON_STOP) and re-prompts on return (ON_START). The AUTHENTICATING
- * state is what keeps the device-credential fallback from re-locking itself: while a
- * system credential screen is up, the activity briefly stops, but we only re-lock
- * from the UNLOCKED state, so that transient stop is ignored.
+ * Locks: on launch, when sent to the background (ON_STOP), and after
+ * [AUTO_LOCK_MS] of no touch interaction while in the foreground.
  */
 @Composable
 fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     var lockState by remember { mutableStateOf(LockState.LOCKED) }
+    var lastInteraction by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
     fun promptAuth() {
         if (lockState == LockState.AUTHENTICATING) return
@@ -51,10 +58,11 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         BiometricGate.authenticate(activity) { result ->
             lockState = when (result) {
                 is BiometricGate.Result.Success -> LockState.UNLOCKED
-                // No biometric and no screen lock configured: nothing to verify
-                // against, so don't trap the user out of their own app.
                 is BiometricGate.Result.NotConfigured -> LockState.UNLOCKED
                 is BiometricGate.Result.Failed -> LockState.LOCKED
+            }
+            if (lockState == LockState.UNLOCKED) {
+                lastInteraction = SystemClock.elapsedRealtime()
             }
         }
     }
@@ -74,8 +82,36 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Inactivity watchdog: runs only while unlocked.
+    LaunchedEffect(lockState) {
+        if (lockState == LockState.UNLOCKED) {
+            lastInteraction = SystemClock.elapsedRealtime()
+            while (true) {
+                delay(1_000)
+                if (SystemClock.elapsedRealtime() - lastInteraction >= AUTO_LOCK_MS) {
+                    lockState = LockState.LOCKED
+                    break
+                }
+            }
+        }
+    }
+
     if (lockState == LockState.UNLOCKED) {
-        content()
+        // Observe every touch (Initial pass, without consuming) to reset the timer.
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            lastInteraction = SystemClock.elapsedRealtime()
+                        }
+                    }
+                }
+        ) {
+            content()
+        }
     } else {
         LockScreen(
             authenticating = lockState == LockState.AUTHENTICATING,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -60,6 +61,7 @@ private const val ALL_FILTER = "すべて"
 fun GalleryScreen(
     onBack: () -> Unit,
     onOpenPhoto: (String) -> Unit,
+    onOpenLog: () -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val photos by viewModel.photos.collectAsState()
@@ -123,6 +125,9 @@ fun GalleryScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = onOpenLog) {
+                            Icon(Icons.Filled.History, contentDescription = "アクセスログ")
+                        }
                         IconButton(onClick = onBack) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
