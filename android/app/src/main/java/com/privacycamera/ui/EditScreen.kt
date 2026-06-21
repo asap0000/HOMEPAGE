@@ -176,7 +176,7 @@ private fun ImageEditor(
                                         Offset(offX + cropR * dispW, offY + cropB * dispH)
                                     )
                                     activeCorner = corners.indexOfFirst {
-                                        (it - pos).getDistance() < 64f
+                                        (it - pos).getDistance() < 90f
                                     }
                                 },
                                 onDragEnd = { activeCorner = -1 },
@@ -207,16 +207,25 @@ private fun ImageEditor(
                     drawRect(dim, topLeft = Offset(0f, by), size = Size(boxW, boxH - by))
                     drawRect(dim, topLeft = Offset(0f, ty), size = Size(lx, by - ty))
                     drawRect(dim, topLeft = Offset(rx, ty), size = Size(boxW - rx, by - ty))
-                    // Crop border + corner handles.
+                    // Crop border.
                     drawRect(
                         Color.White,
                         topLeft = Offset(lx, ty),
                         size = Size(rx - lx, by - ty),
                         style = Stroke(width = 3f)
                     )
+                    // Corner handles, nudged inward so they're never clipped at full frame.
+                    val r = 20f
                     listOf(
                         Offset(lx, ty), Offset(rx, ty), Offset(lx, by), Offset(rx, by)
-                    ).forEach { drawCircle(Color.White, radius = 14f, center = it) }
+                    ).forEach { c ->
+                        val hc = Offset(
+                            c.x.coerceIn(r, boxW - r),
+                            c.y.coerceIn(r, boxH - r)
+                        )
+                        drawCircle(Color(0xCC000000), radius = r + 3f, center = hc)
+                        drawCircle(Color.White, radius = r, center = hc)
+                    }
                 }
             }
 
