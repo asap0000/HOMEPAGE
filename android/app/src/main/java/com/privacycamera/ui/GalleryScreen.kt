@@ -64,6 +64,7 @@ fun GalleryScreen(
 ) {
     val photos by viewModel.photos.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
+    val categories by viewModel.categories.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
@@ -96,8 +97,8 @@ fun GalleryScreen(
                     },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
-                // Show every selectable category, with how many photos it holds.
-                (PhotoCategories.SELECTABLE).forEach { category ->
+                // Show every category (built-in + user-added), with photo counts.
+                categories.forEach { category ->
                     val count = categoryCounts[category] ?: 0
                     NavigationDrawerItem(
                         label = { Text("$category ($count)") },

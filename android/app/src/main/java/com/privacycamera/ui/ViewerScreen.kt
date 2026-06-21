@@ -66,6 +66,7 @@ fun ViewerScreen(
 
     // Derive from the live list so caption/category edits reflect immediately.
     val photos by viewModel.photos.collectAsState()
+    val categories by viewModel.categories.collectAsState()
     val item = photos.firstOrNull { it.id == photoId }
 
     // Only decrypt the original into memory AFTER authentication succeeds.
@@ -188,6 +189,8 @@ fun ViewerScreen(
         MemoDialog(
             initialCaption = item.caption,
             initialCategory = item.category,
+            categories = categories,
+            onAddCategory = { viewModel.addCategory(it) },
             title = "メモを編集",
             onDismiss = { showMemo = false },
             onSave = { caption, category ->

@@ -8,6 +8,7 @@ import android.graphics.Matrix
 import android.os.Environment
 import android.provider.MediaStore
 import com.privacycamera.crypto.CryptoManager
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -36,6 +37,7 @@ class SecurePhotoStore(private val context: Context) {
     private val originalsDir = File(baseDir, "originals").apply { mkdirs() }
     private val maskedDir = File(baseDir, "masked").apply { mkdirs() }
     private val metaDir = File(baseDir, "meta").apply { mkdirs() }
+    private val categoriesFile = File(baseDir, "categories.json")
 
     init {
         // Defence in depth: even though internal storage is never media-scanned,
@@ -140,6 +142,29 @@ class SecurePhotoStore(private val context: Context) {
             resolver.delete(uri, null, null)
             false
         }
+    }
+
+    /** User-defined categories (persisted across sessions). */
+    fun loadCustomCategories(): List<String> {
+        if (!categoriesFile.exists()) return emptyList()
+        return try {
+            val arr = JSONArray(categoriesFile.readText())
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Adds a new custom category if it is non-blank and not already known. */
+    fun addCustomCategory(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || PhotoCategories.isBuiltIn(trimmed)) return
+        val current = loadCustomCategories().toMutableList()
+        if (trimmed in current) return
+        current.add(trimmed)
+        val arr = JSONArray()
+        current.forEach { arr.put(it) }
+        categoriesFile.writeText(arr.toString())
     }
 
     private fun readMeta(id: String): JSONObject? {

@@ -28,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -98,6 +99,7 @@ private fun CameraContent(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val categories by viewModel.categories.collectAsState()
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
         ImageCapture.Builder()
@@ -192,6 +194,8 @@ private fun CameraContent(
         MemoDialog(
             initialCaption = "",
             initialCategory = com.privacycamera.data.PhotoCategories.UNCLASSIFIED,
+            categories = categories,
+            onAddCategory = { viewModel.addCategory(it) },
             title = "メモを追加",
             onDismiss = { pendingMemoId = null },
             onSave = { caption, category ->

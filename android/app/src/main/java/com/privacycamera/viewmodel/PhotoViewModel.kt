@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.privacycamera.PrivacyCameraApplication
+import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.data.SecurePhotoStore
 import kotlinx.coroutines.Dispatchers
@@ -25,8 +26,30 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val _selectedCategory = MutableStateFlow<String?>(null)
     val selectedCategory: StateFlow<String?> = _selectedCategory.asStateFlow()
 
+    /** All selectable categories: built-in + user-defined + 未分類 (last). */
+    private val _categories = MutableStateFlow(
+        PhotoCategories.PREDEFINED + PhotoCategories.UNCLASSIFIED
+    )
+    val categories: StateFlow<List<String>> = _categories.asStateFlow()
+
     init {
         refresh()
+        reloadCategories()
+    }
+
+    private fun reloadCategories() {
+        viewModelScope.launch {
+            val custom = withContext(Dispatchers.IO) { store.loadCustomCategories() }
+            _categories.value =
+                PhotoCategories.PREDEFINED + custom + PhotoCategories.UNCLASSIFIED
+        }
+    }
+
+    fun addCategory(name: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.addCustomCategory(name) }
+            reloadCategories()
+        }
     }
 
     fun refresh() {
