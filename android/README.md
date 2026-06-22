@@ -60,22 +60,41 @@ cd android
 # 1) SDK の場所を local.properties に設定（Android Studio で開けば自動）
 echo "sdk.dir=/path/to/Android/sdk" > local.properties
 
-# 2) デバッグ APK をビルド
+# 2) デバッグ APK をビルド（Lite / Pro 両フレーバーが生成される）
 ./gradlew assembleDebug
 
 # 3) 端末へインストール（USB デバッグ有効化済みの実機 / エミュレータ）
-./gradlew installDebug
+#    フレーバーごとにタスクが分かれます。
+./gradlew installLiteDebug   # 無料版
+./gradlew installProDebug    # 有料版
 ```
 
-Android Studio で `android/` フォルダを開けば、そのままビルド・実行できます。
+Android Studio で `android/` フォルダを開けば、`Build Variants` パネルで
+`liteDebug` / `proDebug` を切り替えてビルド・実行できます。
+
+### 製品フレーバー（Lite / Pro）
+1 つのコードベースから 2 つの製品を出し分けます。
+
+| | Lite（無料） | Pro（有料・買い切り） |
+|---|---|---|
+| applicationId | `com.privacycamera.lite` | `com.privacycamera` |
+| 保存 | 上限あり（入れ替え運用） | 無制限 |
+| 取り込み | — | 暗号化バックアップを取り込み |
+| PII マスキング | なし | あり（主役機能） |
+| 暗号化書き出し | あり（Pro への一方通行） | あり |
+
+機能の出し分けは `BuildConfig.IS_PRO`（`com.privacycamera.Tier`）を唯一の
+判定点として行います。Lite は別 applicationId なので Pro と同一端末に併存
+インストール可能です。
 
 ---
 
 ## リリース版の配布（GitHub Release）
 署名済み APK を Release として公開できます。
 
-- **タグで自動**: `v1.0` のようなタグを push すると、`release.yml` が署名済み
-  `PrivacyCamera-v1.0.apk` を添付した Release を自動作成します。
+- **タグで自動**: `v1.0` のようなタグを push すると、`release.yml` が署名済みの
+  `PrivacyCamera-Lite-v1.0.apk` と `PrivacyCamera-Pro-v1.0.apk` を添付した
+  Release を自動作成します。
   ```bash
   git tag v1.0 && git push origin v1.0
   ```

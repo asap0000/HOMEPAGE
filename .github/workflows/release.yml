@@ -66,11 +66,13 @@ jobs:
       - name: Build signed release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Stage APK with version name
+      - name: Stage APKs with version name
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          cp app/build/outputs/apk/release/app-release.apk \
-             "$GITHUB_WORKSPACE/PrivacyCamera-${TAG}.apk"
+          cp app/build/outputs/apk/lite/release/app-lite-release.apk \
+             "$GITHUB_WORKSPACE/PrivacyCamera-Lite-${TAG}.apk"
+          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
+             "$GITHUB_WORKSPACE/PrivacyCamera-Pro-${TAG}.apk"
 
       - name: Create GitHub Release with the APK
         uses: softprops/action-gh-release@v2

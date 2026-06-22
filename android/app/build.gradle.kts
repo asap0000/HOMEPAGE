@@ -51,6 +51,29 @@ android {
         }
     }
 
+    // Two product tiers shipped from one codebase:
+    //   lite -> free; capped local storage, encrypted one-way export, no masking
+    //   pro  -> paid; unlimited storage, cumulative import, PII masking, advanced edit
+    // The boolean BuildConfig.IS_PRO is the single source of truth for feature gating
+    // (see com.privacycamera.Tier). Lite ships under a distinct applicationId so it can
+    // be installed alongside Pro; Pro keeps the original id to preserve the upgrade path.
+    flavorDimensions += "tier"
+    productFlavors {
+        create("lite") {
+            dimension = "tier"
+            applicationIdSuffix = ".lite"
+            versionNameSuffix = "-lite"
+            buildConfigField("boolean", "IS_PRO", "false")
+            resValue("string", "app_name", "プライバシーカメラ Lite")
+        }
+        create("pro") {
+            dimension = "tier"
+            versionNameSuffix = "-pro"
+            buildConfigField("boolean", "IS_PRO", "true")
+            resValue("string", "app_name", "プライバシーカメラ Pro")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -62,6 +85,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
