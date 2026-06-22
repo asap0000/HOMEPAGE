@@ -13,9 +13,19 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 
-/** A single stored photo: the masked preview plus its user-added metadata. */
+/**
+ * A single stored photo: the masked preview plus its user-added metadata.
+ *
+ * [id] is the on-device storage key (also the file name) and may differ between
+ * devices/installs. [uuid] is a stable, install-independent identity minted once at
+ * capture time; it travels inside encrypted exports so that imports can de-duplicate
+ * and (later) accumulate batches across multiple backups without resurrecting or
+ * double-importing the same photo. Always key cross-app/cross-backup logic on [uuid],
+ * never on [id].
+ */
 data class PhotoItem(
     val id: String,
+    val uuid: String,
     val maskedFile: File,
     val createdAt: Long,
     val caption: String = "",
@@ -56,6 +66,7 @@ class SecurePhotoStore(private val context: Context) {
         category: String = PhotoCategories.UNCLASSIFIED
     ): PhotoItem {
         val id = "IMG_${System.currentTimeMillis()}"
+        val uuid = java.util.UUID.randomUUID().toString()
         val createdAt = System.currentTimeMillis()
 
         // Encrypt and store the original.
@@ -71,9 +82,9 @@ class SecurePhotoStore(private val context: Context) {
         source.recycle()
         masked.recycle()
 
-        writeMeta(id, caption, category, createdAt)
+        writeMeta(id, uuid, caption, category, createdAt)
 
-        return PhotoItem(id, maskedFile, createdAt, caption, category)
+        return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
     }
 
     /** Lists stored photos, newest first, with metadata applied. */
@@ -82,24 +93,31 @@ class SecurePhotoStore(private val context: Context) {
             ?.map { f ->
                 val id = f.nameWithoutExtension
                 val meta = readMeta(id)
+                val createdAt =
+                    meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified()
+                val caption = meta?.optString("caption", "") ?: ""
+                val category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
+                    ?: PhotoCategories.UNCLASSIFIED
                 PhotoItem(
                     id = id,
+                    uuid = ensureUuid(id, meta, caption, category, createdAt),
                     maskedFile = f,
-                    createdAt = meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified(),
-                    caption = meta?.optString("caption", "") ?: "",
-                    category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
-                        ?: PhotoCategories.UNCLASSIFIED
+                    createdAt = createdAt,
+                    caption = caption,
+                    category = category
                 )
             }
             ?.sortedByDescending { it.createdAt }
             ?: emptyList()
     }
 
-    /** Updates the caption/category for a photo, preserving its original timestamp. */
+    /** Updates the caption/category for a photo, preserving its original timestamp and uuid. */
     fun updateMeta(id: String, caption: String, category: String) {
-        val createdAt = readMeta(id)?.optLong("createdAt", System.currentTimeMillis())
+        val meta = readMeta(id)
+        val createdAt = meta?.optLong("createdAt", System.currentTimeMillis())
             ?: System.currentTimeMillis()
-        writeMeta(id, caption, category, createdAt)
+        val uuid = ensureUuid(id, meta, caption, category, createdAt)
+        writeMeta(id, uuid, caption, category, createdAt)
     }
 
     /**
@@ -237,8 +255,34 @@ class SecurePhotoStore(private val context: Context) {
         }
     }
 
-    private fun writeMeta(id: String, caption: String, category: String, createdAt: Long) {
+    /**
+     * Returns the photo's stable [PhotoItem.uuid], minting and persisting one for legacy
+     * photos that pre-date uuid tracking. Once assigned, a photo's uuid never changes, so
+     * exports/imports can rely on it for de-duplication.
+     */
+    private fun ensureUuid(
+        id: String,
+        meta: JSONObject?,
+        caption: String,
+        category: String,
+        createdAt: Long
+    ): String {
+        val existing = meta?.optString("uuid", "")?.takeIf { it.isNotEmpty() }
+        if (existing != null) return existing
+        val minted = java.util.UUID.randomUUID().toString()
+        writeMeta(id, minted, caption, category, createdAt)
+        return minted
+    }
+
+    private fun writeMeta(
+        id: String,
+        uuid: String,
+        caption: String,
+        category: String,
+        createdAt: Long
+    ) {
         val json = JSONObject().apply {
+            put("uuid", uuid)
             put("caption", caption)
             put("category", category)
             put("createdAt", createdAt)
