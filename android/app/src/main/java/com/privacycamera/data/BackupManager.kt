@@ -3,12 +3,15 @@ package com.privacycamera.data
 import com.privacycamera.crypto.BackupCrypto
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.security.SecureRandom
 import javax.crypto.CipherOutputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 /**
@@ -96,6 +99,95 @@ object BackupManager {
                 dos.writeInt(bytes.size)
                 dos.write(bytes)
             }
+        }
+    }
+
+    /** Outcome of importing a Lite-migration archive. */
+    data class MigrationImportResult(
+        val imported: Int,
+        val skippedDuplicate: Int,
+        val skippedOverCap: Int
+    )
+
+    private data class Incoming(
+        val uuid: String,
+        val createdAt: Long,
+        val caption: String,
+        val category: String
+    )
+
+    /**
+     * Imports a plaintext migration ZIP (as produced by [exportPlainZip]) into [store],
+     * subject to the lifetime migration [cap]: photos whose uuid was already imported are
+     * skipped (de-dup), and once the cap is reached the rest are skipped as over-cap. The
+     * caller passes the tier cap (e.g. Tier.LITE_SAVE_LIMIT).
+     *
+     * Relies on the manifest preceding the image entries (which [exportPlainZip] guarantees).
+     */
+    fun importMigrationZip(
+        input: InputStream,
+        store: SecurePhotoStore,
+        cap: Int
+    ): MigrationImportResult {
+        val seen = store.loadImportedUuids().toMutableSet()
+        var slots = cap - seen.size
+        var imported = 0
+        var duplicate = 0
+        var overCap = 0
+        val newlyImported = mutableListOf<String>()
+        val metaByFile = HashMap<String, Incoming>()
+
+        ZipInputStream(BufferedInputStream(input)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val name = entry.name
+                val bytes = zis.readBytes()
+                if (name == MANIFEST_NAME) {
+                    parseManifest(bytes, metaByFile)
+                } else {
+                    val meta = metaByFile[name]
+                    if (meta != null) {
+                        when {
+                            meta.uuid in seen -> duplicate++
+                            slots <= 0 -> overCap++
+                            else -> {
+                                try {
+                                    store.importOriginal(
+                                        bytes, meta.uuid, meta.createdAt, meta.caption, meta.category
+                                    )
+                                    seen.add(meta.uuid)
+                                    newlyImported.add(meta.uuid)
+                                    imported++
+                                    slots--
+                                } catch (e: Exception) {
+                                    // Skip an undecodable / corrupt entry without aborting.
+                                }
+                            }
+                        }
+                    }
+                }
+                zis.closeEntry()
+                entry = zis.nextEntry
+            }
+        }
+
+        store.addImportedUuids(newlyImported)
+        return MigrationImportResult(imported, duplicate, overCap)
+    }
+
+    private fun parseManifest(bytes: ByteArray, into: HashMap<String, Incoming>) {
+        val root = JSONObject(String(bytes, Charsets.UTF_8))
+        val photos = root.optJSONArray("photos") ?: return
+        for (i in 0 until photos.length()) {
+            val o = photos.getJSONObject(i)
+            val uuid = o.optString("uuid").ifEmpty { continue }
+            val file = o.optString("file").ifEmpty { "$uuid.jpg" }
+            into[file] = Incoming(
+                uuid = uuid,
+                createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+                caption = o.optString("caption", ""),
+                category = o.optString("category", PhotoCategories.UNCLASSIFIED)
+            )
         }
     }
 

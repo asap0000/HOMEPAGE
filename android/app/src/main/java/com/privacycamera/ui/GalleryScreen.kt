@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.privacycamera.Tier
+import com.privacycamera.data.BackupManager
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.viewmodel.PhotoViewModel
@@ -82,6 +83,7 @@ fun GalleryScreen(
     val photos by viewModel.photos.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val categories by viewModel.categories.collectAsState()
+    val importedCount by viewModel.importedMigrationCount.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -116,6 +118,25 @@ fun GalleryScreen(
                     if (ok) "移行用ファイルを書き出しました" else "書き出しに失敗しました",
                     Toast.LENGTH_LONG
                 ).show()
+            }
+        }
+    }
+    // Pro-only import: ① Lite-migration ZIP (capped, de-duplicated) ② general images.
+    val importMigrationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importMigration(uri) { result ->
+                Toast.makeText(context, migrationResultMessage(result), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    val importImagesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.importImages(uris) { n ->
+                Toast.makeText(context, "${n}枚を取り込みました", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -158,6 +179,31 @@ fun GalleryScreen(
                         onClick = {
                             viewModel.setCategoryFilter(category)
                             scope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+
+                // Pro-only import entrances.
+                if (Tier.isPro) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    NavigationDrawerItem(
+                        label = { Text("Lite移行を取り込む（$importedCount/${Tier.LITE_SAVE_LIMIT}）") },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            importMigrationLauncher.launch(
+                                arrayOf("application/zip", "application/octet-stream")
+                            )
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("画像を取り込む") },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            importImagesLauncher.launch(arrayOf("image/*"))
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
@@ -351,6 +397,17 @@ private fun ExportPassphraseDialog(
 }
 
 private const val MIN_PASSPHRASE_LENGTH = 6
+
+/** Human-readable summary of a Lite-migration import outcome. */
+private fun migrationResultMessage(result: BackupManager.MigrationImportResult?): String {
+    if (result == null) return "取り込みに失敗しました（ファイルをご確認ください）"
+    val parts = mutableListOf("取り込み ${result.imported} 枚")
+    if (result.skippedDuplicate > 0) parts.add("重複 ${result.skippedDuplicate} 枚")
+    if (result.skippedOverCap > 0) {
+        parts.add("上限超過 ${result.skippedOverCap} 枚（移行は累計 ${Tier.LITE_SAVE_LIMIT} 枚まで）")
+    }
+    return parts.joinToString(" / ")
+}
 
 @Composable
 private fun PhotoCard(item: PhotoItem, onClick: () -> Unit) {

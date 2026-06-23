@@ -49,6 +49,7 @@ class SecurePhotoStore(private val context: Context) {
     private val metaDir = File(baseDir, "meta").apply { mkdirs() }
     private val categoriesFile = File(baseDir, "categories.json")
     private val accessLogFile = File(baseDir, "access_log.json")
+    private val importedUuidsFile = File(baseDir, "migration_imported.json")
 
     init {
         // Defence in depth: even though internal storage is never media-scanned,
@@ -57,23 +58,49 @@ class SecurePhotoStore(private val context: Context) {
     }
 
     /**
-     * Persists a freshly captured JPEG: encrypts the original, writes a masked preview,
-     * and stores initial metadata. [jpegBytes] should already be upright.
+     * Persists a freshly captured JPEG: mints a new uuid, encrypts the original, writes a
+     * masked preview, and stores initial metadata. [jpegBytes] should already be upright.
      */
     fun save(
         jpegBytes: ByteArray,
         caption: String = "",
         category: String = PhotoCategories.UNCLASSIFIED
-    ): PhotoItem {
-        val id = "IMG_${System.currentTimeMillis()}"
-        val uuid = java.util.UUID.randomUUID().toString()
-        val createdAt = System.currentTimeMillis()
+    ): PhotoItem = persist(
+        jpegBytes,
+        uuid = java.util.UUID.randomUUID().toString(),
+        createdAt = System.currentTimeMillis(),
+        caption = caption,
+        category = category
+    )
 
-        // Encrypt and store the original.
+    /**
+     * Imports an image (from a Lite migration archive or a general image pick) under a
+     * given [uuid] and metadata. Same on-device protection as a capture: the bytes become
+     * the encrypted original and a masked preview is generated. Throws if the bytes are
+     * not a decodable image so the caller can skip it.
+     */
+    fun importOriginal(
+        jpegBytes: ByteArray,
+        uuid: String,
+        createdAt: Long,
+        caption: String,
+        category: String
+    ): PhotoItem = persist(jpegBytes, uuid, createdAt, caption, category)
+
+    private fun persist(
+        jpegBytes: ByteArray,
+        uuid: String,
+        createdAt: Long,
+        caption: String,
+        category: String
+    ): PhotoItem {
+        // Decode first so a non-image input fails before anything is written to disk.
+        val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+            ?: throw IllegalArgumentException("Not a decodable image")
+        val id = newId()
+
         File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
 
-        // Build and store the masked (mosaic) preview.
-        val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
         val masked = MaskingEngine.mask(source)
         val maskedFile = File(maskedDir, "$id.jpg")
         maskedFile.outputStream().use { out ->
@@ -85,6 +112,17 @@ class SecurePhotoStore(private val context: Context) {
         writeMeta(id, uuid, caption, category, createdAt)
 
         return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
+    }
+
+    /** Returns a storage id (file-name key) not already in use. */
+    private fun newId(): String {
+        var id = "IMG_${System.currentTimeMillis()}"
+        var n = 1
+        while (File(originalsDir, "$id.enc").exists() || File(maskedDir, "$id.jpg").exists()) {
+            id = "IMG_${System.currentTimeMillis()}_$n"
+            n++
+        }
+        return id
     }
 
     /** Lists stored photos, newest first, with metadata applied. */
@@ -186,6 +224,30 @@ class SecurePhotoStore(private val context: Context) {
             resolver.delete(uri, null, null)
             false
         }
+    }
+
+    /**
+     * UUIDs ever imported through the Lite-migration path. This is the basis for the
+     * lifetime import cap: the set only grows, so deleting an imported photo never frees a
+     * slot (which would otherwise allow a delete -> re-import loop past the cap).
+     */
+    fun loadImportedUuids(): Set<String> {
+        if (!importedUuidsFile.exists()) return emptySet()
+        return try {
+            val arr = JSONArray(importedUuidsFile.readText())
+            (0 until arr.length()).map { arr.getString(it) }.toSet()
+        } catch (e: Exception) {
+            emptySet()
+        }
+    }
+
+    /** Records [uuids] as imported-via-migration (union with the existing set). */
+    fun addImportedUuids(uuids: Collection<String>) {
+        if (uuids.isEmpty()) return
+        val merged = loadImportedUuids().toMutableSet().apply { addAll(uuids) }
+        val arr = JSONArray()
+        merged.forEach { arr.put(it) }
+        importedUuidsFile.writeText(arr.toString())
     }
 
     /** User-defined categories (persisted across sessions). */
