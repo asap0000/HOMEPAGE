@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.privacycamera.PrivacyCameraApplication
+import com.privacycamera.Tier
 import com.privacycamera.data.AccessEntry
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
@@ -64,11 +65,33 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Per-tier storage cap (null = unlimited). Surfaced so the UI can show a counter
+     * and warn before capture. See [com.privacycamera.Tier.saveLimit].
+     */
+    val saveLimit: Int? = Tier.saveLimit
+
+    /** True when the local store is full for this tier (always false when unlimited). */
+    fun isAtSaveLimit(): Boolean =
+        saveLimit?.let { _photos.value.size >= it } ?: false
+
+    /**
      * Saves a captured JPEG on a background thread (applying [rotationDegrees] so the
      * stored image is upright), refreshes the gallery, then reports the new photo id so
      * the UI can prompt for a memo.
+     *
+     * When the tier's storage cap is already reached the capture is discarded and
+     * [onLimitReached] is invoked instead — the user must delete to make room.
      */
-    fun onCaptured(jpegBytes: ByteArray, rotationDegrees: Int, onSaved: (String) -> Unit = {}) {
+    fun onCaptured(
+        jpegBytes: ByteArray,
+        rotationDegrees: Int,
+        onSaved: (String) -> Unit = {},
+        onLimitReached: () -> Unit = {}
+    ) {
+        if (isAtSaveLimit()) {
+            onLimitReached()
+            return
+        }
         viewModelScope.launch {
             val item = withContext(Dispatchers.IO) {
                 val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)

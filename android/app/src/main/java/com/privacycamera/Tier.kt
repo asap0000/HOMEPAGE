@@ -14,4 +14,14 @@ package com.privacycamera
 object Tier {
     val isPro: Boolean get() = BuildConfig.IS_PRO
     val isLite: Boolean get() = !BuildConfig.IS_PRO
+
+    /** Maximum photos Lite keeps on the device. Reached by deleting to make room. */
+    const val LITE_SAVE_LIMIT = 30
+
+    /**
+     * Number of photos this tier may store, or null when unlimited (Pro).
+     * Lite is intentionally capped to nudge upgrades; the cap is worked around by
+     * deleting/swapping photos (and ferrying batches out via encrypted export).
+     */
+    val saveLimit: Int? get() = if (isPro) null else LITE_SAVE_LIMIT
 }
