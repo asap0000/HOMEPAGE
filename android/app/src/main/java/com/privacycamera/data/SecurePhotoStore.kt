@@ -143,6 +143,16 @@ class SecurePhotoStore(private val context: Context) {
         return BitmapFactory.decodeByteArray(plain, 0, plain.size)
     }
 
+    /** True if the encrypted original for [id] is present on disk. */
+    fun hasOriginal(id: String): Boolean = File(originalsDir, "$id.enc").exists()
+
+    /** Decrypts the original (unmasked) JPEG bytes — used when building an encrypted backup. */
+    fun decryptOriginalBytes(id: String): ByteArray? {
+        val enc = File(originalsDir, "$id.enc")
+        if (!enc.exists()) return null
+        return CryptoManager.decrypt(enc.readBytes())
+    }
+
     fun delete(id: String) {
         File(originalsDir, "$id.enc").delete()
         File(maskedDir, "$id.jpg").delete()

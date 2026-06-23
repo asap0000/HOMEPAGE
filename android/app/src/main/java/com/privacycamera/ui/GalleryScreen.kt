@@ -1,6 +1,9 @@
 package com.privacycamera.ui
 
 import android.graphics.BitmapFactory
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -14,8 +17,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.DrawerValue
@@ -27,22 +32,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -53,6 +64,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val ALL_FILTER = "すべて"
 
@@ -69,6 +83,26 @@ fun GalleryScreen(
     val categories by viewModel.categories.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    var showExportDialog by remember { mutableStateOf(false) }
+    // Passphrase chosen in the dialog, held until the file picker returns its destination.
+    var pendingPassphrase by remember { mutableStateOf<String?>(null) }
+    val createBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val pass = pendingPassphrase
+        pendingPassphrase = null
+        if (uri != null && pass != null) {
+            viewModel.exportBackup(uri, pass.toCharArray()) { ok ->
+                Toast.makeText(
+                    context,
+                    if (ok) "暗号化バックアップを書き出しました" else "書き出しに失敗しました",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 
     val visiblePhotos = remember(photos, selectedCategory) {
         if (selectedCategory == null) photos
@@ -125,6 +159,14 @@ fun GalleryScreen(
                         }
                     },
                     actions = {
+                        if (photos.isNotEmpty()) {
+                            IconButton(onClick = { showExportDialog = true }) {
+                                Icon(
+                                    Icons.Filled.Backup,
+                                    contentDescription = "暗号化バックアップを書き出す"
+                                )
+                            }
+                        }
                         IconButton(onClick = onOpenLog) {
                             Icon(Icons.Filled.History, contentDescription = "アクセスログ")
                         }
@@ -162,7 +204,91 @@ fun GalleryScreen(
             }
         }
     }
+
+    if (showExportDialog) {
+        ExportPassphraseDialog(
+            photoCount = photos.size,
+            onDismiss = { showExportDialog = false },
+            onConfirm = { passphrase ->
+                showExportDialog = false
+                pendingPassphrase = passphrase
+                val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+                createBackupLauncher.launch("privacy-camera-backup-$stamp.pcbak")
+            }
+        )
+    }
 }
+
+/**
+ * Collects (and confirms) the passphrase used to encrypt an exported backup. The backup
+ * can only be opened with this passphrase, so it must be remembered — surfaced in the copy.
+ */
+@Composable
+private fun ExportPassphraseDialog(
+    photoCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var pass by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    val tooShort = pass.length < MIN_PASSPHRASE_LENGTH
+    val mismatch = confirm.isNotEmpty() && pass != confirm
+    val valid = !tooShort && pass == confirm
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("暗号化バックアップを書き出す") },
+        text = {
+            Column {
+                Text(
+                    "$photoCount 枚を1つの暗号化ファイルに書き出します。\n" +
+                        "このパスフレーズが復元（Pro版での取り込み）に必要です。" +
+                        "忘れると開けません。"
+                )
+                OutlinedTextField(
+                    value = pass,
+                    onValueChange = { pass = it },
+                    label = { Text("パスフレーズ（$MIN_PASSPHRASE_LENGTH 文字以上）") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = pass.isNotEmpty() && tooShort,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp)
+                )
+                OutlinedTextField(
+                    value = confirm,
+                    onValueChange = { confirm = it },
+                    label = { Text("パスフレーズ（確認）") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = mismatch,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+                if (mismatch) {
+                    Text(
+                        "パスフレーズが一致しません",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = { onConfirm(pass) }) {
+                Text("保存先を選ぶ")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("キャンセル") }
+        }
+    )
+}
+
+private const val MIN_PASSPHRASE_LENGTH = 6
 
 @Composable
 private fun PhotoCard(item: PhotoItem, onClick: () -> Unit) {
