@@ -9,6 +9,7 @@ import com.privacycamera.PrivacyCameraApplication
 import com.privacycamera.Tier
 import com.privacycamera.data.AccessEntry
 import com.privacycamera.data.BackupManager
+import com.privacycamera.data.MaskingEngine
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.data.SecurePhotoStore
@@ -126,6 +127,19 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun revealOriginal(id: String): Bitmap? =
         withContext(Dispatchers.IO) { store.decryptOriginal(id) }
+
+    /** Loads the saved (or default) mask spec for [id]. */
+    suspend fun loadMaskSpec(id: String): MaskingEngine.MaskSpec =
+        withContext(Dispatchers.IO) { store.loadMaskSpec(id) }
+
+    /** Pro mask editing: regenerates the masked preview from the original using [spec]. */
+    fun applyMask(id: String, spec: MaskingEngine.MaskSpec, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.applyMask(id, spec) }
+            refresh()
+            onDone()
+        }
+    }
 
     /** Overwrites the original with edited [jpegBytes], then refreshes the gallery. */
     fun replaceOriginal(id: String, jpegBytes: ByteArray, onDone: () -> Unit = {}) {

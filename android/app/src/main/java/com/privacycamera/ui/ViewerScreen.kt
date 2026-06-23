@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Save
@@ -58,6 +59,7 @@ fun ViewerScreen(
     onBack: () -> Unit,
     onDeleted: () -> Unit,
     onEdit: (String) -> Unit,
+    onMaskEdit: (String) -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -136,6 +138,12 @@ fun ViewerScreen(
                     if (revealed) {
                         IconButton(onClick = { onEdit(photoId) }) {
                             Icon(Icons.Filled.Tune, contentDescription = "画像を編集")
+                        }
+                        // Advanced masking is a Pro feature; it also needs the original.
+                        if (com.privacycamera.Tier.isPro) {
+                            IconButton(onClick = { onMaskEdit(photoId) }) {
+                                Icon(Icons.Filled.Brush, contentDescription = "マスクを編集")
+                            }
                         }
                     }
                     IconButton(onClick = {

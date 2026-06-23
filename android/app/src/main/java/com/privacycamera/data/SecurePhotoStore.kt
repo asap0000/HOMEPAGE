@@ -168,7 +168,9 @@ class SecurePhotoStore(private val context: Context) {
 
     /**
      * Replaces the original of an existing photo with [jpegBytes] (e.g. after editing):
-     * re-encrypts the original and regenerates the masked preview. Metadata is kept.
+     * re-encrypts the original and regenerates the masked preview. Because cropping etc.
+     * changes the geometry, any saved custom mask spec is dropped and the preview falls
+     * back to the safe whole-frame mosaic (over-masks rather than under-masks).
      */
     fun replaceOriginal(id: String, jpegBytes: ByteArray) {
         File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
@@ -179,6 +181,12 @@ class SecurePhotoStore(private val context: Context) {
         }
         src.recycle()
         masked.recycle()
+        readMeta(id)?.let { meta ->
+            if (meta.has("mask")) {
+                meta.remove("mask")
+                File(metaDir, "$id.json").writeText(meta.toString())
+            }
+        }
     }
 
     /** Decrypts and decodes the original (unmasked) image. App-only reveal. */
@@ -191,6 +199,31 @@ class SecurePhotoStore(private val context: Context) {
 
     /** True if the encrypted original for [id] is present on disk. */
     fun hasOriginal(id: String): Boolean = File(originalsDir, "$id.enc").exists()
+
+    /** The custom mask spec for [id], or the whole-frame default if none was saved. */
+    fun loadMaskSpec(id: String): MaskingEngine.MaskSpec {
+        val mask = readMeta(id)?.optJSONObject("mask") ?: return MaskingEngine.MaskSpec()
+        return MaskingEngine.specFromJson(mask)
+    }
+
+    /**
+     * Pro mask editing: regenerates the masked preview from the (untouched) encrypted
+     * original according to [spec] and persists the spec so it can be re-edited. Returns
+     * false if the original is unavailable.
+     */
+    fun applyMask(id: String, spec: MaskingEngine.MaskSpec): Boolean {
+        val original = decryptOriginal(id) ?: return false
+        val masked = MaskingEngine.render(original, spec)
+        File(maskedDir, "$id.jpg").outputStream().use { out ->
+            masked.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        }
+        original.recycle()
+        masked.recycle()
+        val meta = readMeta(id) ?: JSONObject()
+        meta.put("mask", MaskingEngine.specToJson(spec))
+        File(metaDir, "$id.json").writeText(meta.toString())
+        return true
+    }
 
     /** Decrypts the original (unmasked) JPEG bytes — used when building an encrypted backup. */
     fun decryptOriginalBytes(id: String): ByteArray? {
@@ -441,7 +474,9 @@ class SecurePhotoStore(private val context: Context) {
         category: String,
         createdAt: Long
     ) {
-        val json = JSONObject().apply {
+        // Start from any existing metadata so extra keys (e.g. a custom mask spec) survive
+        // a caption/category edit.
+        val json = (readMeta(id) ?: JSONObject()).apply {
             put("uuid", uuid)
             put("caption", caption)
             put("category", category)

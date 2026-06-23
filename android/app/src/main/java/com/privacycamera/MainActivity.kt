@@ -16,6 +16,7 @@ import com.privacycamera.ui.AppLockGate
 import com.privacycamera.ui.CameraScreen
 import com.privacycamera.ui.EditScreen
 import com.privacycamera.ui.GalleryScreen
+import com.privacycamera.ui.MaskEditScreen
 import com.privacycamera.ui.TrashScreen
 import com.privacycamera.ui.ViewerScreen
 import com.privacycamera.ui.theme.PrivacyCameraTheme
@@ -49,10 +50,12 @@ private object Routes {
     const val GALLERY = "gallery"
     const val VIEWER = "viewer/{id}"
     const val EDIT = "edit/{id}"
+    const val MASK = "mask/{id}"
     const val LOG = "log"
     const val TRASH = "trash"
     fun viewer(id: String) = "viewer/$id"
     fun edit(id: String) = "edit/$id"
+    fun mask(id: String) = "mask/$id"
 }
 
 @androidx.compose.runtime.Composable
@@ -96,6 +99,16 @@ private fun AppNavHost() {
                 onBack = { navController.popBackStack() },
                 onDeleted = { navController.popBackStack() },
                 onEdit = { navController.navigate(Routes.edit(id)) },
+                onMaskEdit = { navController.navigate(Routes.mask(id)) },
+                viewModel = viewModel
+            )
+        }
+        composable(Routes.MASK) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id").orEmpty()
+            MaskEditScreen(
+                photoId = id,
+                onSaved = { navController.popBackStack() },
+                onCancel = { navController.popBackStack() },
                 viewModel = viewModel
             )
         }
