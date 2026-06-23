@@ -1,6 +1,7 @@
 package com.privacycamera.ui
 
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -93,6 +94,8 @@ fun GalleryScreen(
     // Pro: passphrase-encrypted full backup. Lite: plaintext migration ZIP.
     var showExportDialog by remember { mutableStateOf(false) }
     var showMigrationDialog by remember { mutableStateOf(false) }
+    // Restore: a backup file is picked first, then its passphrase is collected.
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
     // Passphrase chosen in the dialog, held until the file picker returns its destination.
     var pendingPassphrase by remember { mutableStateOf<String?>(null) }
     val createBackupLauncher = rememberLauncherForActivityResult(
@@ -141,6 +144,11 @@ fun GalleryScreen(
                 Toast.makeText(context, "${n}枚を取り込みました", Toast.LENGTH_LONG).show()
             }
         }
+    }
+    val restorePickLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) pendingRestoreUri = uri
     }
 
     val visiblePhotos = remember(photos, selectedCategory) {
@@ -217,6 +225,17 @@ fun GalleryScreen(
                         onClick = {
                             scope.launch { drawerState.close() }
                             importImagesLauncher.launch(arrayOf("image/*"))
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("バックアップから復元") },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            restorePickLauncher.launch(
+                                arrayOf("application/octet-stream", "*/*")
+                            )
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
@@ -309,6 +328,69 @@ fun GalleryScreen(
             }
         )
     }
+
+    pendingRestoreUri?.let { uri ->
+        RestorePassphraseDialog(
+            onDismiss = { pendingRestoreUri = null },
+            onConfirm = { pass ->
+                pendingRestoreUri = null
+                viewModel.importBackup(uri, pass.toCharArray()) { outcome ->
+                    Toast.makeText(context, restoreResultMessage(outcome), Toast.LENGTH_LONG).show()
+                }
+            }
+        )
+    }
+}
+
+/** Collects the passphrase for an encrypted backup the user picked, then restores it. */
+@Composable
+private fun RestorePassphraseDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var pass by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("バックアップから復元") },
+        text = {
+            Column {
+                Text(
+                    "選択したバックアップのパスフレーズを入力してください。\n" +
+                        "すでに端末にある写真は重複として取り込まれません。"
+                )
+                OutlinedTextField(
+                    value = pass,
+                    onValueChange = { pass = it },
+                    label = { Text("パスフレーズ") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = pass.isNotEmpty(), onClick = { onConfirm(pass) }) {
+                Text("復元")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("キャンセル") }
+        }
+    )
+}
+
+/** Human-readable summary of an encrypted-backup restore outcome. */
+private fun restoreResultMessage(outcome: BackupManager.RestoreOutcome): String = when (outcome) {
+    is BackupManager.RestoreOutcome.Success -> {
+        val base = "復元 ${outcome.imported} 枚"
+        if (outcome.skipped > 0) "$base / 重複・スキップ ${outcome.skipped} 枚" else base
+    }
+    BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt ->
+        "復元できませんでした。パスフレーズが違うか、ファイルが壊れています。"
+    BackupManager.RestoreOutcome.NotABackup ->
+        "このファイルは暗号化バックアップではありません。"
 }
 
 /**

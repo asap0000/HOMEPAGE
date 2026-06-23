@@ -5,10 +5,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.SecureRandom
+import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -173,6 +175,106 @@ object BackupManager {
 
         store.addImportedUuids(newlyImported)
         return MigrationImportResult(imported, duplicate, overCap)
+    }
+
+    /** Outcome of restoring an encrypted backup. */
+    sealed class RestoreOutcome {
+        data class Success(val imported: Int, val skipped: Int) : RestoreOutcome()
+
+        /** Header was missing/unrecognized — the file is not one of our backups. */
+        object NotABackup : RestoreOutcome()
+
+        /** Wrong passphrase or a corrupt/tampered file (decryption produced garbage). */
+        object WrongPassphraseOrCorrupt : RestoreOutcome()
+    }
+
+    private const val MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+    private const val MAX_BLOB_BYTES = 256 * 1024 * 1024
+
+    /**
+     * Restores an encrypted backup (as produced by [export]) into [store], decrypting with
+     * [passphrase]. Photos whose uuid is already present ([existingUuids], which should
+     * include trashed photos so a restore doesn't resurrect something the user deleted) are
+     * skipped; the rest are re-encrypted into the local store with their metadata.
+     *
+     * The caller owns wiping [passphrase] afterwards.
+     */
+    fun importEncrypted(
+        input: InputStream,
+        store: SecurePhotoStore,
+        passphrase: CharArray,
+        existingUuids: Set<String>
+    ): RestoreOutcome {
+        val header = ByteArray(BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE + BackupCrypto.IV_SIZE)
+        if (!readFully(input, header)) return RestoreOutcome.NotABackup
+        if (!header.copyOfRange(0, BackupCrypto.MAGIC.size).contentEquals(BackupCrypto.MAGIC)) {
+            return RestoreOutcome.NotABackup
+        }
+        val salt = header.copyOfRange(BackupCrypto.MAGIC.size, BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE)
+        val iv = header.copyOfRange(BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE, header.size)
+
+        val key = BackupCrypto.deriveKey(passphrase, salt)
+        val cipher = BackupCrypto.newDecryptCipher(key, salt, iv)
+
+        var imported = 0
+        var skipped = 0
+        var manifestParsed = false
+        val newlyImported = HashSet<String>()
+        try {
+            DataInputStream(BufferedInputStream(CipherInputStream(input, cipher))).use { din ->
+                val manifestLen = din.readInt()
+                if (manifestLen !in 1..MAX_MANIFEST_BYTES) return RestoreOutcome.WrongPassphraseOrCorrupt
+                val manifestBytes = ByteArray(manifestLen)
+                din.readFully(manifestBytes)
+                // Garbage from a wrong passphrase won't parse as our manifest JSON; this is
+                // the practical authenticity gate before we import anything.
+                val photos = JSONObject(String(manifestBytes, Charsets.UTF_8)).optJSONArray("photos")
+                    ?: return RestoreOutcome.WrongPassphraseOrCorrupt
+                manifestParsed = true
+
+                for (i in 0 until photos.length()) {
+                    val o = photos.getJSONObject(i)
+                    val jpegLen = din.readInt()
+                    if (jpegLen < 0 || jpegLen > MAX_BLOB_BYTES) break
+                    val jpeg = ByteArray(jpegLen)
+                    din.readFully(jpeg)
+
+                    val uuid = o.optString("uuid")
+                    if (uuid.isEmpty() || uuid in existingUuids || uuid in newlyImported) {
+                        skipped++
+                        continue
+                    }
+                    try {
+                        store.importOriginal(
+                            jpeg,
+                            uuid,
+                            o.optLong("createdAt", System.currentTimeMillis()),
+                            o.optString("caption", ""),
+                            o.optString("category", PhotoCategories.UNCLASSIFIED)
+                        )
+                        imported++
+                        newlyImported.add(uuid)
+                    } catch (e: Exception) {
+                        skipped++ // undecodable blob — skip without aborting the restore
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Failing before the manifest parsed means the passphrase was wrong or the file
+            // is corrupt. A failure after that is best-effort: report what we restored.
+            if (!manifestParsed) return RestoreOutcome.WrongPassphraseOrCorrupt
+        }
+        return RestoreOutcome.Success(imported, skipped)
+    }
+
+    private fun readFully(input: InputStream, buf: ByteArray): Boolean {
+        var off = 0
+        while (off < buf.size) {
+            val r = input.read(buf, off, buf.size - off)
+            if (r < 0) return false
+            off += r
+        }
+        return true
     }
 
     private fun parseManifest(bytes: ByteArray, into: HashMap<String, Incoming>) {

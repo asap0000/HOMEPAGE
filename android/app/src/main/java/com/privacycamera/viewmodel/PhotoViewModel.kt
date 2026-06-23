@@ -251,6 +251,34 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Pro-only: restores an encrypted backup from [uri] using [passphrase], de-duplicating
+     * by uuid against live and trashed photos. The passphrase is wiped after use.
+     */
+    fun importBackup(
+        uri: Uri,
+        passphrase: CharArray,
+        onResult: (BackupManager.RestoreOutcome) -> Unit
+    ) {
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                try {
+                    val existing = (_photos.value.map { it.uuid } +
+                        store.listTrash().map { it.uuid }).toSet()
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                        BackupManager.importEncrypted(input, store, passphrase, existing)
+                    } ?: BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt
+                } catch (e: Exception) {
+                    BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt
+                } finally {
+                    passphrase.fill(' ')
+                }
+            }
+            refresh()
+            onResult(outcome)
+        }
+    }
+
+    /**
      * Pro-only: imports a Lite-migration ZIP from [uri], de-duplicating by uuid and
      * enforcing the lifetime migration cap (Tier.LITE_SAVE_LIMIT). Reports the per-import
      * outcome, or null on failure.
