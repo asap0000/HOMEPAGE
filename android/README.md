@@ -75,13 +75,13 @@ Android Studio で `android/` フォルダを開けば、`Build Variants` パネ
 ### 製品フレーバー（Lite / Pro）
 1 つのコードベースから 2 つの製品を出し分けます。
 
-| | Lite（無料） | Pro（有料・買い切り） |
+| | Lite（無料・お試し） | Pro（有料・買い切り） |
 |---|---|---|
 | applicationId | `com.privacycamera.lite` | `com.privacycamera` |
 | 保存 | 上限あり（入れ替え運用） | 無制限 |
-| 取り込み | — | 暗号化バックアップを取り込み |
-| PII マスキング | なし | あり（主役機能） |
-| 暗号化書き出し | あり（Pro への一方通行） | あり |
+| 書き出し | 移行用に**平文**ZIP出力（マスク前オリジナルを同梱・漏洩注意） | パスフレーズ暗号化の完全バックアップ |
+| 取り込み | — | ①Lite移行（累計30枚まで） ②汎用画像（任意画像をモザイク化・別枠） |
+| PII マスキング | 自動モザイクのみ | あり（主役機能・高度編集） |
 
 機能の出し分けは `BuildConfig.IS_PRO`（`com.privacycamera.Tier`）を唯一の
 判定点として行います。Lite は別 applicationId なので Pro と同一端末に併存

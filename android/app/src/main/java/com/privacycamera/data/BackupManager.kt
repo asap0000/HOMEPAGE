@@ -8,6 +8,8 @@ import java.io.DataOutputStream
 import java.io.OutputStream
 import java.security.SecureRandom
 import javax.crypto.CipherOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Builds the encrypted-backup ("ferry") container that carries photos out of one install
@@ -26,6 +28,37 @@ import javax.crypto.CipherOutputStream
 object BackupManager {
 
     const val FORMAT_VERSION = 1
+
+    /** Manifest entry name inside a plaintext migration ZIP. */
+    const val MANIFEST_NAME = "manifest.json"
+
+    /**
+     * Streams a PLAINTEXT migration archive of [items] (whose originals still exist) to
+     * [out] as a ZIP: a [MANIFEST_NAME] entry plus one "<uuid>.jpg" entry per photo holding
+     * the decrypted original. This is Lite's "limited" export — the originals leave the
+     * device unprotected, which the user knowingly accepts to migrate trial photos. The
+     * manifest carries each photo's stable uuid so the Pro importer can de-duplicate and
+     * enforce its lifetime migration cap.
+     */
+    fun exportPlainZip(
+        out: OutputStream,
+        items: List<PhotoItem>,
+        store: SecurePhotoStore
+    ) {
+        val exportable = items.filter { store.hasOriginal(it.id) }
+        ZipOutputStream(BufferedOutputStream(out)).use { zip ->
+            val manifest = buildManifest(exportable).toString().toByteArray(Charsets.UTF_8)
+            zip.putNextEntry(ZipEntry(MANIFEST_NAME))
+            zip.write(manifest)
+            zip.closeEntry()
+            for (item in exportable) {
+                val bytes = store.decryptOriginalBytes(item.id) ?: continue
+                zip.putNextEntry(ZipEntry("${item.uuid}.jpg"))
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+    }
 
     /**
      * Streams an encrypted backup of [items] (whose originals still exist) to [out],
@@ -75,6 +108,9 @@ object BackupManager {
                     .put("createdAt", item.createdAt)
                     .put("caption", item.caption)
                     .put("category", item.category)
+                    // Used by the ZIP (plaintext) importer to locate the blob; the encrypted
+                    // importer ignores this and reads blobs in manifest order instead.
+                    .put("file", "${item.uuid}.jpg")
             )
         }
         return JSONObject()

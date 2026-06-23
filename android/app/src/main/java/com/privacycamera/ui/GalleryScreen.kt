@@ -57,6 +57,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.privacycamera.Tier
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.viewmodel.PhotoViewModel
@@ -85,7 +86,9 @@ fun GalleryScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    // Pro: passphrase-encrypted full backup. Lite: plaintext migration ZIP.
     var showExportDialog by remember { mutableStateOf(false) }
+    var showMigrationDialog by remember { mutableStateOf(false) }
     // Passphrase chosen in the dialog, held until the file picker returns its destination.
     var pendingPassphrase by remember { mutableStateOf<String?>(null) }
     val createBackupLauncher = rememberLauncherForActivityResult(
@@ -98,6 +101,19 @@ fun GalleryScreen(
                 Toast.makeText(
                     context,
                     if (ok) "暗号化バックアップを書き出しました" else "書き出しに失敗しました",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+    val createMigrationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportMigrationZip(uri) { ok ->
+                Toast.makeText(
+                    context,
+                    if (ok) "移行用ファイルを書き出しました" else "書き出しに失敗しました",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -160,10 +176,15 @@ fun GalleryScreen(
                     },
                     actions = {
                         if (photos.isNotEmpty()) {
-                            IconButton(onClick = { showExportDialog = true }) {
+                            IconButton(onClick = {
+                                if (Tier.isPro) showExportDialog = true
+                                else showMigrationDialog = true
+                            }) {
                                 Icon(
                                     Icons.Filled.Backup,
-                                    contentDescription = "暗号化バックアップを書き出す"
+                                    contentDescription =
+                                        if (Tier.isPro) "暗号化バックアップを書き出す"
+                                        else "移行用に書き出す"
                                 )
                             }
                         }
@@ -217,6 +238,48 @@ fun GalleryScreen(
             }
         )
     }
+
+    if (showMigrationDialog) {
+        MigrationExportDialog(
+            photoCount = photos.size,
+            onDismiss = { showMigrationDialog = false },
+            onConfirm = {
+                showMigrationDialog = false
+                val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+                createMigrationLauncher.launch("privacy-camera-migrate-$stamp.zip")
+            }
+        )
+    }
+}
+
+/**
+ * Confirms Lite's plaintext migration export. The originals leave the device UNENCRYPTED,
+ * so the warning is explicit; the copy also states the Pro-side lifetime migration cap.
+ */
+@Composable
+private fun MigrationExportDialog(
+    photoCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("移行用に書き出す") },
+        text = {
+            Text(
+                "$photoCount 枚を移行用ファイル（ZIP）に書き出します。\n\n" +
+                    "⚠️ マスク前のオリジナル画像が暗号化されずにそのまま含まれます。" +
+                    "ファイルの取り扱いには十分ご注意ください。\n\n" +
+                    "Pro版に取り込めるのは、ここから累計 ${Tier.LITE_SAVE_LIMIT} 枚までです。"
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("保存先を選ぶ") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("キャンセル") }
+        }
+    )
 }
 
 /**
@@ -242,8 +305,7 @@ private fun ExportPassphraseDialog(
             Column {
                 Text(
                     "$photoCount 枚を1つの暗号化ファイルに書き出します。\n" +
-                        "このパスフレーズが復元（Pro版での取り込み）に必要です。" +
-                        "忘れると開けません。"
+                        "このパスフレーズが復元に必要です。忘れると開けません。"
                 )
                 OutlinedTextField(
                     value = pass,
