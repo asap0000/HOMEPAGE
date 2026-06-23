@@ -29,7 +29,9 @@ data class PhotoItem(
     val maskedFile: File,
     val createdAt: Long,
     val caption: String = "",
-    val category: String = PhotoCategories.UNCLASSIFIED
+    val category: String = PhotoCategories.UNCLASSIFIED,
+    /** When this photo was moved to the trash, or 0 if it is a live (non-trashed) photo. */
+    val deletedAt: Long = 0L
 )
 
 /**
@@ -47,6 +49,12 @@ class SecurePhotoStore(private val context: Context) {
     private val originalsDir = File(baseDir, "originals").apply { mkdirs() }
     private val maskedDir = File(baseDir, "masked").apply { mkdirs() }
     private val metaDir = File(baseDir, "meta").apply { mkdirs() }
+    // Soft-deleted photos live here for TRASH_TTL_MILLIS so an accidental delete can be
+    // undone. Recovery is intentionally the trash's job, separate from backups.
+    private val trashDir = File(baseDir, "trash").apply { mkdirs() }
+    private val trashOriginalsDir = File(trashDir, "originals").apply { mkdirs() }
+    private val trashMaskedDir = File(trashDir, "masked").apply { mkdirs() }
+    private val trashMetaDir = File(trashDir, "meta").apply { mkdirs() }
     private val categoriesFile = File(baseDir, "categories.json")
     private val accessLogFile = File(baseDir, "access_log.json")
     private val importedUuidsFile = File(baseDir, "migration_imported.json")
@@ -191,10 +199,90 @@ class SecurePhotoStore(private val context: Context) {
         return CryptoManager.decrypt(enc.readBytes())
     }
 
+    /**
+     * Soft-deletes a photo: moves it to the trash and stamps it with the deletion time.
+     * It stays recoverable until [TRASH_TTL_MILLIS] elapses (see [purgeExpiredTrash]).
+     */
     fun delete(id: String) {
-        File(originalsDir, "$id.enc").delete()
-        File(maskedDir, "$id.jpg").delete()
+        val deletedAt = System.currentTimeMillis()
+        move(File(originalsDir, "$id.enc"), File(trashOriginalsDir, "$id.enc"))
+        move(File(maskedDir, "$id.jpg"), File(trashMaskedDir, "$id.jpg"))
+        val meta = readMeta(id) ?: JSONObject()
+        meta.put("deletedAt", deletedAt)
+        File(trashMetaDir, "$id.json").writeText(meta.toString())
         File(metaDir, "$id.json").delete()
+    }
+
+    /** Lists trashed photos, most-recently-deleted first. */
+    fun listTrash(): List<PhotoItem> {
+        return trashMaskedDir.listFiles { f -> f.extension == "jpg" }
+            ?.map { f ->
+                val id = f.nameWithoutExtension
+                val meta = readTrashMeta(id)
+                PhotoItem(
+                    id = id,
+                    uuid = meta?.optString("uuid", "") ?: "",
+                    maskedFile = f,
+                    createdAt = meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified(),
+                    caption = meta?.optString("caption", "") ?: "",
+                    category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
+                        ?: PhotoCategories.UNCLASSIFIED,
+                    deletedAt = meta?.optLong("deletedAt", f.lastModified()) ?: f.lastModified()
+                )
+            }
+            ?.sortedByDescending { it.deletedAt }
+            ?: emptyList()
+    }
+
+    /** Restores a trashed photo back to the live library, clearing its deletion stamp. */
+    fun restore(id: String) {
+        move(File(trashOriginalsDir, "$id.enc"), File(originalsDir, "$id.enc"))
+        move(File(trashMaskedDir, "$id.jpg"), File(maskedDir, "$id.jpg"))
+        val meta = readTrashMeta(id) ?: JSONObject()
+        meta.remove("deletedAt")
+        File(metaDir, "$id.json").writeText(meta.toString())
+        File(trashMetaDir, "$id.json").delete()
+    }
+
+    /** Permanently removes a single trashed photo. */
+    fun purge(id: String) {
+        File(trashOriginalsDir, "$id.enc").delete()
+        File(trashMaskedDir, "$id.jpg").delete()
+        File(trashMetaDir, "$id.json").delete()
+    }
+
+    /** Permanently removes every trashed photo. */
+    fun emptyTrash() {
+        trashMaskedDir.listFiles { f -> f.extension == "jpg" }
+            ?.forEach { purge(it.nameWithoutExtension) }
+    }
+
+    /** Permanently removes trashed photos older than [TRASH_TTL_MILLIS]. */
+    fun purgeExpiredTrash() {
+        val cutoff = System.currentTimeMillis() - TRASH_TTL_MILLIS
+        trashMaskedDir.listFiles { f -> f.extension == "jpg" }?.forEach { f ->
+            val id = f.nameWithoutExtension
+            val deletedAt = readTrashMeta(id)?.optLong("deletedAt", 0L) ?: 0L
+            if (deletedAt in 1L until cutoff) purge(id)
+        }
+    }
+
+    private fun readTrashMeta(id: String): JSONObject? {
+        val f = File(trashMetaDir, "$id.json")
+        if (!f.exists()) return null
+        return try {
+            JSONObject(f.readText())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Moves [from] to [to], falling back to copy+delete across filesystem boundaries. */
+    private fun move(from: File, to: File) {
+        if (!from.exists()) return
+        if (from.renameTo(to)) return
+        from.copyTo(to, overwrite = true)
+        from.delete()
     }
 
     /**
@@ -364,6 +452,9 @@ class SecurePhotoStore(private val context: Context) {
 
     companion object {
         private const val MAX_LOG_ENTRIES = 1000
+
+        /** How long a soft-deleted photo is kept in the trash before being purged. */
+        const val TRASH_TTL_MILLIS = 30L * 24 * 60 * 60 * 1000 // 30 days
 
         /** Rotates the given JPEG bytes by [rotationDegrees] and re-encodes as JPEG. */
         fun rotateJpeg(jpegBytes: ByteArray, rotationDegrees: Int): ByteArray {

@@ -165,6 +165,11 @@ fun ViewerScreen(
                     IconButton(onClick = {
                         viewModel.logAccess(photoId, AccessActions.DELETE, item?.caption.orEmpty())
                         viewModel.delete(photoId)
+                        Toast.makeText(
+                            context,
+                            "ゴミ箱に移動しました（30日間は復元できます）",
+                            Toast.LENGTH_SHORT
+                        ).show()
                         onDeleted()
                     }) {
                         Icon(Icons.Filled.Delete, contentDescription = "削除")

@@ -78,12 +78,14 @@ fun GalleryScreen(
     onBack: () -> Unit,
     onOpenPhoto: (String) -> Unit,
     onOpenLog: () -> Unit,
+    onOpenTrash: () -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val photos by viewModel.photos.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val importedCount by viewModel.importedMigrationCount.collectAsState()
+    val trash by viewModel.trash.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -183,6 +185,17 @@ fun GalleryScreen(
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                NavigationDrawerItem(
+                    label = { Text("ゴミ箱 (${trash.size})") },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onOpenTrash()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
 
                 // Pro-only import entrances.
                 if (Tier.isPro) {

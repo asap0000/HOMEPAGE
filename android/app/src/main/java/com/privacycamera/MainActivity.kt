@@ -16,6 +16,7 @@ import com.privacycamera.ui.AppLockGate
 import com.privacycamera.ui.CameraScreen
 import com.privacycamera.ui.EditScreen
 import com.privacycamera.ui.GalleryScreen
+import com.privacycamera.ui.TrashScreen
 import com.privacycamera.ui.ViewerScreen
 import com.privacycamera.ui.theme.PrivacyCameraTheme
 
@@ -49,6 +50,7 @@ private object Routes {
     const val VIEWER = "viewer/{id}"
     const val EDIT = "edit/{id}"
     const val LOG = "log"
+    const val TRASH = "trash"
     fun viewer(id: String) = "viewer/$id"
     fun edit(id: String) = "edit/$id"
 }
@@ -71,6 +73,13 @@ private fun AppNavHost() {
                 onBack = { navController.popBackStack() },
                 onOpenPhoto = { id -> navController.navigate(Routes.viewer(id)) },
                 onOpenLog = { navController.navigate(Routes.LOG) },
+                onOpenTrash = { navController.navigate(Routes.TRASH) },
+                viewModel = viewModel
+            )
+        }
+        composable(Routes.TRASH) {
+            TrashScreen(
+                onBack = { navController.popBackStack() },
                 viewModel = viewModel
             )
         }
