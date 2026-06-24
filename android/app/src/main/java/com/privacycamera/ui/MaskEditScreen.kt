@@ -3,6 +3,7 @@ package com.privacycamera.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -183,7 +184,7 @@ private fun MaskEditor(
                     Modifier
                         .fillMaxSize()
                         .pointerInput(boxW, boxH) {
-                            androidx.compose.foundation.gestures.detectDragGestures(
+                            detectDragGestures(
                                 onDragStart = { pos -> dragStart = pos; dragCur = pos },
                                 onDrag = { change, _ -> dragCur = change.position },
                                 onDragEnd = {

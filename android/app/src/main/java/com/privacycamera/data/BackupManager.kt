@@ -282,7 +282,8 @@ object BackupManager {
         val photos = root.optJSONArray("photos") ?: return
         for (i in 0 until photos.length()) {
             val o = photos.getJSONObject(i)
-            val uuid = o.optString("uuid").ifEmpty { continue }
+            val uuid = o.optString("uuid")
+            if (uuid.isEmpty()) continue
             val file = o.optString("file").ifEmpty { "$uuid.jpg" }
             into[file] = Incoming(
                 uuid = uuid,
