@@ -33,7 +33,11 @@ android {
                 storeFile = releaseKeystoreFile
                 storePassword = System.getenv("RELEASE_STORE_PASSWORD")
                 keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                // The release keystore is PKCS12, which uses a single password: the key
+                // password is always identical to the store password (a separate -keypass
+                // is ignored at creation time). Use the store password directly so signing
+                // can't be broken by a stale/incorrect RELEASE_KEY_PASSWORD secret.
+                keyPassword = System.getenv("RELEASE_STORE_PASSWORD")
             }
         }
     }
