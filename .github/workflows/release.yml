@@ -63,6 +63,16 @@ jobs:
             app/release.keystore.gpg
           echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
+      - name: Compute versionCode / versionName
+        run: |
+          # versionCode: a monotonically increasing integer per release run.
+          # github.run_number only ever grows for this workflow; the +1000 base keeps
+          # it comfortably above already-shipped builds and leaves headroom.
+          echo "VERSION_CODE=$((1000 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
+          # versionName: the release tag without the leading "v" (e.g. v0.3-beta -> 0.3-beta).
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "VERSION_NAME=${TAG#v}" >> "$GITHUB_ENV"
+
       - name: Build signed release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
