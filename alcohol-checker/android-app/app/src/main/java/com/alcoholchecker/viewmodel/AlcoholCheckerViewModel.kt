@@ -51,17 +51,18 @@ data class InspectionSession(
     val driverId: String,
     val driverName: String,
     val checkType: String,
-    var recordingStartMs: Long = 0L,
-    var measureStartMs: Long   = 0L,
-    var rawVideoPath: String?  = null,
-    var finalVideoPath: String? = null,
-    var peakBac: Float         = 0f,
-    var isPassed: Boolean      = false,
+    var recordingStartMs: Long   = 0L,
+    var countdownStartMs: Long   = 0L,
+    var measureStartMs: Long     = 0L,
+    var rawVideoPath: String?    = null,
+    var finalVideoPath: String?  = null,
+    var peakBac: Float           = 0f,
+    var isPassed: Boolean        = false,
     var health: HealthQuestionnaire = HealthQuestionnaire(),
-    var weather: WeatherInfo?  = null,
-    var location: Location?    = null,
-    var locationName: String   = "",
-    var retryCount: Int        = 0,
+    var weather: WeatherInfo?    = null,
+    var location: Location?      = null,
+    var locationName: String     = "",
+    var retryCount: Int          = 0,
 )
 
 class AlcoholCheckerViewModel(private val app: Application) : AndroidViewModel(app) {
@@ -158,6 +159,11 @@ class AlcoholCheckerViewModel(private val app: Application) : AndroidViewModel(a
     // ── Phase 3: カウントダウン ────────────────────────────────
     private fun launchCountdown() {
         viewModelScope.launch(Dispatchers.IO) {
+            // カウントダウン開始時刻を記録（動画トリム基点）
+            _session.value?.let { sess ->
+                sess.countdownStartMs = System.currentTimeMillis()
+                _session.value = sess
+            }
             for (i in 3 downTo 1) {
                 _countdown.value = i
                 BeepPlayer.countdown()
@@ -227,7 +233,12 @@ class AlcoholCheckerViewModel(private val app: Application) : AndroidViewModel(a
         viewModelScope.launch(Dispatchers.IO) {
             val finalPath = VideoCompositor.finalPathFrom(rawPath)
             val overlayData = buildOverlayData(sess)
-            compositor.compose(rawPath, finalPath, overlayData) { p ->
+
+            // カウントダウン開始直前 0.5 秒からトリム（顔確認・問診部分を除去）
+            val trimStartMs = (sess.countdownStartMs - sess.recordingStartMs - 500L).coerceAtLeast(0L)
+            // 計測開始から 8 秒後（計測 6 秒 + 判定表示 2 秒）が録画終端なので trimEndMs は省略
+
+            compositor.compose(rawPath, finalPath, overlayData, trimStartMs) { p ->
                 _compositeProgress.value = p
             }
             sess.finalVideoPath = finalPath

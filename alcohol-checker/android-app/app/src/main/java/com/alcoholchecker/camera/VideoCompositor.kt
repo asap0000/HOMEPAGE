@@ -42,6 +42,8 @@ class VideoCompositor {
         inputPath: String,
         outputPath: String,
         data: OverlayData,
+        trimStartMs: Long = 0L,
+        trimEndMs: Long = Long.MAX_VALUE / 1000L,
         onProgress: (Float) -> Unit = {}
     ) = withContext(Dispatchers.IO) {
 
@@ -59,6 +61,15 @@ class VideoCompositor {
             inFmt.getLong(MediaFormat.KEY_DURATION) else 10_000_000L
         val fps = if (inFmt.containsKey(MediaFormat.KEY_FRAME_RATE))
             inFmt.getInteger(MediaFormat.KEY_FRAME_RATE) else 30
+
+        // ── トリム範囲設定（マイクロ秒） ─────────────────────
+        val trimStartUs = trimStartMs * 1000L
+        val trimEndUs   = if (trimEndMs < Long.MAX_VALUE / 1000L) trimEndMs * 1000L else Long.MAX_VALUE
+        if (trimStartMs > 0L) extractor.seekTo(trimStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        val trimmedDurUs = when {
+            trimEndUs < Long.MAX_VALUE -> (trimEndUs - trimStartUs).coerceAtLeast(1L)
+            else                        -> (durationUs - trimStartUs).coerceAtLeast(1L)
+        }
 
         // ── エンコーダ設定 ────────────────────────────────────
         val outFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
@@ -129,9 +140,10 @@ class VideoCompositor {
         // ── デコード ↔ エンコード ループ ─────────────────────
         val timeout = 10_000L
         val bufInfo = MediaCodec.BufferInfo()
-        var inputDone  = false
-        var outputDone = false
+        var inputDone   = false
+        var outputDone  = false
         var processedUs = 0L
+        var ptsOffsetUs = Long.MIN_VALUE   // 最初のレンダリングフレームの PTS（リベース基点）
 
         while (!outputDone) {
             // デコーダへ入力
@@ -140,7 +152,7 @@ class VideoCompositor {
                 if (inIdx >= 0) {
                     val buf  = decoder.getInputBuffer(inIdx)!!
                     val size = extractor.readSampleData(buf, 0)
-                    if (size < 0) {
+                    if (size < 0 || extractor.sampleTime > trimEndUs) {
                         decoder.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         inputDone = true
                     } else {
@@ -166,14 +178,20 @@ class VideoCompositor {
                     frameAvailable = false
                     surfaceTexture.updateTexImage()
 
+                    // 最初のフレームで PTS リベース基点を記録
+                    if (ptsOffsetUs == Long.MIN_VALUE) ptsOffsetUs = bufInfo.presentationTimeUs
+                    val rebasedUs = (bufInfo.presentationTimeUs - ptsOffsetUs).coerceAtLeast(0L)
+
                     // OpenGL で合成描画
                     GLES20.glViewport(0, 0, width, height)
                     drawComposited(program, oesTex[0], overlayTex[0],
                         surfaceTexture.getTransformMatrix())
+                    // エンコーダに正確な PTS を伝達（ナノ秒）
+                    EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, rebasedUs * 1000L)
                     EGL14.eglSwapBuffers(eglDisplay, eglSurface)
 
-                    processedUs = bufInfo.presentationTimeUs
-                    onProgress(processedUs.coerceAtMost(durationUs).toFloat() / durationUs)
+                    processedUs = rebasedUs
+                    onProgress(processedUs.coerceAtMost(trimmedDurUs).toFloat() / trimmedDurUs)
                 }
 
                 if (bufInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
