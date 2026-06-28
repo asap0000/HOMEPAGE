@@ -13,7 +13,7 @@ data class WeatherInfo(
 object WeatherRepository {
 
     // BuildConfig.WEATHER_API_KEY で渡すか、空のままにすると手動入力モードになる
-    private const val API_KEY = ""   // ← 実際のキーをここか local.properties で設定
+    private const val API_KEY = "61d25d445b9b9fb1522469c4c5b79509"   // ← 実際のキーをここか local.properties で設定
 
     private val weatherJaMap = mapOf(
         "Clear"        to "晴れ",
