@@ -112,8 +112,15 @@ private fun MaskEditor(
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     val regionsSnapshot = regions.toList()
     LaunchedEffect(previewSource, wholeFrame, style, columns, regionsSnapshot) {
-        val spec = MaskSpec(wholeFrame, style, columns, regionsSnapshot)
-        preview = withContext(Dispatchers.Default) { MaskingEngine.render(previewSource, spec) }
+        preview = if (!wholeFrame && regionsSnapshot.isEmpty()) {
+            // Region mode with nothing drawn yet: show the UNMASKED image so the user can
+            // see what they are targeting and place the first region. (The engine's
+            // "empty regions ⇒ whole frame" safety rule still applies when saving.)
+            previewSource
+        } else {
+            val spec = MaskSpec(wholeFrame, style, columns, regionsSnapshot)
+            withContext(Dispatchers.Default) { MaskingEngine.render(previewSource, spec) }
+        }
     }
 
     fun currentSpec() = MaskSpec(wholeFrame, style, columns, regions.toList())
