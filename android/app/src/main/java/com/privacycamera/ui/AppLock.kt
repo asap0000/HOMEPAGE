@@ -73,6 +73,16 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> if (lockState == LockState.LOCKED) promptAuth()
+                // Lock as early as ON_PAUSE — this fires BEFORE the system grabs the
+                // recents/overview snapshot, so the (possibly revealed) content is covered
+                // by the lock screen before it can leak into the task switcher. Skip it
+                // while our own auth prompt is up, since that prompt also pauses us and we
+                // must not re-lock underneath an in-progress reveal/unlock.
+                Lifecycle.Event.ON_PAUSE ->
+                    if (lockState == LockState.UNLOCKED && !BiometricGate.isPrompting) {
+                        lockState = LockState.LOCKED
+                    }
+                // Belt-and-suspenders for any path that stops without pausing first.
                 Lifecycle.Event.ON_STOP -> if (lockState == LockState.UNLOCKED) {
                     lockState = LockState.LOCKED
                 }

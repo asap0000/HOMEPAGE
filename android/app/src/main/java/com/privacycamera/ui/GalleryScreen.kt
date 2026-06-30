@@ -319,7 +319,9 @@ fun GalleryScreen(
                 showExportDialog = false
                 pendingPassphrase = passphrase
                 val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
-                createBackupLauncher.launch("privacy-camera-backup-$stamp.pcbak")
+                // Lead with a tier-distinct token so Lite's migration ZIP and Pro's encrypted
+                // backup are tellable apart even when the file manager truncates the tail.
+                createBackupLauncher.launch("Proバックアップ-$stamp.pcbak")
             }
         )
     }
@@ -331,7 +333,8 @@ fun GalleryScreen(
             onConfirm = {
                 showMigrationDialog = false
                 val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
-                createMigrationLauncher.launch("privacy-camera-migrate-$stamp.zip")
+                // Lead with a tier-distinct token (see the backup name above).
+                createMigrationLauncher.launch("Lite移行-$stamp.zip")
             }
         )
     }

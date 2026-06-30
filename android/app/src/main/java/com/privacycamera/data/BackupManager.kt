@@ -146,24 +146,32 @@ object BackupManager {
                 val bytes = zis.readBytes()
                 if (name == MANIFEST_NAME) {
                     parseManifest(bytes, metaByFile)
-                } else {
-                    val meta = metaByFile[name]
-                    if (meta != null) {
-                        when {
-                            meta.uuid in seen -> duplicate++
-                            slots <= 0 -> overCap++
-                            else -> {
-                                try {
-                                    store.importOriginal(
-                                        bytes, meta.uuid, meta.createdAt, meta.caption, meta.category
-                                    )
-                                    seen.add(meta.uuid)
-                                    newlyImported.add(meta.uuid)
-                                    imported++
-                                    slots--
-                                } catch (e: Exception) {
-                                    // Skip an undecodable / corrupt entry without aborting.
-                                }
+                } else if (bytes.isNotEmpty()) {
+                    // Prefer the manifest's metadata, but fall back to the entry's own file
+                    // name (which is "<uuid>.jpg") so images are still imported even if the
+                    // manifest is missing, unreadable, or its entries don't line up. Without
+                    // this fallback a single manifest hiccup silently imports nothing.
+                    val meta = metaByFile[name] ?: Incoming(
+                        uuid = name.substringBeforeLast('.', ""),
+                        createdAt = System.currentTimeMillis(),
+                        caption = "",
+                        category = PhotoCategories.UNCLASSIFIED
+                    )
+                    when {
+                        meta.uuid.isEmpty() -> { /* no usable identity — skip */ }
+                        meta.uuid in seen -> duplicate++
+                        slots <= 0 -> overCap++
+                        else -> {
+                            try {
+                                store.importOriginal(
+                                    bytes, meta.uuid, meta.createdAt, meta.caption, meta.category
+                                )
+                                seen.add(meta.uuid)
+                                newlyImported.add(meta.uuid)
+                                imported++
+                                slots--
+                            } catch (e: Exception) {
+                                // Skip an undecodable / corrupt entry without aborting.
                             }
                         }
                     }
