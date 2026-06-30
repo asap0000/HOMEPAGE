@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Backup
@@ -165,6 +167,10 @@ fun GalleryScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet {
+                // Many categories (built-in + user-added) plus Trash and Pro import
+                // entries can exceed the screen height; keep the sheet scrollable so the
+                // lower items stay reachable.
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "カテゴリで分類",
                     style = MaterialTheme.typography.titleMedium,
@@ -239,6 +245,7 @@ fun GalleryScreen(
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
+                }
                 }
             }
         }

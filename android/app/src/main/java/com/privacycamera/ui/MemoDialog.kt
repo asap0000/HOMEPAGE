@@ -54,7 +54,7 @@ fun MemoDialog(
                 OutlinedTextField(
                     value = caption,
                     onValueChange = { caption = it },
-                    label = { Text("メモ（例: 田中の運転免許証 表面）") },
+                    label = { Text("メモ（例: 母のマイナンバー 表面）") },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2
                 )
