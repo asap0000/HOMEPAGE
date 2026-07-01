@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.privacycamera.PrivacyCameraApplication
 import com.privacycamera.Tier
+import com.privacycamera.data.AccessActions
 import com.privacycamera.data.AccessEntry
 import com.privacycamera.data.BackupManager
 import com.privacycamera.data.MaskingEngine
@@ -219,13 +220,18 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             // >= 0 : number of images written; -1 : the file could not be opened/written.
             val written = withContext(Dispatchers.IO) {
-                try {
+                val n = try {
                     getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                         BackupManager.exportPlainZip(out, items, store)
                     } ?: -1
                 } catch (e: Exception) {
                     -1
                 }
+                store.logAccess(
+                    "", AccessActions.MIGRATE_EXPORT,
+                    if (n < 0) "書き出し失敗" else "平文ZIPに $n 枚を書き出し（原本が平文で端末外へ）"
+                )
+                n
             }
             onResult(written)
         }
@@ -235,16 +241,22 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         val items = _photos.value
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) {
-                try {
+                var written = -1
+                val success = try {
                     getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
-                        BackupManager.export(out, items, store, passphrase)
+                        written = BackupManager.export(out, items, store, passphrase)
                         true
                     } ?: false
                 } catch (e: Exception) {
                     false
                 } finally {
-                    passphrase.fill(' ')
+                    passphrase.fill(' ')
                 }
+                store.logAccess(
+                    "", AccessActions.BACKUP_EXPORT,
+                    if (success) "暗号化バックアップに $written 枚を書き出し" else "書き出し失敗"
+                )
+                success
             }
             onResult(ok)
         }
@@ -264,7 +276,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                try {
+                val o = try {
                     val existing = _photos.value.map { it.uuid }.toSet()
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
                         BackupManager.importEncrypted(input, store, passphrase, existing)
@@ -272,8 +284,16 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: Exception) {
                     BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt
                 } finally {
-                    passphrase.fill(' ')
+                    passphrase.fill(' ')
                 }
+                val detail = when (o) {
+                    is BackupManager.RestoreOutcome.Success ->
+                        "復元 ${o.imported} 枚 / スキップ ${o.skipped} 枚"
+                    BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt -> "失敗（パスフレーズ違い/破損）"
+                    BackupManager.RestoreOutcome.NotABackup -> "失敗（バックアップ形式でない）"
+                }
+                store.logAccess("", AccessActions.BACKUP_RESTORE, detail)
+                o
             }
             refresh()
             onResult(outcome)
@@ -288,13 +308,19 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     fun importMigration(uri: Uri, onResult: (BackupManager.MigrationImportResult?) -> Unit) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                try {
+                val r = try {
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
                         BackupManager.importMigrationZip(input, store, Tier.LITE_SAVE_LIMIT)
                     }
                 } catch (e: Exception) {
                     null
                 }
+                store.logAccess(
+                    "", AccessActions.MIGRATE_IMPORT,
+                    if (r == null) "取り込み失敗"
+                    else "取り込み ${r.imported} 枚（重複 ${r.skippedDuplicate} / 上限超過 ${r.skippedOverCap}）"
+                )
+                r
             }
             refresh()
             onResult(result)
@@ -326,6 +352,9 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                         // Skip files that aren't decodable images.
                     }
                 }
+                store.logAccess(
+                    "", AccessActions.IMAGE_IMPORT, "画像取り込み $n / ${uris.size} 枚"
+                )
                 n
             }
             refresh()

@@ -78,7 +78,7 @@ object BackupManager {
         items: List<PhotoItem>,
         store: SecurePhotoStore,
         passphrase: CharArray
-    ) {
+    ): Int {
         val exportable = items.filter { store.hasOriginal(it.id) }
 
         val salt = ByteArray(BackupCrypto.SALT_SIZE).also { SecureRandom().nextBytes(it) }
@@ -105,6 +105,7 @@ object BackupManager {
                 dos.write(bytes)
             }
         }
+        return exportable.size
     }
 
     /** Outcome of importing a Lite-migration archive. */
