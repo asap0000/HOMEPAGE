@@ -214,20 +214,20 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * export: the originals leave the device unencrypted (the user is warned). Pro can
      * later import up to its lifetime cap. Reports success/failure on the main thread.
      */
-    fun exportMigrationZip(uri: Uri, onResult: (Boolean) -> Unit) {
+    fun exportMigrationZip(uri: Uri, onResult: (Int) -> Unit) {
         val items = _photos.value
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+            // >= 0 : number of images written; -1 : the file could not be opened/written.
+            val written = withContext(Dispatchers.IO) {
                 try {
                     getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                         BackupManager.exportPlainZip(out, items, store)
-                        true
-                    } ?: false
+                    } ?: -1
                 } catch (e: Exception) {
-                    false
+                    -1
                 }
             }
-            onResult(ok)
+            onResult(written)
         }
     }
 

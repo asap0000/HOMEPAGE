@@ -49,8 +49,9 @@ object BackupManager {
         out: OutputStream,
         items: List<PhotoItem>,
         store: SecurePhotoStore
-    ) {
+    ): Int {
         val exportable = items.filter { store.hasOriginal(it.id) }
+        var written = 0
         ZipOutputStream(BufferedOutputStream(out)).use { zip ->
             val manifest = buildManifest(exportable).toString().toByteArray(Charsets.UTF_8)
             zip.putNextEntry(ZipEntry(MANIFEST_NAME))
@@ -61,8 +62,10 @@ object BackupManager {
                 zip.putNextEntry(ZipEntry("${item.uuid}.jpg"))
                 zip.write(bytes)
                 zip.closeEntry()
+                written++
             }
         }
+        return written
     }
 
     /**
@@ -108,7 +111,12 @@ object BackupManager {
     data class MigrationImportResult(
         val imported: Int,
         val skippedDuplicate: Int,
-        val skippedOverCap: Int
+        val skippedOverCap: Int,
+        // Beta diagnostics: pinpoint where an import that yields nothing actually broke
+        // (empty/unreadable ZIP vs. manifest-without-images vs. matching/cap issue).
+        val entriesSeen: Int = 0,
+        val imageEntries: Int = 0,
+        val manifestPhotos: Int = 0
     )
 
     private data class Incoming(
@@ -124,7 +132,10 @@ object BackupManager {
      * skipped (de-dup), and once the cap is reached the rest are skipped as over-cap. The
      * caller passes the tier cap (e.g. Tier.LITE_SAVE_LIMIT).
      *
-     * Relies on the manifest preceding the image entries (which [exportPlainZip] guarantees).
+     * The manifest supplies per-photo metadata (caption/category/timestamp); when it is
+     * absent or an image entry isn't listed in it, the image is still imported using its
+     * "<uuid>.jpg" file name as the identity, so a manifest problem never silently drops
+     * the whole import.
      */
     fun importMigrationZip(
         input: InputStream,
@@ -136,17 +147,21 @@ object BackupManager {
         var imported = 0
         var duplicate = 0
         var overCap = 0
+        var entriesSeen = 0
+        var imageEntries = 0
         val newlyImported = mutableListOf<String>()
         val metaByFile = HashMap<String, Incoming>()
 
         ZipInputStream(BufferedInputStream(input)).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
+                entriesSeen++
                 val name = entry.name
                 val bytes = zis.readBytes()
                 if (name == MANIFEST_NAME) {
                     parseManifest(bytes, metaByFile)
                 } else if (bytes.isNotEmpty()) {
+                    imageEntries++
                     // Prefer the manifest's metadata, but fall back to the entry's own file
                     // name (which is "<uuid>.jpg") so images are still imported even if the
                     // manifest is missing, unreadable, or its entries don't line up. Without
@@ -182,7 +197,12 @@ object BackupManager {
         }
 
         store.addImportedUuids(newlyImported)
-        return MigrationImportResult(imported, duplicate, overCap)
+        return MigrationImportResult(
+            imported, duplicate, overCap,
+            entriesSeen = entriesSeen,
+            imageEntries = imageEntries,
+            manifestPhotos = metaByFile.size
+        )
     }
 
     /** Outcome of restoring an encrypted backup. */

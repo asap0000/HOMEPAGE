@@ -119,10 +119,13 @@ fun GalleryScreen(
         ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
         if (uri != null) {
-            viewModel.exportMigrationZip(uri) { ok ->
+            viewModel.exportMigrationZip(uri) { written ->
+                // written: images actually written to the ZIP; -1 means the write failed.
+                // Surfacing the count reveals a "succeeded but 0 images" export at a glance.
                 Toast.makeText(
                     context,
-                    if (ok) "移行用ファイルを書き出しました" else "書き出しに失敗しました",
+                    if (written < 0) "書き出しに失敗しました"
+                    else "移行用ファイルを書き出しました（画像 $written 枚）",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -142,8 +145,13 @@ fun GalleryScreen(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
+            val picked = uris.size
             viewModel.importImages(uris) { n ->
-                Toast.makeText(context, "${n}枚を取り込みました", Toast.LENGTH_LONG).show()
+                // Show picked-vs-imported so a zero result is distinguishable from the
+                // picker returning nothing (beta diagnostics).
+                Toast.makeText(
+                    context, "選択 $picked 枚中 $n 枚を取り込みました", Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
@@ -515,12 +523,17 @@ private const val MIN_PASSPHRASE_LENGTH = 6
 
 /** Human-readable summary of a Lite-migration import outcome. */
 private fun migrationResultMessage(result: BackupManager.MigrationImportResult?): String {
-    if (result == null) return "取り込みに失敗しました（ファイルをご確認ください）"
+    if (result == null) return "取り込みに失敗しました（ファイルを開けませんでした）"
     val parts = mutableListOf("取り込み ${result.imported} 枚")
     if (result.skippedDuplicate > 0) parts.add("重複 ${result.skippedDuplicate} 枚")
     if (result.skippedOverCap > 0) {
         parts.add("上限超過 ${result.skippedOverCap} 枚（移行は累計 ${Tier.LITE_SAVE_LIMIT} 枚まで）")
     }
+    // Beta diagnostics: reveals where a zero-result import broke.
+    parts.add(
+        "［診断 entry=${result.entriesSeen} img=${result.imageEntries} " +
+            "manifest=${result.manifestPhotos}］"
+    )
     return parts.joinToString(" / ")
 }
 
