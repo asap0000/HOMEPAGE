@@ -246,6 +246,16 @@ fun GalleryScreen(
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
+
+                // App version, so a tester can confirm at a glance which build is installed
+                // after an update. Includes the tier suffix (e.g. 0.3.3-beta-pro).
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text(
+                    "バージョン ${com.privacycamera.BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
                 }
             }
         }
