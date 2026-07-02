@@ -5,12 +5,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.SecureRandom
-import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -245,21 +245,32 @@ object BackupManager {
         val key = BackupCrypto.deriveKey(passphrase, salt)
         val cipher = BackupCrypto.newDecryptCipher(key, salt, iv)
 
+        // Decrypt the whole payload in ONE doFinal instead of streaming through a
+        // CipherInputStream. AES-GCM is an AEAD cipher: the authentication tag covers the
+        // entire ciphertext and can only be verified once all of it has been processed, and
+        // CipherInputStream is documented to mis-handle GCM for multi-block inputs (it can
+        // fail or silently corrupt on larger files — which is exactly the reported symptom:
+        // small backups restored, an 18-photo backup failed as "wrong passphrase/corrupt").
+        // A successful doFinal both decrypts and authenticates, so it doubles as the
+        // passphrase/integrity gate. The file format is unchanged, so existing backups
+        // written by [export] restore correctly.
+        val plain = try {
+            cipher.doFinal(input.readBytes())
+        } catch (e: Exception) {
+            return RestoreOutcome.WrongPassphraseOrCorrupt
+        }
+
         var imported = 0
         var skipped = 0
-        var manifestParsed = false
         val newlyImported = HashSet<String>()
         try {
-            DataInputStream(BufferedInputStream(CipherInputStream(input, cipher))).use { din ->
+            DataInputStream(ByteArrayInputStream(plain)).use { din ->
                 val manifestLen = din.readInt()
                 if (manifestLen !in 1..MAX_MANIFEST_BYTES) return RestoreOutcome.WrongPassphraseOrCorrupt
                 val manifestBytes = ByteArray(manifestLen)
                 din.readFully(manifestBytes)
-                // Garbage from a wrong passphrase won't parse as our manifest JSON; this is
-                // the practical authenticity gate before we import anything.
                 val photos = JSONObject(String(manifestBytes, Charsets.UTF_8)).optJSONArray("photos")
                     ?: return RestoreOutcome.WrongPassphraseOrCorrupt
-                manifestParsed = true
 
                 for (i in 0 until photos.length()) {
                     val o = photos.getJSONObject(i)
@@ -289,9 +300,8 @@ object BackupManager {
                 }
             }
         } catch (e: Exception) {
-            // Failing before the manifest parsed means the passphrase was wrong or the file
-            // is corrupt. A failure after that is best-effort: report what we restored.
-            if (!manifestParsed) return RestoreOutcome.WrongPassphraseOrCorrupt
+            // The payload is authentic (doFinal passed) but its structure was unexpected;
+            // report whatever we managed to restore rather than failing outright.
         }
         return RestoreOutcome.Success(imported, skipped)
     }

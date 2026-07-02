@@ -263,11 +263,11 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Pro-only: restores an encrypted backup from [uri] using [passphrase], de-duplicating
-     * by uuid against the LIVE library only. Photos sitting in the trash are intentionally
-     * NOT treated as duplicates: restoring from a backup is exactly how a user recovers a
-     * photo they deleted, so a backup must be able to bring it back to the live library.
-     * The passphrase is wiped after use.
+     * Pro-only: restores an encrypted backup from [uri] using [passphrase]. De-duplication
+     * skips uuids that are already LIVE (true duplicates) and uuids this device has itself
+     * deleted (tombstones) so a restore never resurrects a photo the user deleted here. On a
+     * DIFFERENT device the tombstone set is empty, so the same backup DOES bring those photos
+     * back — the new device has no record of the deletion. The passphrase is wiped after use.
      */
     fun importBackup(
         uri: Uri,
@@ -277,7 +277,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val outcome = withContext(Dispatchers.IO) {
                 val o = try {
-                    val existing = _photos.value.map { it.uuid }.toSet()
+                    val existing = _photos.value.map { it.uuid }.toSet() + store.loadDeletedUuids()
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
                         BackupManager.importEncrypted(input, store, passphrase, existing)
                     } ?: BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt

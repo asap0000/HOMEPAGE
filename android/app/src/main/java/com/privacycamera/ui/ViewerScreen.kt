@@ -29,7 +29,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -91,10 +90,8 @@ fun ViewerScreen(
         }
     }
 
-    // Record that this photo was opened (masked view).
-    LaunchedEffect(photoId) {
-        viewModel.logAccess(photoId, AccessActions.OPEN, item?.caption.orEmpty())
-    }
+    // Opening a photo (masked view) is deliberately NOT logged: it is as routine as taking a
+    // picture and would flood the access log. Only reveal/export/delete/edit are audited.
 
     // Re-mask the moment the app starts leaving the foreground (ON_PAUSE happens
     // before the recents snapshot is taken), so the decrypted original never lingers

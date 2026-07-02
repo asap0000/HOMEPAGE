@@ -9,10 +9,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -26,6 +29,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -98,6 +102,9 @@ fun GalleryScreen(
     var showMigrationDialog by remember { mutableStateOf(false) }
     // Restore: a backup file is picked first, then its passphrase is collected.
     var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+    // True while a restore is decrypting/importing, so the UI can show a busy indicator
+    // (restoring a large backup takes a few seconds and gives no other visible feedback).
+    var restoring by remember { mutableStateOf(false) }
     // Passphrase chosen in the dialog, held until the file picker returns its destination.
     var pendingPassphrase by remember { mutableStateOf<String?>(null) }
     val createBackupLauncher = rememberLauncherForActivityResult(
@@ -362,12 +369,35 @@ fun GalleryScreen(
             onDismiss = { pendingRestoreUri = null },
             onConfirm = { pass ->
                 pendingRestoreUri = null
+                restoring = true
                 viewModel.importBackup(uri, pass.toCharArray()) { outcome ->
+                    restoring = false
                     Toast.makeText(context, restoreResultMessage(outcome), Toast.LENGTH_LONG).show()
                 }
             }
         )
     }
+
+    if (restoring) {
+        RestoringOverlay()
+    }
+}
+
+/** A blocking, non-dismissable busy overlay shown while a backup restore is in progress. */
+@Composable
+private fun RestoringOverlay() {
+    AlertDialog(
+        onDismissRequest = { /* not dismissable while working */ },
+        confirmButton = {},
+        title = { Text("復元中…") },
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator()
+                Spacer(Modifier.width(16.dp))
+                Text("バックアップを復号して取り込んでいます。")
+            }
+        }
+    )
 }
 
 /** Collects the passphrase for an encrypted backup the user picked, then restores it. */

@@ -58,6 +58,11 @@ class SecurePhotoStore(private val context: Context) {
     private val categoriesFile = File(baseDir, "categories.json")
     private val accessLogFile = File(baseDir, "access_log.json")
     private val importedUuidsFile = File(baseDir, "migration_imported.json")
+    // Persistent tombstones: uuids the user deleted ON THIS install. A backup restore skips
+    // these so it never resurrects something deleted here — even after the 30-day trash
+    // window has purged the photo. A different device starts with an empty set, so a backup
+    // restored there DOES bring the photo back (that device never knew about the deletion).
+    private val deletedUuidsFile = File(baseDir, "deleted_uuids.json")
 
     init {
         // Defence in depth: even though internal storage is never media-scanned,
@@ -241,6 +246,8 @@ class SecurePhotoStore(private val context: Context) {
         move(File(originalsDir, "$id.enc"), File(trashOriginalsDir, "$id.enc"))
         move(File(maskedDir, "$id.jpg"), File(trashMaskedDir, "$id.jpg"))
         val meta = readMeta(id) ?: JSONObject()
+        // Tombstone the uuid so a later backup restore won't resurrect this photo here.
+        addDeletedUuid(meta.optString("uuid", ""))
         meta.put("deletedAt", deletedAt)
         File(trashMetaDir, "$id.json").writeText(meta.toString())
         File(metaDir, "$id.json").delete()
@@ -272,6 +279,8 @@ class SecurePhotoStore(private val context: Context) {
         move(File(trashOriginalsDir, "$id.enc"), File(originalsDir, "$id.enc"))
         move(File(trashMaskedDir, "$id.jpg"), File(maskedDir, "$id.jpg"))
         val meta = readTrashMeta(id) ?: JSONObject()
+        // The photo is back in the library, so lift its tombstone.
+        removeDeletedUuid(meta.optString("uuid", ""))
         meta.remove("deletedAt")
         File(metaDir, "$id.json").writeText(meta.toString())
         File(trashMetaDir, "$id.json").delete()
@@ -369,6 +378,39 @@ class SecurePhotoStore(private val context: Context) {
         val arr = JSONArray()
         merged.forEach { arr.put(it) }
         importedUuidsFile.writeText(arr.toString())
+    }
+
+    /** UUIDs the user has deleted on this install (tombstones); see [deletedUuidsFile]. */
+    fun loadDeletedUuids(): Set<String> {
+        if (!deletedUuidsFile.exists()) return emptySet()
+        return try {
+            val arr = JSONArray(deletedUuidsFile.readText())
+            (0 until arr.length()).map { arr.getString(it) }.toSet()
+        } catch (e: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun writeDeletedUuids(set: Set<String>) {
+        val arr = JSONArray()
+        set.forEach { arr.put(it) }
+        deletedUuidsFile.writeText(arr.toString())
+    }
+
+    /** Marks [uuid] as deleted-on-this-device so a backup restore won't resurrect it. */
+    private fun addDeletedUuid(uuid: String) {
+        if (uuid.isEmpty()) return
+        val set = loadDeletedUuids()
+        if (uuid in set) return
+        writeDeletedUuids(set + uuid)
+    }
+
+    /** Clears [uuid]'s tombstone (the photo is back), e.g. when restored from the trash. */
+    private fun removeDeletedUuid(uuid: String) {
+        if (uuid.isEmpty()) return
+        val set = loadDeletedUuids()
+        if (uuid !in set) return
+        writeDeletedUuids(set - uuid)
     }
 
     /** User-defined categories (persisted across sessions). */
