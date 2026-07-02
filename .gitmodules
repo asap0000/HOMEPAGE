@@ -1,0 +1,3 @@
+[submodule ".istech"]
+	path = .istech
+	url = https://github.com/asap0000/istech
