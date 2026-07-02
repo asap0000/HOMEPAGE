@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -149,8 +150,11 @@ fun GalleryScreen(
             }
         }
     }
+    // Use the system Photo Picker (multi-select image UI) rather than the document picker:
+    // it lets the user pick many images in ONE session, so the whole batch imports after a
+    // single re-lock/auth instead of one biometric prompt per image.
     val importImagesLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
+        ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
         if (uris.isNotEmpty()) {
             val picked = uris.size
@@ -246,7 +250,11 @@ fun GalleryScreen(
                         selected = false,
                         onClick = {
                             scope.launch { drawerState.close() }
-                            importImagesLauncher.launch(arrayOf("image/*"))
+                            importImagesLauncher.launch(
+                                PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                                )
+                            )
                         },
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
