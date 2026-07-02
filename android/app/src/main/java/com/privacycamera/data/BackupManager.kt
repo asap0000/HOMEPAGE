@@ -306,6 +306,43 @@ object BackupManager {
         return RestoreOutcome.Success(imported, skipped)
     }
 
+    /**
+     * Reads a just-written encrypted backup straight back and confirms it decrypts and
+     * parses, returning the number of photos it contains — or -1 if it cannot be opened,
+     * decrypted, or parsed. Because AES-GCM's doFinal authenticates the ENTIRE ciphertext, a
+     * successful decrypt guarantees the file is complete and untampered; this is how the
+     * exporter proves a backup is actually restorable before reporting success, so a
+     * truncated/corrupt write is caught at creation instead of when the backup is finally
+     * needed. Nothing is imported.
+     */
+    fun verifyEncrypted(input: InputStream, passphrase: CharArray): Int {
+        val header = ByteArray(BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE + BackupCrypto.IV_SIZE)
+        if (!readFully(input, header)) return -1
+        if (!header.copyOfRange(0, BackupCrypto.MAGIC.size).contentEquals(BackupCrypto.MAGIC)) return -1
+        val salt = header.copyOfRange(BackupCrypto.MAGIC.size, BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE)
+        val iv = header.copyOfRange(BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE, header.size)
+        val key = BackupCrypto.deriveKey(passphrase, salt)
+        val cipher = BackupCrypto.newDecryptCipher(key, salt, iv)
+        val plain = try {
+            cipher.doFinal(input.readBytes())
+        } catch (e: Exception) {
+            return -1
+        }
+        return try {
+            DataInputStream(ByteArrayInputStream(plain)).use { din ->
+                val manifestLen = din.readInt()
+                if (manifestLen !in 1..MAX_MANIFEST_BYTES) return -1
+                val manifestBytes = ByteArray(manifestLen)
+                din.readFully(manifestBytes)
+                val photos = JSONObject(String(manifestBytes, Charsets.UTF_8)).optJSONArray("photos")
+                    ?: return -1
+                photos.length()
+            }
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
     private fun readFully(input: InputStream, buf: ByteArray): Boolean {
         var off = 0
         while (off < buf.size) {

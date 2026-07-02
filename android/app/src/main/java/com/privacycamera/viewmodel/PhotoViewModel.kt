@@ -241,20 +241,31 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         val items = _photos.value
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) {
+                val resolver = getApplication<Application>().contentResolver
                 var written = -1
-                val success = try {
-                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                var verified = -1
+                try {
+                    resolver.openOutputStream(uri)?.use { out ->
                         written = BackupManager.export(out, items, store, passphrase)
-                        true
-                    } ?: false
+                    }
+                    // Read the file straight back and confirm it decrypts, so a truncated or
+                    // corrupt write is caught NOW rather than when the backup is finally
+                    // needed (a silently-broken backup already bit us once).
+                    if (written >= 0) {
+                        resolver.openInputStream(uri)?.use { input ->
+                            verified = BackupManager.verifyEncrypted(input, passphrase)
+                        }
+                    }
                 } catch (e: Exception) {
-                    false
+                    // written/verified keep their failure markers
                 } finally {
                     passphrase.fill(' ')
                 }
+                val success = written >= 0 && verified == written
                 store.logAccess(
                     "", AccessActions.BACKUP_EXPORT,
-                    if (success) "暗号化バックアップに $written 枚を書き出し" else "書き出し失敗"
+                    if (success) "暗号化バックアップ $written 枚を書き出し・復元検証OK"
+                    else "書き出し/検証に失敗（書込 $written / 検証 $verified）"
                 )
                 success
             }

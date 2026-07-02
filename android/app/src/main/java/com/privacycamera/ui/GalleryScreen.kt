@@ -116,7 +116,8 @@ fun GalleryScreen(
             viewModel.exportBackup(uri, pass.toCharArray()) { ok ->
                 Toast.makeText(
                     context,
-                    if (ok) "暗号化バックアップを書き出しました" else "書き出しに失敗しました",
+                    if (ok) "暗号化バックアップを書き出し、復元できることを確認しました"
+                    else "書き出しに失敗しました（このファイルは信頼できません。作り直してください）",
                     Toast.LENGTH_LONG
                 ).show()
             }
