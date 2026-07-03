@@ -8,6 +8,11 @@ on:
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
+  # 週次サーベイランス: push が無くても毎週月曜 09:00 JST (00:00 UTC) に main で
+  # ビルド+オフライン方針検査を実行し、Secrets 失効・環境変化などの
+  # 「静かな破損」を早期検知する(2026-07 の keystore 失効事案の再発防止)。
+  schedule:
+    - cron: "0 0 * * 1"
   workflow_dispatch:
 
 # If you push several times quickly, cancel the older in-flight run on the same
