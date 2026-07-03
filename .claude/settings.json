@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ ! -f \"$CLAUDE_PROJECT_DIR/.istech/CLAUDE.md\" ]; then echo 'WARNING: .istech サブモジュールが未初期化のため、istech 標準方針（CLAUDE.md）がロードされていません。CLAUDE.md の @.istech/... インポートはサイレントに失敗しています。可能なら git submodule update --init を実行してください。取得できない場合、リリース・配布・ネットワーク・署名に関わる作業を進めないでください。'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

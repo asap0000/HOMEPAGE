@@ -1,15 +1,17 @@
 name: Release APK
 
 # Publishes a signed APK as a GitHub Release.
-#   - Push a tag like v1.0  ->  release is created automatically.
+#   - Push a tag like v1.0.0  ->  release is created automatically.
 #   - Or run manually (workflow_dispatch) and type a tag name.
+# Tags follow semantic versioning with three components (istech versioning rule):
+# vMAJOR.MINOR.PATCH, e.g. v1.0.0, bugfix -> v1.0.1.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag/version (e.g. v1.0)"
+        description: "Release tag/version (e.g. v1.0.0)"
         required: true
 
 permissions:
@@ -66,11 +68,28 @@ jobs:
       - name: Build signed release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Stage APK with version name
+      # istech オフライン厳守の機械的担保: リリース前の最終ゲート。
+      - name: Verify offline policy (no INTERNET permission)
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APK=app/build/outputs/apk/release/app-release.apk
+          if "$AAPT" dump permissions "$APK" | grep -q 'android.permission.INTERNET'; then
+            echo "::error::$APK requests android.permission.INTERNET — istech offline policy violation."
+            exit 1
+          fi
+          echo "OK: $APK does not request INTERNET permission."
+
+      # istech リリース手順: 成果物には SHA-256 チェックサムを添付し、
+      # リリースノートにも併記する（ランディングページ転記用）。
+      - name: Stage APK and generate SHA-256 checksum
+        id: stage
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           cp app/build/outputs/apk/release/app-release.apk \
              "$GITHUB_WORKSPACE/PrivacyCamera-${TAG}.apk"
+          cd "$GITHUB_WORKSPACE"
+          sha256sum "PrivacyCamera-${TAG}.apk" | tee "PrivacyCamera-${TAG}.apk.sha256"
+          echo "sha256=$(cut -d' ' -f1 "PrivacyCamera-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release with the APK
         uses: softprops/action-gh-release@v2
@@ -78,4 +97,8 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
-          files: PrivacyCamera-*.apk
+          body: |
+            **SHA-256 (APK)**: `${{ steps.stage.outputs.sha256 }}`
+          files: |
+            PrivacyCamera-*.apk
+            PrivacyCamera-*.apk.sha256

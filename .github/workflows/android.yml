@@ -71,6 +71,40 @@ jobs:
       - name: Build debug & release APKs
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
 
+      # istech オフライン厳守の機械的担保 (1/2):
+      # この製品は機器連動を持たないため、INTERNET パーミッションの宣言自体を禁止する。
+      # 人間も Claude も見落とした場合に、ここで機械的に弾く。
+      - name: Verify offline policy (no INTERNET permission)
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          checked=0
+          for apk in app/build/outputs/apk/debug/app-debug.apk \
+                     app/build/outputs/apk/release/app-release.apk \
+                     app/build/outputs/apk/release/app-release-unsigned.apk; do
+            [ -f "$apk" ] || continue
+            checked=1
+            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
+              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: $apk does not request INTERNET permission."
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No APK found to verify."
+            exit 1
+          fi
+
+      # istech オフライン厳守の機械的担保 (2/2):
+      # HTTP クライアント等のネットワーク系ライブラリが依存ツリーに混入していないか検査する。
+      - name: Verify offline policy (no network libraries)
+        run: |
+          ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath --no-daemon > "$RUNNER_TEMP/deps.txt"
+          if grep -Ei 'okhttp|retrofit|ktor-client|volley|grpc|apache\.http|cronet' "$RUNNER_TEMP/deps.txt"; then
+            echo "::error::Network library detected in releaseRuntimeClasspath — istech offline policy violation."
+            exit 1
+          fi
+          echo "OK: no known network libraries in releaseRuntimeClasspath."
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
