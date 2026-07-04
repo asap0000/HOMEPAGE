@@ -87,12 +87,15 @@ fun GalleryScreen(
     onOpenPhoto: (String) -> Unit,
     onOpenLog: () -> Unit,
     onOpenTrash: () -> Unit,
+    onOpenSettings: () -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val photos by viewModel.photos.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val importedCount by viewModel.importedMigrationCount.collectAsState()
+    // Hidden submission-print settings (Pro-only; docs/2026-07-04_仕様_提出用出力機能.md §4).
+    val settingsRevealed by viewModel.settingsRevealed.collectAsState()
     val trash by viewModel.trash.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -271,14 +274,40 @@ fun GalleryScreen(
                     )
                 }
 
+                // Hidden entry to the submission-print settings (Pro-only, dev-options-style):
+                // invisible until revealed via the version-label tap gesture below.
+                if (Tier.isPro && settingsRevealed) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    NavigationDrawerItem(
+                        label = { Text("設定") },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            onOpenSettings()
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+
                 // App version, so a tester can confirm at a glance which build is installed
                 // after an update. Includes the tier suffix (e.g. 0.3.3-beta-pro).
+                // Also doubles as the reveal gesture for the hidden Pro settings above:
+                // tapping it 7 times in a row (dev-options style) unlocks the entry.
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                var versionTapCount by remember { mutableStateOf(0) }
                 Text(
                     "バージョン ${com.privacycamera.BuildConfig.VERSION_NAME}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .clickable(enabled = Tier.isPro && !settingsRevealed) {
+                            versionTapCount++
+                            if (versionTapCount >= 7) {
+                                versionTapCount = 0
+                                viewModel.revealSettings()
+                            }
+                        }
                 )
                 }
             }

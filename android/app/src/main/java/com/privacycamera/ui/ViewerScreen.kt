@@ -1,7 +1,5 @@
 package com.privacycamera.ui
 
-import android.content.Context
-import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -44,7 +42,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -248,14 +245,4 @@ fun ViewerScreen(
             }
         )
     }
-}
-
-/** Walks the ContextWrapper chain to find the hosting FragmentActivity. */
-private fun Context.findFragmentActivity(): FragmentActivity? {
-    var ctx: Context? = this
-    while (ctx is ContextWrapper) {
-        if (ctx is FragmentActivity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
 }

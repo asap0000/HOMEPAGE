@@ -9,6 +9,7 @@ import com.privacycamera.PrivacyCameraApplication
 import com.privacycamera.Tier
 import com.privacycamera.data.AccessActions
 import com.privacycamera.data.AccessEntry
+import com.privacycamera.data.AppSettings
 import com.privacycamera.data.BackupManager
 import com.privacycamera.data.MaskingEngine
 import com.privacycamera.data.PhotoCategories
@@ -24,6 +25,7 @@ import kotlinx.coroutines.withContext
 class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store: SecurePhotoStore = (app as PrivacyCameraApplication).photoStore
+    private val settings: AppSettings = app.appSettings
 
     private val _photos = MutableStateFlow<List<PhotoItem>>(emptyList())
     val photos: StateFlow<List<PhotoItem>> = _photos.asStateFlow()
@@ -394,6 +396,45 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.clearAccessLog() }
             refreshAccessLog()
+        }
+    }
+
+    // ---- Hidden submission-print settings (Pro-only; docs/2026-07-04_仕様_提出用出力機能.md §4) ----
+
+    private val _settingsRevealed = MutableStateFlow(settings.revealed)
+    val settingsRevealed: StateFlow<Boolean> = _settingsRevealed.asStateFlow()
+
+    private val _printEnabled = MutableStateFlow(settings.printEnabled)
+    val printEnabled: StateFlow<Boolean> = _printEnabled.asStateFlow()
+
+    /** Reveals the hidden settings entry (dev-options-style unlock gesture). */
+    fun revealSettings() {
+        if (settings.revealed) return
+        settings.revealed = true
+        _settingsRevealed.value = true
+    }
+
+    /** Re-hides the settings entry without an uninstall (user-initiated "hide again"). */
+    fun hideSettingsAgain() {
+        settings.revealed = false
+        _settingsRevealed.value = false
+    }
+
+    /**
+     * Toggles the submission-print opt-out. Turning it ON requires the caller to have
+     * already passed device authentication (enforced by the settings screen); turning it
+     * OFF needs no re-auth (moving to the safer state). Every change is audited.
+     */
+    fun setPrintEnabled(enabled: Boolean) {
+        settings.printEnabled = enabled
+        _printEnabled.value = enabled
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                store.logAccess(
+                    "", AccessActions.SETTING_CHANGE,
+                    "提出用の印刷: ${if (enabled) "ON" else "OFF"}"
+                )
+            }
         }
     }
 }

@@ -25,6 +25,9 @@ object AccessActions {
     const val BACKUP_RESTORE = "BACKUP_RESTORE" // encrypted backup restored in
     const val IMAGE_IMPORT = "IMAGE_IMPORT"     // arbitrary images imported in
 
+    // Submission-print feature (docs/2026-07-04_仕様_提出用出力機能.md).
+    const val SETTING_CHANGE = "SETTING_CHANGE" // a hidden/opt-out setting was toggled
+
     fun label(code: String): String = when (code) {
         OPEN -> "閲覧（マスク）"
         REVEAL -> "正規表示（復号）"
@@ -36,6 +39,7 @@ object AccessActions {
         MIGRATE_IMPORT -> "移行取り込み"
         BACKUP_RESTORE -> "バックアップ復元"
         IMAGE_IMPORT -> "画像取り込み"
+        SETTING_CHANGE -> "設定変更"
         else -> code
     }
 }

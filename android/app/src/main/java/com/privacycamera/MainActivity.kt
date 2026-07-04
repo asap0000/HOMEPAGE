@@ -17,6 +17,7 @@ import com.privacycamera.ui.CameraScreen
 import com.privacycamera.ui.EditScreen
 import com.privacycamera.ui.GalleryScreen
 import com.privacycamera.ui.MaskEditScreen
+import com.privacycamera.ui.SettingsScreen
 import com.privacycamera.ui.TrashScreen
 import com.privacycamera.ui.ViewerScreen
 import com.privacycamera.ui.theme.PrivacyCameraTheme
@@ -53,6 +54,7 @@ private object Routes {
     const val MASK = "mask/{id}"
     const val LOG = "log"
     const val TRASH = "trash"
+    const val SETTINGS = "settings"
     fun viewer(id: String) = "viewer/$id"
     fun edit(id: String) = "edit/$id"
     fun mask(id: String) = "mask/$id"
@@ -77,6 +79,13 @@ private fun AppNavHost() {
                 onOpenPhoto = { id -> navController.navigate(Routes.viewer(id)) },
                 onOpenLog = { navController.navigate(Routes.LOG) },
                 onOpenTrash = { navController.navigate(Routes.TRASH) },
+                onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                viewModel = viewModel
+            )
+        }
+        composable(Routes.SETTINGS) {
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
                 viewModel = viewModel
             )
         }
