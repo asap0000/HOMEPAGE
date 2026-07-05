@@ -33,6 +33,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Fast, dependency-free static checks for this app's core safety guarantees
+      # (docs/2026-07-04_仕様_提出用出力機能.md P1-P4). Runs before the build so a
+      # violation fails in seconds, not minutes.
+      - name: Verify offline / no-share-intent / no-temp-file guarantees
+        run: |
+          set -e
+          if grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml; then
+            echo "::error::INTERNET permission must not be declared — this app's core promise is that it cannot send data off the device."
+            exit 1
+          fi
+          if grep -rlE 'ACTION_SEND|Intent\.createChooser|FileProvider' app/src/main/java/com/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not use share intents or FileProvider (P3: single-purpose print output only)."
+            exit 1
+          fi
+          if grep -rlE 'cacheDir|filesDir|openFileOutput|\bFile\(' app/src/main/java/com/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not create files in app storage (P4: the print framework's file descriptor is the only sink)."
+            exit 1
+          fi
+          echo "OK: no INTERNET permission; print module has no share-intent or temp-file paths."
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
