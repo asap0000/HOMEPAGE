@@ -140,8 +140,9 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     }
 }
 
+// internal (not private) so screenshot tests can render the lock UI directly.
 @Composable
-private fun LockScreen(authenticating: Boolean, onUnlock: () -> Unit) {
+internal fun LockScreen(authenticating: Boolean, onUnlock: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()

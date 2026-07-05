@@ -78,6 +78,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # 自動リグレッションテスト(JVM: Robolectric + Roborazzi + 自作Bitmapゴールデン)。
+      # ロジック検証に加え、基準画像(src/test/goldens, src/test/screenshots)との
+      # ピクセル比較で見た目の退行も検出する。基準画像の更新は record-goldens
+      # ワークフロー(workflow_dispatch)で行う。エミュレータ不要・毎push実行。
+      - name: Run unit & golden tests (Pro debug variant)
+        run: ./gradlew :app:verifyRoborazziProDebug --no-daemon --stacktrace
+
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            android/app/build/reports/tests
+            android/app/build/outputs/roborazzi
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Decrypt release keystore
         env:
           KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}

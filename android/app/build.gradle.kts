@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("io.github.takahirom.roborazzi")
 }
 
 android {
@@ -101,6 +102,23 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric がアプリのリソース/マニフェストを読めるようにする
+            isIncludeAndroidResources = true
+            all { test ->
+                // ゴールデン画像の記録モード: ./gradlew ... -PupdateGoldens=true
+                // (通常は record-goldens ワークフロー経由で実行する)
+                test.systemProperty(
+                    "updateGoldens",
+                    project.findProperty("updateGoldens")?.toString() ?: "false"
+                )
+                // Bitmap を大量に扱うゴールデンテスト向け
+                test.maxHeapSize = "2g"
+            }
+        }
+    }
 }
 
 dependencies {
@@ -130,4 +148,17 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // createComposeRule 用のホストアクティビティ(debugビルドのみ。releaseには入らない)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    // ---- 単体・ゴールデン・スクリーンショットテスト (JVM実行。APKには一切入らない) ----
+    testImplementation(composeBom)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core-ktx:1.6.1")
+    testImplementation("androidx.test.ext:junit-ktx:1.2.1")
+    testImplementation("com.google.truth:truth:1.4.4")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.26.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.26.0")
 }
