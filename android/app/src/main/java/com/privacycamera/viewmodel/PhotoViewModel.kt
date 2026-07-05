@@ -24,8 +24,9 @@ import kotlinx.coroutines.withContext
 
 class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val store: SecurePhotoStore = (app as PrivacyCameraApplication).photoStore
-    private val settings: AppSettings = app.appSettings
+    private val application = app as PrivacyCameraApplication
+    private val store: SecurePhotoStore = application.photoStore
+    private val settings: AppSettings = application.appSettings
 
     private val _photos = MutableStateFlow<List<PhotoItem>>(emptyList())
     val photos: StateFlow<List<PhotoItem>> = _photos.asStateFlow()
