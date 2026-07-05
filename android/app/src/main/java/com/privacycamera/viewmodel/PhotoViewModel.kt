@@ -477,4 +477,26 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    // ---- Submission-print output flow logging (P5: no output without a log record) ----
+
+    /**
+     * Records [AccessActions.OUTPUT_PRINT] BEFORE a print job is queued, suspending until the
+     * write completes. Returns false only if the write itself failed, in which case the
+     * caller must NOT proceed to print — an output that isn't logged must not happen.
+     */
+    suspend fun logOutputPrintBeforeJob(photoId: String, detail: String): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                store.logAccess(photoId, AccessActions.OUTPUT_PRINT, detail)
+                true
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+    /** Records the terminal outcome of a print job, as a separate entry from OUTPUT_PRINT. */
+    suspend fun logOutputResult(photoId: String, detail: String) {
+        withContext(Dispatchers.IO) { store.logAccess(photoId, AccessActions.OUTPUT_RESULT, detail) }
+    }
 }

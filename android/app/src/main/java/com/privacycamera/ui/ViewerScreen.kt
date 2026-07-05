@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -60,11 +61,16 @@ fun ViewerScreen(
     onDeleted: () -> Unit,
     onEdit: (String) -> Unit,
     onMaskEdit: (String) -> Unit,
+    onOutputPrint: (String) -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findFragmentActivity() }
     val scope = rememberCoroutineScope()
+    // Submission-print entry point: hidden unless the feature has been revealed AND enabled
+    // (docs/2026-07-04_仕様_提出用出力機能.md §4). Pro-only.
+    val settingsRevealed by viewModel.settingsRevealed.collectAsState()
+    val printEnabled by viewModel.printEnabled.collectAsState()
 
     // The original is masked until the user passes device authentication.
     var revealed by remember { mutableStateOf(false) }
@@ -153,6 +159,12 @@ fun ViewerScreen(
                         if (com.privacycamera.Tier.isPro) {
                             IconButton(onClick = { onMaskEdit(photoId) }) {
                                 Icon(Icons.Filled.Brush, contentDescription = "マスクを編集")
+                            }
+                        }
+                        // Submission-print: hidden feature, Pro-only, must be revealed+enabled.
+                        if (com.privacycamera.Tier.isPro && settingsRevealed && printEnabled) {
+                            IconButton(onClick = { onOutputPrint(photoId) }) {
+                                Icon(Icons.Filled.Print, contentDescription = "提出用に印刷")
                             }
                         }
                     }
