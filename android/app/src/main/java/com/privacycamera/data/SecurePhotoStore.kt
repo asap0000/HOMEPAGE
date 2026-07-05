@@ -56,7 +56,13 @@ class SecurePhotoStore(private val context: Context) {
     private val trashMaskedDir = File(trashDir, "masked").apply { mkdirs() }
     private val trashMetaDir = File(trashDir, "meta").apply { mkdirs() }
     private val categoriesFile = File(baseDir, "categories.json")
-    private val accessLogFile = File(baseDir, "access_log.json")
+    // Detail access log: encrypted, append-only JSON array of recent AccessEntry rows.
+    private val accessLogFile = File(baseDir, "access_log.enc")
+    // Pre-encryption format (plaintext JSON). Only read once, to migrate into accessLogFile.
+    private val legacyAccessLogFile = File(baseDir, "access_log.json")
+    // Entries older than the retention window are rolled up here, one gzip+encrypted JSON
+    // array per calendar month, and removed from accessLogFile. See compactAccessLogIfNeeded.
+    private val logArchiveDir = File(baseDir, "log_archive").apply { mkdirs() }
     private val importedUuidsFile = File(baseDir, "migration_imported.json")
     // Persistent tombstones: uuids the user deleted ON THIS install. A backup restore skips
     // these so it never resurrects something deleted here — even after the 30-day trash
@@ -436,13 +442,14 @@ class SecurePhotoStore(private val context: Context) {
         categoriesFile.writeText(arr.toString())
     }
 
-    /** Appends an access-log entry (kept in the secure area, never leaves the device). */
+    /**
+     * Appends an access-log entry. The log is encrypted at rest (AES-256-GCM via
+     * [CryptoManager], same as photo originals) and never leaves the device. A photo-less
+     * event (file-level import/export, setting change, log management) uses an empty
+     * [photoId].
+     */
     fun logAccess(photoId: String, action: String, caption: String) {
-        val arr = try {
-            if (accessLogFile.exists()) JSONArray(accessLogFile.readText()) else JSONArray()
-        } catch (e: Exception) {
-            JSONArray()
-        }
+        val arr = readAccessLogArray()
         arr.put(
             JSONObject()
                 .put("t", System.currentTimeMillis())
@@ -450,34 +457,147 @@ class SecurePhotoStore(private val context: Context) {
                 .put("id", photoId)
                 .put("c", caption)
         )
-        // Keep only the most recent MAX_LOG_ENTRIES.
-        val start = maxOf(0, arr.length() - MAX_LOG_ENTRIES)
-        val trimmed = JSONArray()
-        for (i in start until arr.length()) trimmed.put(arr.get(i))
-        accessLogFile.writeText(trimmed.toString())
+        writeAccessLogArray(arr)
     }
 
-    /** Loads the access log, newest first. */
-    fun loadAccessLog(): List<AccessEntry> {
-        if (!accessLogFile.exists()) return emptyList()
+    /** Loads the (uncompacted) detail access log, newest first. */
+    fun loadAccessLog(): List<AccessEntry> = jsonArrayToEntries(readAccessLogArray()).sortedByDescending { it.timestamp }
+
+    /**
+     * Permanently erases all log history (detail entries AND monthly archives). Returns the
+     * number of entries erased, so the caller can record a [AccessActions.LOG_DELETE]
+     * tombstone stating how much was removed — the log system audits its own erasure, so a
+     * wipe is never itself invisible.
+     */
+    fun clearAccessLog(): Int {
+        val detailCount = readAccessLogArray().length()
+        val archivedCount = listArchivedMonths().sumOf { it.total }
+        accessLogFile.delete()
+        logArchiveDir.listFiles()?.forEach { it.delete() }
+        return detailCount + archivedCount
+    }
+
+    /**
+     * Rolls detail-log entries older than the retention window into per-month, gzip+encrypted
+     * archives, removing them from the detail log. Retention keeps whichever is LARGER of:
+     * entries from the last [DETAIL_RETENTION_DAYS] days, or the most recent
+     * [DETAIL_MIN_COUNT] entries overall (so light usage across many years still keeps a
+     * useful amount of raw detail). Safe to call repeatedly (e.g. on every app start); a
+     * no-op run compacts nothing. Returns the list of calendar months ("yyyy-MM") that were
+     * rolled up in this call, so the caller can record one [AccessActions.LOG_COMPACT] entry
+     * per month — compaction reorganizes data, it never discards it.
+     */
+    fun compactAccessLogIfNeeded(): List<String> {
+        val all = jsonArrayToEntries(readAccessLogArray()).sortedByDescending { it.timestamp }
+        if (all.isEmpty()) return emptyList()
+
+        val cutoff = System.currentTimeMillis() - DETAIL_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        // Split by index (not a set difference) so entries that are structurally identical
+        // (same millisecond/action/photo/caption) can never collide and vanish.
+        val retained = mutableListOf<AccessEntry>()
+        val aged = mutableListOf<AccessEntry>()
+        all.forEachIndexed { index, entry ->
+            if (index < DETAIL_MIN_COUNT || entry.timestamp >= cutoff) retained.add(entry) else aged.add(entry)
+        }
+        if (aged.isEmpty()) return emptyList()
+
+        val byMonth = aged.groupBy { monthKey(it.timestamp) }
+        for ((month, entries) in byMonth) {
+            val existing = readArchiveMonth(month)
+            writeArchiveMonth(month, existing + entries)
+        }
+
+        val retainedArr = JSONArray()
+        retained.sortedBy { it.timestamp }.forEach { retainedArr.put(entryToJson(it)) }
+        writeAccessLogArray(retainedArr)
+
+        return byMonth.keys.sorted()
+    }
+
+    /** Lists archived months (newest first) with per-action-code counts, for a history UI. */
+    fun listArchivedMonths(): List<ArchivedMonth> {
+        val months = logArchiveDir.listFiles { f -> f.name.endsWith(".json.gz.enc") }
+            ?.map { it.name.removeSuffix(".json.gz.enc") }
+            ?: emptyList()
+        return months.sortedDescending().mapNotNull { month ->
+            val entries = readArchiveMonth(month)
+            if (entries.isEmpty()) return@mapNotNull null
+            val counts = entries.groupingBy { it.action }.eachCount()
+            ArchivedMonth(month, counts, entries.size)
+        }
+    }
+
+    /** Fully decompresses/decrypts one archived month's entries, newest first (UI expansion). */
+    fun loadArchivedMonthEntries(month: String): List<AccessEntry> =
+        readArchiveMonth(month).sortedByDescending { it.timestamp }
+
+    // ---- access-log internals ----
+
+    private fun entryToJson(e: AccessEntry): JSONObject =
+        JSONObject().put("t", e.timestamp).put("a", e.action).put("id", e.photoId).put("c", e.caption)
+
+    private fun jsonArrayToEntries(arr: JSONArray): List<AccessEntry> =
+        (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            AccessEntry(
+                timestamp = o.optLong("t"),
+                action = o.optString("a"),
+                photoId = o.optString("id"),
+                caption = o.optString("c")
+            )
+        }
+
+    /** Reads the encrypted detail log, transparently migrating a pre-existing plaintext file. */
+    private fun readAccessLogArray(): JSONArray {
+        if (!accessLogFile.exists() && legacyAccessLogFile.exists()) {
+            val migrated = try {
+                JSONArray(legacyAccessLogFile.readText())
+            } catch (e: Exception) {
+                JSONArray()
+            }
+            writeAccessLogArray(migrated)
+            legacyAccessLogFile.delete()
+        }
+        if (!accessLogFile.exists()) return JSONArray()
         return try {
-            val arr = JSONArray(accessLogFile.readText())
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                AccessEntry(
-                    timestamp = o.optLong("t"),
-                    action = o.optString("a"),
-                    photoId = o.optString("id"),
-                    caption = o.optString("c")
-                )
-            }.sortedByDescending { it.timestamp }
+            JSONArray(String(CryptoManager.decrypt(accessLogFile.readBytes()), Charsets.UTF_8))
+        } catch (e: Exception) {
+            JSONArray()
+        }
+    }
+
+    private fun writeAccessLogArray(arr: JSONArray) {
+        accessLogFile.writeBytes(CryptoManager.encrypt(arr.toString().toByteArray(Charsets.UTF_8)))
+    }
+
+    private fun readArchiveMonth(month: String): List<AccessEntry> {
+        val f = File(logArchiveDir, "$month.json.gz.enc")
+        if (!f.exists()) return emptyList()
+        return try {
+            val gzipped = CryptoManager.decrypt(f.readBytes())
+            val json = java.util.zip.GZIPInputStream(gzipped.inputStream()).use {
+                it.readBytes().toString(Charsets.UTF_8)
+            }
+            jsonArrayToEntries(JSONArray(json))
         } catch (e: Exception) {
             emptyList()
         }
     }
 
-    fun clearAccessLog() {
-        accessLogFile.delete()
+    private fun writeArchiveMonth(month: String, entries: List<AccessEntry>) {
+        val arr = JSONArray()
+        entries.sortedBy { it.timestamp }.forEach { arr.put(entryToJson(it)) }
+        val plain = arr.toString().toByteArray(Charsets.UTF_8)
+        val gzipOut = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(gzipOut).use { it.write(plain) }
+        File(logArchiveDir, "$month.json.gz.enc").writeBytes(CryptoManager.encrypt(gzipOut.toByteArray()))
+    }
+
+    /** "yyyy-MM" key (device-local calendar) for grouping entries into monthly archives. */
+    private fun monthKey(timestampMillis: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = timestampMillis
+        return "%04d-%02d".format(cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1)
     }
 
     private fun readMeta(id: String): JSONObject? {
@@ -528,7 +648,10 @@ class SecurePhotoStore(private val context: Context) {
     }
 
     companion object {
-        private const val MAX_LOG_ENTRIES = 1000
+        // Detail access-log retention: keep whichever is larger of "last N days" or "last N
+        // entries" (see compactAccessLogIfNeeded), then roll the rest into monthly archives.
+        private const val DETAIL_RETENTION_DAYS = 365L
+        private const val DETAIL_MIN_COUNT = 1000
 
         /** How long a soft-deleted photo is kept in the trash before being purged. */
         const val TRASH_TTL_MILLIS = 30L * 24 * 60 * 60 * 1000 // 30 days

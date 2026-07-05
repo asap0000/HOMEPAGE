@@ -8,6 +8,18 @@ data class AccessEntry(
     val caption: String
 )
 
+/**
+ * A summary of one calendar month's worth of access-log entries that have aged out of the
+ * detail log and been rolled up into a compressed monthly archive (see
+ * [SecurePhotoStore] compaction). [counts] maps action code to how many times it occurred
+ * that month; the archive can be expanded to the full [AccessEntry] list on demand.
+ */
+data class ArchivedMonth(
+    val month: String, // "yyyy-MM"
+    val counts: Map<String, Int>,
+    val total: Int
+)
+
 /** Action codes used in the access log, with human-readable Japanese labels. */
 object AccessActions {
     const val OPEN = "OPEN"       // viewer opened (masked view)
@@ -27,6 +39,13 @@ object AccessActions {
 
     // Submission-print feature (docs/2026-07-04_仕様_提出用出力機能.md).
     const val SETTING_CHANGE = "SETTING_CHANGE" // a hidden/opt-out setting was toggled
+    const val OUTPUT_PRINT = "OUTPUT_PRINT"     // a submission-print job was queued
+    const val OUTPUT_RESULT = "OUTPUT_RESULT"   // that job's outcome (completed/failed/canceled)
+    const val OUTPUT_BLOCKED = "OUTPUT_BLOCKED" // an output attempt was refused
+
+    // Log-management events (self-referential: recorded by the log system about itself).
+    const val LOG_DELETE = "LOG_DELETE"   // user bulk-deleted log history
+    const val LOG_COMPACT = "LOG_COMPACT" // detail entries were rolled up into a monthly archive
 
     fun label(code: String): String = when (code) {
         OPEN -> "閲覧（マスク）"
@@ -40,6 +59,11 @@ object AccessActions {
         BACKUP_RESTORE -> "バックアップ復元"
         IMAGE_IMPORT -> "画像取り込み"
         SETTING_CHANGE -> "設定変更"
+        OUTPUT_PRINT -> "提出用に印刷"
+        OUTPUT_RESULT -> "印刷結果"
+        OUTPUT_BLOCKED -> "出力をブロック"
+        LOG_DELETE -> "履歴を削除"
+        LOG_COMPACT -> "履歴を圧縮"
         else -> code
     }
 }

@@ -10,6 +10,7 @@ import com.privacycamera.Tier
 import com.privacycamera.data.AccessActions
 import com.privacycamera.data.AccessEntry
 import com.privacycamera.data.AppSettings
+import com.privacycamera.data.ArchivedMonth
 import com.privacycamera.data.BackupManager
 import com.privacycamera.data.MaskingEngine
 import com.privacycamera.data.PhotoCategories
@@ -53,6 +54,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
         reloadCategories()
         refreshTrash() // also purges anything past its 30-day window
+        compactAccessLog() // rolls aged-out log entries into monthly archives, if any
     }
 
     private fun reloadCategories() {
@@ -381,6 +383,10 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val _accessLog = MutableStateFlow<List<AccessEntry>>(emptyList())
     val accessLog: StateFlow<List<AccessEntry>> = _accessLog.asStateFlow()
 
+    /** Calendar months rolled up into compressed archives (newest first), for the history UI. */
+    private val _archivedMonths = MutableStateFlow<List<ArchivedMonth>>(emptyList())
+    val archivedMonths: StateFlow<List<ArchivedMonth>> = _archivedMonths.asStateFlow()
+
     fun logAccess(photoId: String, action: String, caption: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.logAccess(photoId, action, caption) }
@@ -390,12 +396,45 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshAccessLog() {
         viewModelScope.launch {
             _accessLog.value = withContext(Dispatchers.IO) { store.loadAccessLog() }
+            _archivedMonths.value = withContext(Dispatchers.IO) { store.listArchivedMonths() }
         }
     }
 
+    /**
+     * Rolls aged-out detail entries into monthly archives (see
+     * [SecurePhotoStore.compactAccessLogIfNeeded]). Compaction reorganizes data — it never
+     * discards it — so each affected month gets its own [AccessActions.LOG_COMPACT] record.
+     * Safe to call on every app start; a no-op run compacts nothing.
+     */
+    fun compactAccessLog() {
+        viewModelScope.launch {
+            val months = withContext(Dispatchers.IO) {
+                val compacted = store.compactAccessLogIfNeeded()
+                compacted.forEach { month ->
+                    store.logAccess("", AccessActions.LOG_COMPACT, "$month 分を圧縮アーカイブへ")
+                }
+                compacted
+            }
+            if (months.isNotEmpty()) refreshAccessLog()
+        }
+    }
+
+    /** Decrypts/decompresses one archived month's full entry list on demand (UI expansion). */
+    suspend fun loadArchivedMonthEntries(month: String): List<AccessEntry> =
+        withContext(Dispatchers.IO) { store.loadArchivedMonthEntries(month) }
+
+    /**
+     * Permanently erases all log history (detail + archives). The erasure itself is recorded
+     * as a fresh [AccessActions.LOG_DELETE] entry stating how many rows were removed and
+     * when — so "the log was cleared" is the one fact that always survives a clear. Complete
+     * silence (no trace at all) is intentionally not offered.
+     */
     fun clearAccessLog() {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.clearAccessLog() }
+            withContext(Dispatchers.IO) {
+                val erased = store.clearAccessLog()
+                store.logAccess("", AccessActions.LOG_DELETE, "履歴 $erased 件を削除")
+            }
             refreshAccessLog()
         }
     }
