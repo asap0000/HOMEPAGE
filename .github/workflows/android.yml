@@ -38,6 +38,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Fast, dependency-free static checks for this app's core safety guarantees
+      # (docs/2026-07-04_仕様_提出用出力機能.md P1-P4). Runs before the build so a
+      # violation fails in seconds, not minutes.
+      - name: Verify offline / no-share-intent / no-temp-file guarantees
+        run: |
+          set -e
+          if grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml; then
+            echo "::error::INTERNET permission must not be declared — this app's core promise is that it cannot send data off the device."
+            exit 1
+          fi
+          if grep -rlE 'ACTION_SEND|Intent\.createChooser|FileProvider' app/src/main/java/com/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not use share intents or FileProvider (P3: single-purpose print output only)."
+            exit 1
+          fi
+          if grep -rlE 'cacheDir|filesDir|openFileOutput|\bFile\(' app/src/main/java/com/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not create files in app storage (P4: the print framework's file descriptor is the only sink)."
+            exit 1
+          fi
+          echo "OK: no INTERNET permission; print module has no share-intent or temp-file paths."
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -79,13 +99,13 @@ jobs:
       # istech オフライン厳守の機械的担保 (1/2):
       # この製品は機器連動を持たないため、INTERNET パーミッションの宣言自体を禁止する。
       # 人間も Claude も見落とした場合に、ここで機械的に弾く。
+      # (lite/pro 両フレーバーの全 APK をグロブで検査する)
       - name: Verify offline policy (no INTERNET permission)
         run: |
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
           checked=0
-          for apk in app/build/outputs/apk/debug/app-debug.apk \
-                     app/build/outputs/apk/release/app-release.apk \
-                     app/build/outputs/apk/release/app-release-unsigned.apk; do
+          for apk in app/build/outputs/apk/*/debug/*.apk \
+                     app/build/outputs/apk/*/release/*.apk; do
             [ -f "$apk" ] || continue
             checked=1
             if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
@@ -101,31 +121,39 @@ jobs:
 
       # istech オフライン厳守の機械的担保 (2/2):
       # HTTP クライアント等のネットワーク系ライブラリが依存ツリーに混入していないか検査する。
+      # (フレーバー導入後は releaseRuntimeClasspath がフレーバー別になる)
       - name: Verify offline policy (no network libraries)
         run: |
-          ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath --no-daemon > "$RUNNER_TEMP/deps.txt"
-          if grep -Ei 'okhttp|retrofit|ktor-client|volley|grpc|apache\.http|cronet' "$RUNNER_TEMP/deps.txt"; then
-            echo "::error::Network library detected in releaseRuntimeClasspath — istech offline policy violation."
-            exit 1
-          fi
-          echo "OK: no known network libraries in releaseRuntimeClasspath."
+          for cfg in liteReleaseRuntimeClasspath proReleaseRuntimeClasspath; do
+            ./gradlew -q :app:dependencies --configuration "$cfg" --no-daemon > "$RUNNER_TEMP/deps-$cfg.txt"
+            if grep -Ei 'okhttp|retrofit|ktor-client|volley|grpc|apache\.http|cronet' "$RUNNER_TEMP/deps-$cfg.txt"; then
+              echo "::error::Network library detected in $cfg — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: no known network libraries in $cfg."
+          done
 
-      - name: Upload debug APK
+      - name: Upload debug APKs
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          # Both product flavors (lite/pro).
+          path: |
+            android/app/build/outputs/apk/lite/debug/app-lite-debug.apk
+            android/app/build/outputs/apk/pro/debug/app-pro-debug.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload release APK
+      - name: Upload release APKs
         uses: actions/upload-artifact@v4
         with:
           name: app-release
-          # Picks up the signed app-release.apk when secrets are set, otherwise
-          # the app-release-unsigned.apk.
+          # Picks up the signed app-<flavor>-release.apk when secrets are set,
+          # otherwise the app-<flavor>-release-unsigned.apk.
           path: |
-            android/app/build/outputs/apk/release/app-release.apk
-            android/app/build/outputs/apk/release/app-release-unsigned.apk
+            android/app/build/outputs/apk/lite/release/app-lite-release.apk
+            android/app/build/outputs/apk/lite/release/app-lite-release-unsigned.apk
+            android/app/build/outputs/apk/pro/release/app-pro-release.apk
+            android/app/build/outputs/apk/pro/release/app-pro-release-unsigned.apk
           if-no-files-found: warn
           retention-days: 14

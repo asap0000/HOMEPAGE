@@ -19,6 +19,15 @@ object BiometricGate {
 
     private const val AUTHENTICATORS = BIOMETRIC_STRONG or DEVICE_CREDENTIAL
 
+    /**
+     * True while a system biometric/credential prompt is on screen. The app-lock uses this
+     * to avoid treating the prompt's own ON_PAUSE as "the app went to the background" and
+     * re-locking underneath an in-progress reveal/unlock.
+     */
+    @Volatile
+    var isPrompting: Boolean = false
+        private set
+
     sealed interface Result {
         data object Success : Result
         data object Failed : Result
@@ -46,11 +55,13 @@ object BiometricGate {
             executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    isPrompting = false
                     onResult(Result.Success)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     // User cancelled or a hard error occurred.
+                    isPrompting = false
                     onResult(Result.Failed)
                 }
                 // onAuthenticationFailed (a single mismatched attempt) intentionally
@@ -65,6 +76,7 @@ object BiometricGate {
             .setAllowedAuthenticators(AUTHENTICATORS)
             .build()
 
+        isPrompting = true
         prompt.authenticate(info)
     }
 }

@@ -12,9 +12,12 @@ android {
         applicationId = "com.privacycamera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        // istech バージョニング規約: セマンティックバージョニング3桁 (vMAJOR.MINOR.PATCH)
-        versionName = "1.0.0"
+        // versionCode/versionName are injected by CI (see .github/workflows/release.yml)
+        // so distributed builds auto-increment without manual edits. Local/CI debug builds
+        // fall back to the defaults below.
+        // istech バージョニング規約: リリースタグは vMAJOR.MINOR.PATCH の3桁 semver を用いる。
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "0.0-dev"
 
         vectorDrawables { useSupportLibrary = true }
     }
@@ -56,6 +59,29 @@ android {
         }
     }
 
+    // Two product tiers shipped from one codebase:
+    //   lite -> free; capped local storage, encrypted one-way export, no masking
+    //   pro  -> paid; unlimited storage, cumulative import, PII masking, advanced edit
+    // The boolean BuildConfig.IS_PRO is the single source of truth for feature gating
+    // (see com.privacycamera.Tier). Lite ships under a distinct applicationId so it can
+    // be installed alongside Pro; Pro keeps the original id to preserve the upgrade path.
+    flavorDimensions += "tier"
+    productFlavors {
+        create("lite") {
+            dimension = "tier"
+            applicationIdSuffix = ".lite"
+            versionNameSuffix = "-lite"
+            buildConfigField("boolean", "IS_PRO", "false")
+            resValue("string", "app_name", "プライバシーカメラ Lite")
+        }
+        create("pro") {
+            dimension = "tier"
+            versionNameSuffix = "-pro"
+            buildConfigField("boolean", "IS_PRO", "true")
+            resValue("string", "app_name", "プライバシーカメラ Pro")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -67,6 +93,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

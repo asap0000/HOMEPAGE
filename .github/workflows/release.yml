@@ -65,40 +65,57 @@ jobs:
             app/release.keystore.gpg
           echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
+      - name: Compute versionCode / versionName
+        run: |
+          # versionCode: a monotonically increasing integer per release run.
+          # github.run_number only ever grows for this workflow; the +1000 base keeps
+          # it comfortably above already-shipped builds and leaves headroom.
+          echo "VERSION_CODE=$((1000 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
+          # versionName: the release tag without the leading "v" (e.g. v0.3-beta -> 0.3-beta).
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "VERSION_NAME=${TAG#v}" >> "$GITHUB_ENV"
+
       - name: Build signed release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # istech オフライン厳守の機械的担保: リリース前の最終ゲート。
+      # istech オフライン厳守の機械的担保: リリース前の最終ゲート(lite/pro 両方を検査)。
       - name: Verify offline policy (no INTERNET permission)
         run: |
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          APK=app/build/outputs/apk/release/app-release.apk
-          if "$AAPT" dump permissions "$APK" | grep -q 'android.permission.INTERNET'; then
-            echo "::error::$APK requests android.permission.INTERNET — istech offline policy violation."
-            exit 1
-          fi
-          echo "OK: $APK does not request INTERNET permission."
+          for apk in app/build/outputs/apk/lite/release/app-lite-release.apk \
+                     app/build/outputs/apk/pro/release/app-pro-release.apk; do
+            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
+              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: $apk does not request INTERNET permission."
+          done
 
       # istech リリース手順: 成果物には SHA-256 チェックサムを添付し、
       # リリースノートにも併記する（ランディングページ転記用）。
-      - name: Stage APK and generate SHA-256 checksum
+      - name: Stage APKs and generate SHA-256 checksums
         id: stage
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          cp app/build/outputs/apk/release/app-release.apk \
-             "$GITHUB_WORKSPACE/PrivacyCamera-${TAG}.apk"
+          cp app/build/outputs/apk/lite/release/app-lite-release.apk \
+             "$GITHUB_WORKSPACE/PrivacyCamera-Lite-${TAG}.apk"
+          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
+             "$GITHUB_WORKSPACE/PrivacyCamera-Pro-${TAG}.apk"
           cd "$GITHUB_WORKSPACE"
-          sha256sum "PrivacyCamera-${TAG}.apk" | tee "PrivacyCamera-${TAG}.apk.sha256"
-          echo "sha256=$(cut -d' ' -f1 "PrivacyCamera-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
+          sha256sum "PrivacyCamera-Lite-${TAG}.apk" | tee "PrivacyCamera-Lite-${TAG}.apk.sha256"
+          sha256sum "PrivacyCamera-Pro-${TAG}.apk" | tee "PrivacyCamera-Pro-${TAG}.apk.sha256"
+          echo "sha256_lite=$(cut -d' ' -f1 "PrivacyCamera-Lite-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
+          echo "sha256_pro=$(cut -d' ' -f1 "PrivacyCamera-Pro-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release with the APK
+      - name: Create GitHub Release with the APKs
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           body: |
-            **SHA-256 (APK)**: `${{ steps.stage.outputs.sha256 }}`
+            **SHA-256 (Lite APK)**: `${{ steps.stage.outputs.sha256_lite }}`
+            **SHA-256 (Pro APK)**: `${{ steps.stage.outputs.sha256_pro }}`
           files: |
             PrivacyCamera-*.apk
             PrivacyCamera-*.apk.sha256

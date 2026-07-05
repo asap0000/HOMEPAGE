@@ -115,6 +115,8 @@ private fun CameraContent(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val categories by viewModel.categories.collectAsState()
+    val photos by viewModel.photos.collectAsState()
+    var showLimitDialog by remember { mutableStateOf(false) }
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
         ImageCapture.Builder()
@@ -213,6 +215,21 @@ private fun CameraContent(
                 .padding(top = 96.dp, start = 16.dp, end = 16.dp)
         )
 
+        // Lite-only capacity counter (Pro is unlimited so saveLimit is null).
+        viewModel.saveLimit?.let { limit ->
+            val full = photos.size >= limit
+            Text(
+                text = "保存 ${photos.size} / $limit" + if (full) "（上限）" else "",
+                color = if (full) MaterialTheme.colorScheme.error else Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(top = 124.dp, start = 16.dp, end = 16.dp)
+            )
+        }
+
         // Bottom controls.
         Box(
             modifier = Modifier
@@ -227,6 +244,11 @@ private fun CameraContent(
                 enabled = shutterEnabled,
                 modifier = Modifier.align(Alignment.Center)
             ) {
+                // Don't waste a capture when the vault is already full (Lite cap).
+                if (viewModel.isAtSaveLimit()) {
+                    showLimitDialog = true
+                    return@ShutterButton
+                }
                 isSaving = true
                 imageCapture.flashMode = flashMode
                 imageCapture.takePicture(
@@ -236,10 +258,18 @@ private fun CameraContent(
                             val rotation = image.imageInfo.rotationDegrees
                             val bytes = image.toJpegBytes()
                             image.close()
-                            viewModel.onCaptured(bytes, rotation) { id ->
-                                isSaving = false
-                                pendingMemoId = id
-                            }
+                            viewModel.onCaptured(
+                                bytes,
+                                rotation,
+                                onSaved = { id ->
+                                    isSaving = false
+                                    pendingMemoId = id
+                                },
+                                onLimitReached = {
+                                    isSaving = false
+                                    showLimitDialog = true
+                                }
+                            )
                         }
 
                         override fun onError(exception: ImageCaptureException) {
@@ -280,6 +310,51 @@ private fun CameraContent(
             }
         )
     }
+
+    if (showLimitDialog) {
+        SaveLimitDialog(
+            limit = viewModel.saveLimit ?: 0,
+            onOpenGallery = {
+                showLimitDialog = false
+                onOpenGallery()
+            },
+            onDismiss = { showLimitDialog = false }
+        )
+    }
+}
+
+/**
+ * Shown when Lite's local storage cap is reached. The cap is by design: explain how to
+ * make room (delete — export first to keep), and surface the Pro upgrade for unlimited.
+ */
+@Composable
+private fun SaveLimitDialog(
+    limit: Int,
+    onOpenGallery: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("保存上限に達しました") },
+        text = {
+            Text(
+                "この端末に保存できる写真は $limit 枚までです。\n" +
+                    "新しく撮るには、保護フォルダで写真を削除して空きを作ってください。" +
+                    "残しておきたい写真は、削除する前に移行用ファイルへ書き出せます。\n\n" +
+                    "Pro版なら保存は無制限です。"
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onOpenGallery) {
+                Text("保護フォルダを開く")
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("閉じる")
+            }
+        }
+    )
 }
 
 @Composable

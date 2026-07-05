@@ -1,7 +1,5 @@
 package com.privacycamera.ui
 
-import android.content.Context
-import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -12,8 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -27,7 +27,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,8 +41,10 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.privacycamera.auth.BiometricGate
 import com.privacycamera.data.AccessActions
@@ -58,11 +60,17 @@ fun ViewerScreen(
     onBack: () -> Unit,
     onDeleted: () -> Unit,
     onEdit: (String) -> Unit,
+    onMaskEdit: (String) -> Unit,
+    onOutputPrint: (String) -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findFragmentActivity() }
     val scope = rememberCoroutineScope()
+    // Submission-print entry point: hidden unless the feature has been revealed AND enabled
+    // (docs/2026-07-04_仕様_提出用出力機能.md §4). Pro-only.
+    val settingsRevealed by viewModel.settingsRevealed.collectAsState()
+    val printEnabled by viewModel.printEnabled.collectAsState()
 
     // The original is masked until the user passes device authentication.
     var revealed by remember { mutableStateOf(false) }
@@ -85,9 +93,19 @@ fun ViewerScreen(
         }
     }
 
-    // Record that this photo was opened (masked view).
-    LaunchedEffect(photoId) {
-        viewModel.logAccess(photoId, AccessActions.OPEN, item?.caption.orEmpty())
+    // Opening a photo (masked view) is deliberately NOT logged: it is as routine as taking a
+    // picture and would flood the access log. Only reveal/export/delete/edit are audited.
+
+    // Re-mask the moment the app starts leaving the foreground (ON_PAUSE happens
+    // before the recents snapshot is taken), so the decrypted original never lingers
+    // in the overview/recents preview or on resume. Re-auth is required to reveal again.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) revealed = false
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     fun requestReveal() {
@@ -137,6 +155,18 @@ fun ViewerScreen(
                         IconButton(onClick = { onEdit(photoId) }) {
                             Icon(Icons.Filled.Tune, contentDescription = "画像を編集")
                         }
+                        // Advanced masking is a Pro feature; it also needs the original.
+                        if (com.privacycamera.Tier.isPro) {
+                            IconButton(onClick = { onMaskEdit(photoId) }) {
+                                Icon(Icons.Filled.Brush, contentDescription = "マスクを編集")
+                            }
+                        }
+                        // Submission-print: hidden feature, Pro-only, must be revealed+enabled.
+                        if (com.privacycamera.Tier.isPro && settingsRevealed && printEnabled) {
+                            IconButton(onClick = { onOutputPrint(photoId) }) {
+                                Icon(Icons.Filled.Print, contentDescription = "提出用に印刷")
+                            }
+                        }
                     }
                     IconButton(onClick = {
                         if (revealed) revealed = false else requestReveal()
@@ -165,6 +195,11 @@ fun ViewerScreen(
                     IconButton(onClick = {
                         viewModel.logAccess(photoId, AccessActions.DELETE, item?.caption.orEmpty())
                         viewModel.delete(photoId)
+                        Toast.makeText(
+                            context,
+                            "ゴミ箱に移動しました（30日間は復元できます）",
+                            Toast.LENGTH_SHORT
+                        ).show()
                         onDeleted()
                     }) {
                         Icon(Icons.Filled.Delete, contentDescription = "削除")
@@ -222,14 +257,4 @@ fun ViewerScreen(
             }
         )
     }
-}
-
-/** Walks the ContextWrapper chain to find the hosting FragmentActivity. */
-private fun Context.findFragmentActivity(): FragmentActivity? {
-    var ctx: Context? = this
-    while (ctx is ContextWrapper) {
-        if (ctx is FragmentActivity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
 }

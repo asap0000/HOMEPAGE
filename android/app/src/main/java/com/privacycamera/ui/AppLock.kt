@@ -1,6 +1,7 @@
 package com.privacycamera.ui
 
 import android.os.SystemClock
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -72,6 +73,16 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> if (lockState == LockState.LOCKED) promptAuth()
+                // Lock as early as ON_PAUSE — this fires BEFORE the system grabs the
+                // recents/overview snapshot, so the (possibly revealed) content is covered
+                // by the lock screen before it can leak into the task switcher. Skip it
+                // while our own auth prompt is up, since that prompt also pauses us and we
+                // must not re-lock underneath an in-progress reveal/unlock.
+                Lifecycle.Event.ON_PAUSE ->
+                    if (lockState == LockState.UNLOCKED && !BiometricGate.isPrompting) {
+                        lockState = LockState.LOCKED
+                    }
+                // Belt-and-suspenders for any path that stops without pausing first.
                 Lifecycle.Event.ON_STOP -> if (lockState == LockState.UNLOCKED) {
                     lockState = LockState.LOCKED
                 }
@@ -96,7 +107,12 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         }
     }
 
-    if (lockState == LockState.UNLOCKED) {
+    // The content is ALWAYS composed; the lock screen is drawn on top when locked.
+    // Tearing the content out of composition while locked would unregister any
+    // in-flight Activity-result launchers (e.g. the system file picker used for
+    // import/export), so their results would be dropped on return. Keeping it
+    // composed — and merely covered — lets those flows complete after unlocking.
+    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
         // Observe every touch (Initial pass, without consuming) to reset the timer.
         androidx.compose.foundation.layout.Box(
             modifier = Modifier
@@ -112,11 +128,15 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
         ) {
             content()
         }
-    } else {
-        LockScreen(
-            authenticating = lockState == LockState.AUTHENTICATING,
-            onUnlock = { promptAuth() }
-        )
+
+        if (lockState != LockState.UNLOCKED) {
+            // Opaque, full-screen cover so the protected content is never visible
+            // (and stays uninteractive) while locked.
+            LockScreen(
+                authenticating = lockState == LockState.AUTHENTICATING,
+                onUnlock = { promptAuth() }
+            )
+        }
     }
 }
 
@@ -125,6 +145,16 @@ private fun LockScreen(authenticating: Boolean, onUnlock: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            // Opaque cover + swallow all touches so the content underneath (which stays
+            // composed) is neither visible nor interactive while locked.
+            .background(MaterialTheme.colorScheme.background)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent().changes.forEach { it.consume() }
+                    }
+                }
+            }
             .padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
