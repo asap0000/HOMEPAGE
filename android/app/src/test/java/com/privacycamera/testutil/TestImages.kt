@@ -25,15 +25,4 @@ object TestImages {
         }
         return bmp
     }
-
-    /** 画像内の異なり色数(ダウンサンプル効果の測定用)。 */
-    fun distinctColors(bmp: Bitmap): Int {
-        val seen = HashSet<Int>()
-        for (y in 0 until bmp.height) {
-            for (x in 0 until bmp.width) {
-                seen.add(bmp.getPixel(x, y))
-            }
-        }
-        return seen.size
-    }
 }
