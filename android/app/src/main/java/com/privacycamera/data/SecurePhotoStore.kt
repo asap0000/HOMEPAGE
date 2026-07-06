@@ -118,10 +118,35 @@ class SecurePhotoStore(private val context: Context) {
         val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             ?: throw IllegalArgumentException("Not a decodable image")
         val id = newId()
-        val maskedFile = File(maskedDir, "$id.jpg")
+        return try {
+            writePhotoFiles(id, CryptoManager.encrypt(jpegBytes), source, uuid, caption, category, createdAt)
+        } finally {
+            source.recycle()
+        }
+    }
 
+    /**
+     * Writes the original/masked-preview/meta trio for [id] as all-or-nothing: if any
+     * write fails partway through (e.g. the device is out of storage), whatever was
+     * already written for this id is deleted before the failure is re-thrown, so a failed
+     * capture never leaves an orphaned partial photo behind.
+     *
+     * Internal (not private) so a test can exercise the file-write/cleanup behavior
+     * directly with a dummy "encrypted" blob, without going through [CryptoManager] —
+     * which needs the real device's AndroidKeyStore and isn't available under Robolectric.
+     */
+    internal fun writePhotoFiles(
+        id: String,
+        encryptedOriginal: ByteArray,
+        source: Bitmap,
+        uuid: String,
+        caption: String,
+        category: String,
+        createdAt: Long
+    ): PhotoItem {
+        val maskedFile = File(maskedDir, "$id.jpg")
         try {
-            File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
+            File(originalsDir, "$id.enc").writeBytes(encryptedOriginal)
 
             val masked = MaskingEngine.mask(source)
             try {
@@ -136,15 +161,10 @@ class SecurePhotoStore(private val context: Context) {
 
             return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
         } catch (e: IOException) {
-            // All-or-nothing: if any write here fails (e.g. the device ran out of
-            // storage mid-write), don't leave an orphaned original/preview/meta behind —
-            // clean up and let the caller surface the failure instead of a partial photo.
             File(originalsDir, "$id.enc").delete()
             maskedFile.delete()
             File(metaDir, "$id.json").delete()
             throw e
-        } finally {
-            source.recycle()
         }
     }
 
