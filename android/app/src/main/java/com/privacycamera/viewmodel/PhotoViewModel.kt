@@ -16,6 +16,7 @@ import com.privacycamera.data.MaskingEngine
 import com.privacycamera.data.PhotoCategories
 import com.privacycamera.data.PhotoItem
 import com.privacycamera.data.SecurePhotoStore
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -102,22 +103,30 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * the UI can prompt for a memo.
      *
      * When the tier's storage cap is already reached the capture is discarded and
-     * [onLimitReached] is invoked instead — the user must delete to make room.
+     * [onLimitReached] is invoked instead — the user must delete to make room. If the
+     * write itself fails (e.g. the device is out of disk space), [onSaveFailed] is invoked
+     * instead of crashing; [SecurePhotoStore] guarantees no partial photo is left behind.
      */
     fun onCaptured(
         jpegBytes: ByteArray,
         rotationDegrees: Int,
         onSaved: (String) -> Unit = {},
-        onLimitReached: () -> Unit = {}
+        onLimitReached: () -> Unit = {},
+        onSaveFailed: () -> Unit = {}
     ) {
         if (isAtSaveLimit()) {
             onLimitReached()
             return
         }
         viewModelScope.launch {
-            val item = withContext(Dispatchers.IO) {
-                val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
-                store.save(upright)
+            val item = try {
+                withContext(Dispatchers.IO) {
+                    val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
+                    store.save(upright)
+                }
+            } catch (e: IOException) {
+                onSaveFailed()
+                return@launch
             }
             refresh()
             onSaved(item.id)

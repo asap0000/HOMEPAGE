@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 
 /**
  * A single stored photo: the masked preview plus its user-added metadata.
@@ -117,20 +118,34 @@ class SecurePhotoStore(private val context: Context) {
         val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             ?: throw IllegalArgumentException("Not a decodable image")
         val id = newId()
-
-        File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
-
-        val masked = MaskingEngine.mask(source)
         val maskedFile = File(maskedDir, "$id.jpg")
-        maskedFile.outputStream().use { out ->
-            masked.compress(Bitmap.CompressFormat.JPEG, 85, out)
+
+        try {
+            File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
+
+            val masked = MaskingEngine.mask(source)
+            try {
+                maskedFile.outputStream().use { out ->
+                    masked.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                }
+            } finally {
+                masked.recycle()
+            }
+
+            writeMeta(id, uuid, caption, category, createdAt)
+
+            return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
+        } catch (e: IOException) {
+            // All-or-nothing: if any write here fails (e.g. the device ran out of
+            // storage mid-write), don't leave an orphaned original/preview/meta behind —
+            // clean up and let the caller surface the failure instead of a partial photo.
+            File(originalsDir, "$id.enc").delete()
+            maskedFile.delete()
+            File(metaDir, "$id.json").delete()
+            throw e
+        } finally {
+            source.recycle()
         }
-        source.recycle()
-        masked.recycle()
-
-        writeMeta(id, uuid, caption, category, createdAt)
-
-        return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
     }
 
     /** Returns a storage id (file-name key) not already in use. */

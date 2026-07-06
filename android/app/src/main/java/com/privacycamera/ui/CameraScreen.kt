@@ -268,6 +268,14 @@ private fun CameraContent(
                                 onLimitReached = {
                                     isSaving = false
                                     showLimitDialog = true
+                                },
+                                onSaveFailed = {
+                                    isSaving = false
+                                    Toast.makeText(
+                                        context,
+                                        "保存に失敗しました（空き容量を確認してください）",
+                                        Toast.LENGTH_LONG
+                                    ).show()
                                 }
                             )
                         }
