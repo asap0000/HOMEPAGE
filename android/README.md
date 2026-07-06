@@ -151,8 +151,10 @@ Release ページから直接 APK をダウンロードできるので、Actions
   `BackupCrypto`（暗号化バックアップ）、`AccessActions`（ログラベル）
 - **ゴールデンテスト**: マスク結果・透かし結果を基準 PNG（`src/test/goldens/`）と
   ピクセル比較
-- **スクリーンショットテスト（Roborazzi）**: メモダイアログ・ロック画面を基準画像
+- **スクリーンショットテスト（Roborazzi）**: ロック画面（待機/認証中）を基準画像
   （`src/test/screenshots/`）と比較
+  ※ダイアログ系（AlertDialog）は Robolectric 上で AppNotIdleException になる既知の
+  相性問題があるため対象外（エミュレータ導入時＝フェーズ3で再検討）
 
 ### 基準画像（ゴールデン）の更新
 基準画像は **CI 上で記録**します（ローカルのフォント差による偽差分を防ぐため）。
