@@ -58,6 +58,22 @@ jobs:
           fi
           echo "OK: no INTERNET permission; print module has no share-intent or temp-file paths."
 
+      # BusCourse (:buscourse) 向け istech オフライン厳守の機械的担保 (Layer1 1/2・設計書§8.2.1):
+      # ソース AndroidManifest.xml に INTERNET 権限が直接宣言されていないかの一次フィルタ。
+      # MapLibre 等の AAR が自動注入する権限はソースには現れず、ここでは検出できない
+      # （マージ後の最終マニフェストにのみ現れる）ため、最終的な合否判定は後段の
+      # 「出荷APK検査」ステップが持つ（設計書§8.2.1、AAR注入の見落とし対策）。
+      # :buscourse は現時点で MapLibre 未導入（フェーズ3まで追加しない）のため、
+      # 検査対象は INTERNET のみとする。
+      - name: Verify :buscourse offline policy (no INTERNET permission in source manifest)
+        run: |
+          set -e
+          if grep -q 'android.permission.INTERNET' buscourse/src/main/AndroidManifest.xml; then
+            echo "::error::buscourse/src/main/AndroidManifest.xml declares android.permission.INTERNET — istech offline policy violation (BusCourse must not access the network)."
+            exit 1
+          fi
+          echo "OK: buscourse/src/main/AndroidManifest.xml does not declare INTERNET permission."
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -134,6 +150,30 @@ jobs:
           done
           if [ "$checked" -eq 0 ]; then
             echo "::error::No APK found to verify."
+            exit 1
+          fi
+
+      # BusCourse (:buscourse) 向け istech オフライン厳守の機械的担保 (Layer1 2/2・設計書§8.2.1):
+      # 出荷物そのもの（ビルド済みAPK）を aapt で検査する。前段のソースマニフェストgrepは
+      # あくまで一次フィルタであり、AAR自動注入分を含めた合否判定の最終権威はこのステップが持つ
+      # （設計書§8.2.1：「合否判定の最終権威はLayer1のAPK検査」）。
+      # :buscourse は product flavor を持たないため :app のような `*/debug` glob は不要。
+      - name: Verify :buscourse offline policy (no INTERNET permission in shipped APK)
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          checked=0
+          for apk in buscourse/build/outputs/apk/debug/*.apk \
+                     buscourse/build/outputs/apk/release/*.apk; do
+            [ -f "$apk" ] || continue
+            checked=1
+            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
+              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: $apk does not request INTERNET permission."
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No :buscourse APK found to verify."
             exit 1
           fi
 
