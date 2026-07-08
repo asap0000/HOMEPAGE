@@ -42,7 +42,7 @@ data class RecordingSessionEntity(
     @ColumnInfo(name = "frame_dir_rel_path") val frameDirRelPath: String,
     /** 連写間隔の基準値（実際は速度連動で可変、§4.6） */
     @ColumnInfo(name = "base_frame_interval_ms") val baseFrameIntervalMs: Long,
-    @ColumnInfo(name = "frame_count") val frameCount: Int = 0,
+    @ColumnInfo(name = "frame_count", defaultValue = "0") val frameCount: Int = 0,
     /** 完了後に確定計算 */
     @ColumnInfo(name = "total_distance_m") val totalDistanceM: Double?,
     /** RECORDING | COMPLETED | DISCARDED | INTERRUPTED */
@@ -179,6 +179,12 @@ data class StopVisitEventEntity(
             entity = TimelapseFrameEntity::class, parentColumns = ["id"],
             childColumns = ["burst_end_frame_id"], onDelete = ForeignKey.SET_NULL
         ),
+    ],
+    indices = [
+        Index("session_id"),
+        Index("hires_frame_id"),
+        Index("burst_start_frame_id"),
+        Index("burst_end_frame_id"),
     ]
 )
 data class ShockEventEntity(

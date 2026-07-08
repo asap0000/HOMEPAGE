@@ -26,5 +26,5 @@ data class BusStopCardEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,
     /** 廃止停留所。物理削除しない（過去コース・過去軌跡のFK整合を保つため） */
-    @ColumnInfo(name = "is_archived") val isArchived: Boolean = false,
+    @ColumnInfo(name = "is_archived", defaultValue = "0") val isArchived: Boolean = false,
 )

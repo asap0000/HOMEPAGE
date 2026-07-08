@@ -9,6 +9,7 @@
 .cxx
 local.properties
 app/build/
+buscourse/build/
 
 # NEVER commit signing keys
 *.keystore

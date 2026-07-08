@@ -15,7 +15,7 @@ import androidx.room.PrimaryKey
     foreignKeys = [
         ForeignKey(
             entity = CourseEntity::class, parentColumns = ["id"],
-            childColumns = ["base_course_id"]
+            childColumns = ["base_course_id"], onDelete = ForeignKey.SET_NULL
         )
     ]
 )
@@ -77,11 +77,11 @@ data class CourseStopEntity(
         ),
         ForeignKey(
             entity = BusStopCardEntity::class, parentColumns = ["id"],
-            childColumns = ["from_stop_card_id"]
+            childColumns = ["from_stop_card_id"], onDelete = ForeignKey.RESTRICT
         ),
         ForeignKey(
             entity = BusStopCardEntity::class, parentColumns = ["id"],
-            childColumns = ["to_stop_card_id"]
+            childColumns = ["to_stop_card_id"], onDelete = ForeignKey.RESTRICT
         ),
         ForeignKey(
             entity = SegmentTrackEntity::class, parentColumns = ["id"],

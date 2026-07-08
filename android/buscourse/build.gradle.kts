@@ -71,6 +71,8 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // ProcessCameraProvider.getInstance(context).await() に必要（設計書§2.3・§4.5.2、CameraCaptureController実装時に使用）
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.1")
 
     // 位置情報は android.location.LocationManager / GPS_PROVIDER のみ（D1）。
     // play-services-location は追加しないこと。
