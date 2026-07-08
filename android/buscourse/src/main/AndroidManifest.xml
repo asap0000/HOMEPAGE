@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BusCourse — オフライン厳守（istech/CLAUDE.md・設計書§8）
+  - android.permission.INTERNET は宣言しない（Layer1 検査対象。絶対に追加しないこと）
+  - android.permission.ACCESS_BACKGROUND_LOCATION は要求しない（設計書§4.4 の決め打ち）
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".BusCourseApplication"
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BusCourse">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 記録エンジン FGS（設計書§4.2。Android 14+ は type 宣言と FOREGROUND_SERVICE_* 権限がセットで必須） -->
+        <service
+            android:name=".recording.BusRecordingService"
+            android:foregroundServiceType="camera|location"
+            android:exported="false" />
+
+    </application>
+
+</manifest>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  設計書§3.7: Android Auto Backup（Google Drive へのクラウド送信）からの除外。
+  allowBackup=false なら本来不要だが、将来 true に戻す事故を防ぐため二重に明記する。
+-->
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapability="false">
+        <exclude domain="database" />
+        <exclude domain="file" path="buscourse/" />
+    </cloud-backup>
+</data-extraction-rules>

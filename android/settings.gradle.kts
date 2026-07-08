@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "PrivacyCamera"
 include(":app")
+include(":buscourse")
