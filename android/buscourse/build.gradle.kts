@@ -74,6 +74,12 @@ dependencies {
     // ProcessCameraProvider.getInstance(context).await() に必要（設計書§2.3・§4.5.2、CameraCaptureController実装時に使用）
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.1")
 
+    // WorkManager（設計書§4.10.3 StorageRotationWorker）。ローカルタスクスケジューラでネットワーク通信は伴わない。
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // DataStore（設計書§4.4、録画中フラグ＋sessionIdの永続化）。ローカルファイルI/Oのみでネットワーク通信は伴わない。
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
     // 位置情報は android.location.LocationManager / GPS_PROVIDER のみ（D1）。
     // play-services-location は追加しないこと。
 }

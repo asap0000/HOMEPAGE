@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">BusCourse</string>
+
+    <!-- 記録エンジン 常駐通知（設計書§4.8.3） -->
+    <string name="notification_channel_recording_name">運行記録</string>
+    <string name="notification_channel_recording_description">BusCourse 運行記録中の常駐通知</string>
+    <string name="notification_title_recording">運行記録中</string>
+    <string name="notification_text_initializing">記録を準備しています…</string>
+    <string name="notification_action_mark_stop">停留所マーク</string>
 </resources>

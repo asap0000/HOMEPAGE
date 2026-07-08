@@ -132,6 +132,22 @@ interface RecordingSessionDao {
 
     @Query("SELECT * FROM recording_session WHERE status = :status ORDER BY started_at DESC")
     suspend fun getByStatus(status: String): List<RecordingSessionEntity>
+
+    /** `timelapse_frame` 追加時のカウンタ更新（設計書§4.5.2、RecordingSessionRepositoryが使用）。 */
+    @Query("UPDATE recording_session SET frame_count = frame_count + 1 WHERE id = :id")
+    suspend fun incrementFrameCount(id: Long)
+
+    /** ストレージ保持期間ローテーション用（設計書§4.10.3）。 */
+    @Query("SELECT * FROM recording_session WHERE started_at < :cutoffMs ORDER BY started_at ASC")
+    suspend fun getStartedBefore(cutoffMs: Long): List<RecordingSessionEntity>
+
+    /** 空き容量ローテーションのループ用。既にスキップ済みのIDを除いて最古の1件を返す（設計書§4.10.3）。 */
+    @Query("SELECT * FROM recording_session WHERE id NOT IN (:excludeIds) ORDER BY started_at ASC LIMIT 1")
+    suspend fun findOldestExcluding(excludeIds: List<Long>): RecordingSessionEntity?
+
+    /** セッション削除（設計書§4.10.3）。子テーブルはON DELETE CASCADEで連動削除される。 */
+    @Query("DELETE FROM recording_session WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }
 
 /** `timelapse_frame`（LORES連写／HIRES単写メタデータ）の操作（設計書§3.5、D6）。 */
@@ -142,6 +158,20 @@ interface TimelapseFrameDao {
 
     @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
+
+    /** 衝撃バーストの開始側フレーム特定用（設計書§4.9.1）。指定時刻以前で最も近いLORESフレーム。 */
+    @Query(
+        "SELECT * FROM timelapse_frame WHERE session_id = :sessionId AND kind = 'LORES' " +
+            "AND captured_at <= :tsEpochMs ORDER BY captured_at DESC LIMIT 1"
+    )
+    suspend fun findClosestLoresAtOrBefore(sessionId: Long, tsEpochMs: Long): TimelapseFrameEntity?
+
+    /** 衝撃バーストの終了側フレーム特定用（設計書§4.9.1）。指定時刻以後で最も近いLORESフレーム。 */
+    @Query(
+        "SELECT * FROM timelapse_frame WHERE session_id = :sessionId AND kind = 'LORES' " +
+            "AND captured_at >= :tsEpochMs ORDER BY captured_at ASC LIMIT 1"
+    )
+    suspend fun findClosestLoresAtOrAfter(sessionId: Long, tsEpochMs: Long): TimelapseFrameEntity?
 }
 
 /** `gps_point`（正典GPS点列）の操作。セッション終了時に JSONL から一括インポートされる（D4）。 */
@@ -172,4 +202,8 @@ interface ShockEventDao {
 
     @Query("SELECT * FROM shock_event WHERE session_id = :sessionId ORDER BY ts_epoch_ms")
     suspend fun getBySession(sessionId: Long): List<ShockEventEntity>
+
+    /** 衝撃発生+3秒後に確定するバースト終端フレームの後追い更新（設計書§4.9.1）。 */
+    @Query("UPDATE shock_event SET burst_end_frame_id = :frameId WHERE id = :id")
+    suspend fun updateBurstEndFrame(id: Long, frameId: Long?)
 }
