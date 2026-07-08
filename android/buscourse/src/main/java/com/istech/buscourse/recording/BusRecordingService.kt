@@ -73,11 +73,11 @@ class BusRecordingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId) // LifecycleServiceをSTARTEDへ
 
-        if (intent?.action == ACTION_STOP_RECORDING) {
-            stopRecording(RecordingSessionStatus.COMPLETED)
-            return START_NOT_STICKY
-        }
-
+        // startForeground は onStartCommand のどの分岐であっても必ず最初に呼ぶ（要レビュー修正）。
+        // ACTION_STOP_RECORDING をこれより前で分岐すると、将来この停止操作が
+        // startForegroundService() 経由（§4.3と同じ起動パターン）で発火した場合に
+        // startForeground を一度も呼ばずに onStartCommand が完了し、
+        // API31+ で ForegroundServiceDidNotStartInTimeException を招く恐れがある。
         val notification = notificationManager.buildOngoingNotification(getString(R.string.notification_text_initializing))
         try {
             ServiceCompat.startForeground(
@@ -91,6 +91,11 @@ class BusRecordingService : LifecycleService() {
             // 通常は発生しない想定だが、防御的に捕捉してサービスを畳む。
             Log.e(TAG, "startForeground に失敗しました", e)
             stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_STOP_RECORDING) {
+            stopRecording(RecordingSessionStatus.COMPLETED)
             return START_NOT_STICKY
         }
 
@@ -331,6 +336,7 @@ class BusRecordingService : LifecycleService() {
     override fun onDestroy() {
         releaseControllers()
         thermalExecutor.shutdown()
+        sessionRepository.shutdown() // writeExecutorのスレッドリーク防止（要レビュー修正）
         super.onDestroy()
     }
 

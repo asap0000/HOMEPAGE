@@ -18,6 +18,7 @@ import com.istech.buscourse.core.geo.GeoMath
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONException
@@ -515,6 +516,17 @@ class RecordingSessionRepository(
 
     private fun JSONObject.optNullableDouble(name: String): Double? =
         if (!has(name) || isNull(name)) null else optDouble(name)
+
+    /**
+     * このリポジトリが保持する単一スレッド [writeExecutor] を停止する（要レビュー修正）。
+     * 呼び出し元（[BusRecordingService.onDestroy]、`StorageRotationWorker.doWork`）は
+     * インスタンス生成のたびに必ずこれを呼ぶこと。呼ばなければ生成のたびにスレッドが1本ずつ
+     * 蓄積し、長期連続稼働で`OutOfMemoryError: unable to create new native thread`に至る。
+     */
+    fun shutdown() {
+        repositoryScope.cancel()
+        writeExecutor.shutdown()
+    }
 
     companion object {
         private const val TAG = "RecordingSessionRepo"

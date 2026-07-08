@@ -33,29 +33,35 @@ class StorageRotationWorker(
         val configRepository = RecordingConfigRepository(applicationContext)
         val sessionRepository = RecordingSessionRepository(applicationContext, app.database)
 
-        val retentionDays = configRepository.retentionDays
-        val minFreeBytes = configRepository.minFreeBytes
-        sessionRepository.deleteSessionsOlderThan(retentionDays)
+        try {
+            val retentionDays = configRepository.retentionDays
+            val minFreeBytes = configRepository.minFreeBytes
+            sessionRepository.deleteSessionsOlderThan(retentionDays)
 
-        // ★feasibilityレビュー反映（設計書1249行目、重大4）：test_run_comparisonからのFK参照は
-        // ON DELETE SET NULLへ変更済み（§3.5）。だが未知のFK・将来追加テーブルに対する防御的
-        // フォールバックとして、削除失敗時は例外を握りつぶさず「次の候補へスキップ」し、
-        // 同一セッションの再取得による無限ループを防ぐ。
-        val skipped = mutableSetOf<Long>()
-        var guard = 0
-        while (freeBytes() < minFreeBytes && guard++ < MAX_ROTATION_ITERATIONS) {
-            val oldest = sessionRepository.findOldestSession(excludeIds = skipped) ?: break
-            try {
-                sessionRepository.deleteSession(oldest.id)
-            } catch (e: SQLiteConstraintException) {
-                Log.w(TAG, "storage rotation: FK制約によりセッション削除をスキップ id=${oldest.id}", e)
-                skipped += oldest.id
+            // ★feasibilityレビュー反映（設計書1249行目、重大4）：test_run_comparisonからのFK参照は
+            // ON DELETE SET NULLへ変更済み（§3.5）。だが未知のFK・将来追加テーブルに対する防御的
+            // フォールバックとして、削除失敗時は例外を握りつぶさず「次の候補へスキップ」し、
+            // 同一セッションの再取得による無限ループを防ぐ。
+            val skipped = mutableSetOf<Long>()
+            var guard = 0
+            while (freeBytes() < minFreeBytes && guard++ < MAX_ROTATION_ITERATIONS) {
+                val oldest = sessionRepository.findOldestSession(excludeIds = skipped) ?: break
+                try {
+                    sessionRepository.deleteSession(oldest.id)
+                } catch (e: SQLiteConstraintException) {
+                    Log.w(TAG, "storage rotation: FK制約によりセッション削除をスキップ id=${oldest.id}", e)
+                    skipped += oldest.id
+                }
             }
+            if (guard >= MAX_ROTATION_ITERATIONS) {
+                Log.e(TAG, "storage rotation: 上限反復回数に到達。空き容量閾値を満たせないまま終了した可能性あり")
+            }
+            Result.success()
+        } finally {
+            // writeExecutorのスレッドリーク防止（要レビュー修正）。doWork()のたびに新規生成される
+            // RecordingSessionRepositoryのスレッドを確実に畳む。
+            sessionRepository.shutdown()
         }
-        if (guard >= MAX_ROTATION_ITERATIONS) {
-            Log.e(TAG, "storage rotation: 上限反復回数に到達。空き容量閾値を満たせないまま終了した可能性あり")
-        }
-        Result.success()
     }
 
     private fun freeBytes(): Long = applicationContext.filesDir.usableSpace
