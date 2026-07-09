@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material3.Card
@@ -26,12 +27,16 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
 /**
- * ホーム（フェーズ2導線。設計書§9）。停留所カード・コース編成・区間抽出への入口。
- * 運行記録（フェーズ1 BusRecordingService）の開始UIはフェーズ2スコープ外（RunSetupActivity は§4で別途）。
+ * ホーム（フェーズ2導線。設計書§9）。運行記録・停留所カード・コース編成・区間抽出への入口。
+ *
+ * 【2026-07-10追加】運行記録（フェーズ1 BusRecordingService）の開始UI（RunSetupActivity相当、
+ * [RecordingScreen]）を追加。以前は「フェーズ2スコープ外」としていたが、実機実測・実データ収集の
+ * 着手に必須なため実装した。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
+    onOpenRecording: () -> Unit,
     onOpenStopCards: () -> Unit,
     onOpenCourses: () -> Unit,
     onOpenExtraction: () -> Unit,
@@ -46,6 +51,12 @@ fun HomeScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            HomeMenuCard(
+                icon = Icons.Filled.FiberManualRecord,
+                title = "運行記録",
+                description = "実際に走行しながら記録を開始・終了します（実機実測・実データ収集用）",
+                onClick = onOpenRecording,
+            )
             HomeMenuCard(
                 icon = Icons.Filled.DirectionsBus,
                 title = "停留所カード",

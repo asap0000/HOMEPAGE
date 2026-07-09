@@ -1,0 +1,395 @@
+package com.istech.buscourse.ui
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import com.istech.buscourse.BusCourseApplication
+import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.CourseEntity
+import com.istech.buscourse.core.data.RecordingSessionEntity
+import com.istech.buscourse.course.CourseRepository
+import com.istech.buscourse.recording.BusRecordingService
+import com.istech.buscourse.recording.RecordingSessionType
+import com.istech.buscourse.recording.RecordingStateStore
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/**
+ * 運行記録の開始・終了（設計書§4.3の`RunSetupActivity`相当）。
+ *
+ * 【2026-07-10追加】フェーズ2完了後の実績監査で、`BusRecordingService`（フェーズ1で実装済みの
+ * 記録エンジン本体）を起動するUI画面が一つも存在しないことが発覚した（`HomeScreen`/`MainActivity`の
+ * 開発者コメントに「フェーズ2スコープ外」と明記されていた）。実機実測・実データ収集の着手に必須のため
+ * 追加する。`BusRecordingService`へIntentで開始/終了を指示するだけの薄いラッパーで、記録処理自体は
+ * サービス側が担う。
+ *
+ * 既知の制約（サービス側の設計上の制約を継承。本画面では解決しない）：
+ * - サービスプロセスがKillされた後の自動再開・バナー表示は未実装（設計書§4.4で明記の通りフェーズ1
+ *   スコープ外）。本画面は[RecordingStateStore]のフラグのみを見るため、フラグが立ったままサービスが
+ *   実際には動いていない場合、見た目は「記録中」のままになりうる。
+ * - `PARTIAL_RUN`（区間試走）・`LIVE_GUIDANCE`（案内モード）のセッション種別はこの画面からは選択
+ *   できない（対象区間選択UIが未実装のため）。当面の実機実測・実データ収集は`FULL_RUN`/`TEST_DRIVE`で足りる。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RecordingScreen(
+    viewModel: BusCourseViewModel,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val database = remember { (context.applicationContext as BusCourseApplication).database }
+    val stateStore = remember { RecordingStateStore(context) }
+
+    val isRecording by stateStore.isRecordingFlow.collectAsState(initial = false)
+    val activeSessionId by stateStore.sessionIdFlow.collectAsState(initial = null)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("運行記録") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (isRecording) {
+                val sessionId = activeSessionId
+                if (sessionId != null) {
+                    RecordingActiveContent(sessionId = sessionId, database = database)
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+            } else {
+                RecordingSetupContent(repository = viewModel.repository)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordingSetupContent(repository: CourseRepository) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var courses by remember { mutableStateOf<List<CourseEntity>>(emptyList()) }
+    LaunchedEffect(Unit) { courses = repository.getCourses() }
+
+    var selectedCourseId by remember { mutableStateOf<Long?>(null) }
+    var sessionType by remember { mutableStateOf(RecordingSessionType.FULL_RUN) }
+    var driverId by remember { mutableStateOf("") }
+    var vehicleId by remember { mutableStateOf("") }
+    var showCoursePicker by remember { mutableStateOf(false) }
+    var starting by remember { mutableStateOf(false) }
+
+    fun hasPermission(permission: String) =
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+    var cameraGranted by remember { mutableStateOf(hasPermission(Manifest.permission.CAMERA)) }
+    var locationGranted by remember { mutableStateOf(hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) }
+    val needsNotificationPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    var notificationsGranted by remember {
+        mutableStateOf(!needsNotificationPermission || hasPermission(Manifest.permission.POST_NOTIFICATIONS))
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        cameraGranted = result[Manifest.permission.CAMERA] ?: cameraGranted
+        locationGranted = result[Manifest.permission.ACCESS_FINE_LOCATION] ?: locationGranted
+        if (needsNotificationPermission) {
+            notificationsGranted = result[Manifest.permission.POST_NOTIFICATIONS] ?: notificationsGranted
+        }
+    }
+    LaunchedEffect(Unit) {
+        val missing = buildList {
+            if (!cameraGranted) add(Manifest.permission.CAMERA)
+            if (!locationGranted) add(Manifest.permission.ACCESS_FINE_LOCATION)
+            if (needsNotificationPermission && !notificationsGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+    }
+
+    fun startRecording() {
+        if (!cameraGranted || !locationGranted) {
+            Toast.makeText(context, "カメラと位置情報の権限を許可してください", Toast.LENGTH_LONG).show()
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION)
+            )
+            return
+        }
+        starting = true
+        val intent = Intent(context, BusRecordingService::class.java).apply {
+            selectedCourseId?.let { putExtra(BusRecordingService.EXTRA_COURSE_ID, it) }
+            putExtra(BusRecordingService.EXTRA_SESSION_TYPE, sessionType.name)
+            if (driverId.isNotBlank()) putExtra(BusRecordingService.EXTRA_DRIVER_ID, driverId.trim())
+            if (vehicleId.isNotBlank()) putExtra(BusRecordingService.EXTRA_VEHICLE_ID, vehicleId.trim())
+        }
+        ContextCompat.startForegroundService(context, intent)
+        // isRecordingFlowがtrueになり次第、RecordingScreen側で自動的にACTIVE表示へ切り替わる。
+        // ここではボタンの二重タップ防止のためだけにstartingを使う。
+        scope.launch {
+            delay(3_000L)
+            starting = false
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("記録の種類", style = MaterialTheme.typography.titleMedium)
+        SessionTypeOption(
+            selected = sessionType == RecordingSessionType.FULL_RUN,
+            title = "本番運行（コース全体）",
+            description = "実際のバス運行に添乗して、コース全体を記録します（実データ収集用）",
+            onClick = { sessionType = RecordingSessionType.FULL_RUN },
+        )
+        SessionTypeOption(
+            selected = sessionType == RecordingSessionType.TEST_DRIVE,
+            title = "試走・実機テスト",
+            description = "コース確定前の試走や、電池・発熱・容量の長時間実測に使います",
+            onClick = { sessionType = RecordingSessionType.TEST_DRIVE },
+        )
+
+        Text("コース（任意）", style = MaterialTheme.typography.titleMedium)
+        OutlinedButton(onClick = { showCoursePicker = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(courses.firstOrNull { it.id == selectedCourseId }?.name ?: "コースを選択しない")
+        }
+
+        OutlinedTextField(
+            value = driverId,
+            onValueChange = { driverId = it },
+            label = { Text("運転手ID（任意）") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = vehicleId,
+            onValueChange = { vehicleId = it },
+            label = { Text("車両ID（任意）") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        if (!cameraGranted || !locationGranted) {
+            Text(
+                "カメラと位置情報の権限が必要です",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (needsNotificationPermission && !notificationsGranted) {
+            Text(
+                "通知を許可すると、記録中の常駐通知や「停留所マーク」ボタンが使えます（未許可でも記録自体は開始できます）",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        Button(
+            onClick = { startRecording() },
+            enabled = !starting,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+        ) {
+            Icon(Icons.Filled.FiberManualRecord, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (starting) "開始中…" else "記録を開始")
+        }
+    }
+
+    if (showCoursePicker) {
+        AlertDialog(
+            onDismissRequest = { showCoursePicker = false },
+            title = { Text("コースを選択") },
+            text = {
+                Column {
+                    TextButton(onClick = { selectedCourseId = null; showCoursePicker = false }) {
+                        Text("コースを選択しない")
+                    }
+                    courses.forEach { course ->
+                        TextButton(onClick = { selectedCourseId = course.id; showCoursePicker = false }) {
+                            Text(course.name)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCoursePicker = false }) { Text("閉じる") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SessionTypeOption(
+    selected: Boolean,
+    title: String,
+    description: String,
+    onClick: () -> Unit,
+) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordingActiveContent(
+    sessionId: Long,
+    database: BusCourseDatabase,
+) {
+    val context = LocalContext.current
+
+    var session by remember { mutableStateOf<RecordingSessionEntity?>(null) }
+    LaunchedEffect(sessionId) { session = database.recordingSessionDao().getById(sessionId) }
+
+    var elapsedSec by remember { mutableStateOf(0L) }
+    LaunchedEffect(session) {
+        val startedAt = session?.startedAt ?: return@LaunchedEffect
+        while (true) {
+            elapsedSec = (System.currentTimeMillis() - startedAt) / 1000
+            delay(1_000L)
+        }
+    }
+
+    var stopRequested by remember { mutableStateOf(false) }
+    var showConfirm by remember { mutableStateOf(false) }
+
+    fun stopRecording() {
+        stopRequested = true
+        val intent = Intent(context, BusRecordingService::class.java)
+            .setAction(BusRecordingService.ACTION_STOP_RECORDING)
+        ContextCompat.startForegroundService(context, intent)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(24.dp))
+        Icon(
+            Icons.Filled.FiberManualRecord,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(48.dp),
+        )
+        Text("記録中", style = MaterialTheme.typography.headlineSmall)
+        session?.let {
+            Text("種別: ${it.type}", style = MaterialTheme.typography.bodyLarge)
+        }
+        val h = elapsedSec / 3600
+        val m = (elapsedSec % 3600) / 60
+        val s = elapsedSec % 60
+        Text("経過時間: %02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.bodyLarge)
+        Text(
+            "停留所マークは通知バーの「停留所マーク」ボタンから行えます。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { showConfirm = true },
+            enabled = !stopRequested,
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+        ) {
+            Icon(Icons.Filled.Stop, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (stopRequested) "終了処理中…" else "記録を終了")
+        }
+    }
+
+    if (showConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConfirm = false },
+            title = { Text("記録を終了しますか？") },
+            text = { Text("この操作は取り消せません。") },
+            confirmButton = {
+                TextButton(onClick = { showConfirm = false; stopRecording() }) { Text("終了する") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }) { Text("キャンセル") }
+            },
+        )
+    }
+}
