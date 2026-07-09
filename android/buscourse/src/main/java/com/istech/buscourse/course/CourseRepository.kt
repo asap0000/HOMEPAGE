@@ -24,6 +24,7 @@ import com.istech.buscourse.core.gpx.GpxPoint
 import com.istech.buscourse.core.gpx.GpxWaypoint
 import com.istech.buscourse.recording.RecordingSessionStatus
 import com.istech.buscourse.recording.RecordingSessionType
+import com.istech.buscourse.recording.StopMaster
 import com.istech.buscourse.recording.StopVisitEventType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -109,9 +110,14 @@ class CourseRepository(
             createdAt = now,
             updatedAt = now,
         )
-        val id = busStopCardDao.upsert(draft)
+        // IDなし作成→photoDirRelPath確定の2回のupsertを1トランザクションに直列化し、途中キャンセル時に
+        // photoDirRelPath="" の孤児レコードが残らないようにする（フェーズ2レビュー#8）
+        val id = database.withTransaction {
+            val newId = busStopCardDao.upsert(draft)
+            busStopCardDao.upsert(draft.copy(id = newId, photoDirRelPath = "${BusCourseStorage.DIR_STOPCARDS}/$newId/"))
+            newId
+        }
         val dirRelPath = "${BusCourseStorage.DIR_STOPCARDS}/$id/"
-        busStopCardDao.upsert(draft.copy(id = id, photoDirRelPath = dirRelPath))
 
         val dir = BusCourseStorage.resolve(context, dirRelPath)
         dir.mkdirs()
@@ -305,8 +311,11 @@ class CourseRepository(
      * 訪問停留所列は §3.9 疑似コードの引数 `visitedStopsInOrder` を、そのセッションの
      * `stop_visit_event`（event_type=ARRIVED、event_ts順。連続重複は除去）から機械的に復元する
      * （2026-07-09オーナー確定の実装方針。ARRIVED イベントはフェーズ1記録エンジンの
-     * ハイブリッド検知＝AUTO/MANUAL の両方を含む）。各停留所の到着インデックスは、§3.9の
-     * 半径判定の代わりに ARRIVED の event_ts 以降で最初の `gps_point` を採用する。
+     * ハイブリッド検知＝AUTO/MANUAL の両方を含む）。各停留所の到着インデックスは、
+     * `event_ts` と `gps_point.ts_epoch_ms` という独立した壁時計列同士の突き合わせ（NTP補正等の
+     * 不連続に弱い）ではなく、§3.9本来のジオフェンス方式どおり、対象停留所座標への haversine
+     * 距離走査（半径内に最初に入った点、無ければ最も近い点）で求める（フェーズ2レビュー#3）。
+     * `event_ts` はあくまで「訪問順序」（`visited` の並び）の決定にのみ用いる。
      *
      * 同一有向ペアが1セッション内で複数回走行された場合は後勝ち（最後の1本をUPSERT。
      * 候補経路比較UIはフェーズ2では扱わない、2026-07-09オーナー確定）。
@@ -316,6 +325,11 @@ class CourseRepository(
             ?: throw IllegalArgumentException("セッションが見つかりません: id=$sessionId")
         check(session.status == RecordingSessionStatus.COMPLETED.name) {
             "完了済み（COMPLETED）セッションのみ抽出できます（現在: ${session.status}）"
+        }
+        // UI側（ExtractionScreenの一覧）フィルタとは別に、リポジトリ層の不変条件としても
+        // 抽出可能なセッション種別を強制する（設計書§3.9、フェーズ2レビュー#2）。
+        check(session.type in EXTRACTABLE_SESSION_TYPES) {
+            "抽出可能なセッション種別ではありません（現在: ${session.type}）"
         }
 
         // 到着イベント（時系列順）→ 訪問停留所列。連続する同一停留所は1回とみなす
@@ -335,13 +349,34 @@ class CourseRepository(
         val points = gpsPointDao.getBySession(sessionId) // seq順（D4で一括インポート済み）
         check(points.isNotEmpty()) { "このセッションにはGPS点列（gps_point）がありません" }
 
-        // 各到着時刻に対応するGPS点インデックス（event_ts以降の最初の点。以降が無ければ最終点）。
-        // 単調増加になるよう直前の到着インデックス以上へクランプする
+        // 各到着に対応するGPS点インデックスは、対象停留所座標へのhaversine距離走査（ジオフェンス、
+        // 設計書§3.9本来の方式）で求める。stop_visit_event.event_ts と gps_point.ts_epoch_ms は
+        // 独立した壁時計列で、NTP補正等の不連続に弱いため、event_ts は「訪問順序」（visited の並び）
+        // の決定にのみ使い、区間内の正確な到着点特定には使わない。
+        // 単調増加になるよう、探索は直前の到着インデックス以降に限定する（直前より後方＝走行前進側）。
         val arrivalIdx = IntArray(visited.size)
         var prevIdx = 0
-        visited.forEachIndexed { i, (_, eventTs) ->
-            val raw = points.indexOfFirst { it.tsEpochMs >= eventTs }
-            val idx = (if (raw >= 0) raw else points.lastIndex).coerceAtLeast(prevIdx)
+        for (i in visited.indices) {
+            val stopCardId = visited[i].first
+            val card = busStopCardDao.getById(stopCardId)
+            val searchSpace = points.subList(prevIdx, points.size)
+            val idx = if (card == null || searchSpace.isEmpty()) {
+                prevIdx
+            } else {
+                // 半径内（StopMaster.DEFAULT_ARRIVAL_RADIUS_M、§3.5 arrival_radius_m既定値）に
+                // 最初に入った点。無ければ最も近い点にフォールバックする
+                val withinRadius = searchSpace.indexOfFirst {
+                    GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= StopMaster.DEFAULT_ARRIVAL_RADIUS_M
+                }
+                val relIdx = if (withinRadius >= 0) {
+                    withinRadius
+                } else {
+                    searchSpace.indices.minByOrNull {
+                        GeoMath.haversineM(searchSpace[it].lat, searchSpace[it].lon, card.latitude, card.longitude)
+                    } ?: 0
+                }
+                prevIdx + relIdx
+            }
             arrivalIdx[i] = idx
             prevIdx = idx
         }
@@ -405,21 +440,27 @@ class CourseRepository(
             GpxCodec.writeSegmentTrack(out, fromStopCardId, toStopCardId, points)
         }
 
-        val existing = segmentTrackDao.findByDirectedEdge(fromStopCardId, toStopCardId)
-        val entity = SegmentTrackEntity(
-            id = existing?.id ?: 0,
-            fromStopCardId = fromStopCardId,
-            toStopCardId = toStopCardId,
-            trackFileRelPath = relPath,
-            distanceM = distanceM,
-            durationSec = durationSec,
-            pointCount = points.size,
-            isInterpolated = false,
-            recordedSessionId = recordedSessionId,
-            recordedAt = System.currentTimeMillis(),
-        )
-        val rowId = segmentTrackDao.upsert(entity)
-        return if (entity.id != 0L) entity else entity.copy(id = rowId)
+        // findByDirectedEdge → upsert の間にトランザクションが無いと、同一有向ペアへの並行呼び出しで
+        // 後着側の @Upsert が UNIQUE(from_stop_card_id, to_stop_card_id) 違反から主キー0のUPDATEに
+        // フォールバックし0行ヒットで静かに消える競合状態になる（フェーズ2レビュー#4）。
+        // 読み取りから書き込みまでを1トランザクションに直列化して防ぐ
+        return database.withTransaction {
+            val existing = segmentTrackDao.findByDirectedEdge(fromStopCardId, toStopCardId)
+            val entity = SegmentTrackEntity(
+                id = existing?.id ?: 0,
+                fromStopCardId = fromStopCardId,
+                toStopCardId = toStopCardId,
+                trackFileRelPath = relPath,
+                distanceM = distanceM,
+                durationSec = durationSec,
+                pointCount = points.size,
+                isInterpolated = false,
+                recordedSessionId = recordedSessionId,
+                recordedAt = System.currentTimeMillis(),
+            )
+            val rowId = segmentTrackDao.upsert(entity)
+            if (entity.id != 0L) entity else entity.copy(id = rowId)
+        }
     }
 
     private fun polylineLengthM(points: List<GpsPointEntity>): Double {

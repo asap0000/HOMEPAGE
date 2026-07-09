@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -42,6 +43,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -62,12 +64,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.istech.buscourse.core.location.GnssLocationSource
-import com.istech.buscourse.course.CourseRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+/** GPS単発取得のタイムアウト（電波不良で永久にコールバックが来ない場合に備える、フェーズ2レビュー#12）。 */
+private const val GPS_FIX_TIMEOUT_MS = 15_000L
 
 /**
  * 停留所カード新規作成（設計書§9 フェーズ2「停留所カードCRUD」・§3.3）。
@@ -77,10 +83,11 @@ import java.io.File
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StopCardCreateScreen(
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     onBack: () -> Unit,
     onCreated: () -> Unit,
 ) {
+    val repository = viewModel.repository
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -117,9 +124,26 @@ fun StopCardCreateScreen(
 
     // --- GPS 単発取得（GnssLocationSource、最初のfixで停止） ---
     val gnss = remember { GnssLocationSource(context) }
-    DisposableEffect(Unit) { onDispose { gnss.stop() } }
+    var fixTimeoutJob by remember { mutableStateOf<Job?>(null) }
+    fun cancelFix() {
+        fixTimeoutJob?.cancel()
+        fixTimeoutJob = null
+        gnss.stop()
+        fixing = false
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            fixTimeoutJob?.cancel()
+            gnss.stop()
+        }
+    }
     fun fetchLocation() {
-        if (!locationGranted) {
+        // キャッシュした locationGranted だけに頼らず、GPS取得直前に権限を再確認する
+        // （権限が撤回された場合、requestLocationUpdates 内部が SecurityException を投げるため。
+        // フェーズ2レビュー#6）
+        val hasLocationPermission = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        locationGranted = hasLocationPermission
+        if (!hasLocationPermission) {
             permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION))
             return
         }
@@ -127,6 +151,8 @@ fun StopCardCreateScreen(
         try {
             fixing = true
             gnss.start(minIntervalMs = 500L, minDistanceM = 0f) { location ->
+                fixTimeoutJob?.cancel()
+                fixTimeoutJob = null
                 latitude = location.latitude
                 longitude = location.longitude
                 altitudeM = if (location.hasAltitude()) location.altitude else null
@@ -134,9 +160,21 @@ fun StopCardCreateScreen(
                 fixing = false
                 gnss.stop()
             }
+            // 電波不良等でコールバックが永久に来ない場合に備えたタイムアウト（フェーズ2レビュー#12）
+            fixTimeoutJob = scope.launch {
+                delay(GPS_FIX_TIMEOUT_MS)
+                gnss.stop()
+                fixing = false
+                Toast.makeText(context, "GPSを取得できませんでした（電波状況の良い場所でお試しください）", Toast.LENGTH_LONG).show()
+            }
         } catch (e: IllegalStateException) {
             fixing = false
             Toast.makeText(context, e.message ?: "GPSを開始できませんでした", Toast.LENGTH_LONG).show()
+        } catch (e: SecurityException) {
+            // 権限が撤回された状態で requestLocationUpdates が投げうる（フェーズ2レビュー#6）
+            fixing = false
+            locationGranted = false
+            Toast.makeText(context, "位置情報の権限がありません", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -202,31 +240,37 @@ fun StopCardCreateScreen(
             return
         }
         saving = true
-        scope.launch {
-            try {
-                repository.createStopCard(
-                    name = name.trim(),
-                    latitude = lat,
-                    longitude = lon,
-                    altitudeM = altitudeM,
-                    notes = notes,
-                    photoTempFile = capturedFile,
-                )
+        // 保存はViewModel（viewModelScope）経由で行う。画面破棄でコルーチンがキャンセルされて
+        // createStopCardの2回のDAO upsert・写真移動が中断しないようにするため（フェーズ2レビュー#13）
+        viewModel.createStopCard(
+            name = name.trim(),
+            latitude = lat,
+            longitude = lon,
+            altitudeM = altitudeM,
+            notes = notes,
+            photoTempFile = capturedFile,
+        ) { result ->
+            saving = false
+            result.onSuccess {
                 Toast.makeText(context, "停留所カードを作成しました", Toast.LENGTH_SHORT).show()
                 onCreated()
-            } catch (e: Exception) {
-                saving = false
+            }.onFailure { e ->
                 Toast.makeText(context, "作成に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
+
+    // 保存中はTopAppBarの戻るボタン・システム戻るジェスチャーを無効化する（フェーズ2レビュー#8。
+    // #13でcreateStopCardがviewModelScope管理下に移ったため孤児レコードの実害は無くなったが、
+    // 保存中に画面遷移できてしまう体験自体は望ましくないため合わせて塞ぐ）
+    BackHandler(enabled = saving) {}
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("停留所カードの作成") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, enabled = !saving) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
                     }
                 },
@@ -286,6 +330,10 @@ fun StopCardCreateScreen(
                     Icon(Icons.Filled.MyLocation, contentDescription = null)
                     Spacer(Modifier.size(6.dp))
                     Text(if (fixing) "測位中…" else "現在地を取得")
+                }
+                if (fixing) {
+                    Spacer(Modifier.size(8.dp))
+                    TextButton(onClick = { cancelFix() }) { Text("キャンセル") }
                 }
                 Spacer(Modifier.size(12.dp))
                 if (fixing) {

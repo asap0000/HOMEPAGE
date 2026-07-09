@@ -70,22 +70,34 @@ class RoutePreprocessor(
 
     /**
      * 停留所側の `expected_chainage_m` を再計算する（設計書§3.5
-     * 「course_stop.stop_card_id 座標を route_point へ投影」）。停留所カード座標に最も近い
-     * route_point の chainage を採用し、route_point が空（全区間PENDING等）の場合は null に戻す。
+     * 「course_stop.stop_card_id 座標を route_point へ投影」）。`course_stop.id`（行の主キー）単位で
+     * 更新するため、往復・ループ等で同一停留所を複数回通る順列でも occurrence ごとに別の値が入る
+     * （フェーズ2レビュー#5）。
      *
-     * 制限: `CourseStopDao.updateExpectedChainage` は (course_id, stop_card_id) キーのため、
-     * 同一停留所を同一コースで複数回通る順列では両方の行に同じ値（最近傍1点）が入る。
+     * 最近傍探索はグローバル最近傍ではなく、走行順（sequence_index順）に沿った単調カーソルで行う。
+     * 直前の occurrence で見つかった route_point の位置（＝chainageが大きい側）以降だけを探索範囲にすることで、
+     * 同一停留所の2回目以降の occurrence が1回目と同じ（若い）chainageに引き戻されないようにする。
      */
     private suspend fun recomputeExpectedChainage(courseId: Long, points: List<RoutePointEntity>) {
-        val stops = courseStopDao.getOrderedStops(courseId)
+        val stops = courseStopDao.getOrderedStops(courseId) // sequence_index順＝走行順
+        var cursor = 0
         for (stop in stops) {
             val card = busStopCardDao.getById(stop.stopCardId)
-            val chainage = if (card == null || points.isEmpty()) {
+            val chainage = if (card == null || cursor >= points.size) {
                 null
             } else {
-                points.minByOrNull { GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) }?.chainageM
+                val searchSpace = points.subList(cursor, points.size)
+                val nearestRelIdx = searchSpace.indices.minByOrNull {
+                    GeoMath.haversineM(searchSpace[it].lat, searchSpace[it].lon, card.latitude, card.longitude)
+                }
+                if (nearestRelIdx != null) {
+                    cursor += nearestRelIdx // 次occurrenceはこの点以降からのみ探索する
+                    searchSpace[nearestRelIdx].chainageM
+                } else {
+                    null
+                }
             }
-            courseStopDao.updateExpectedChainage(courseId, stop.stopCardId, chainage)
+            courseStopDao.updateExpectedChainageById(stop.id, chainage)
         }
     }
 

@@ -41,7 +41,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.course.CourseKind
-import com.istech.buscourse.course.CourseRepository
 import kotlinx.coroutines.launch
 
 /**
@@ -51,10 +50,11 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CourseListScreen(
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     onBack: () -> Unit,
     onOpen: (Long) -> Unit,
 ) {
+    val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var courses by remember { mutableStateOf<List<CourseEntity>>(emptyList()) }
@@ -164,10 +164,14 @@ fun CourseListScreen(
                             return@TextButton
                         }
                         showCreateDialog = false
-                        scope.launch {
-                            val id = repository.createCourse(newName.trim(), newKind)
-                            courses = repository.getCourses()
-                            onOpen(id)
+                        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+                        viewModel.createCourse(newName.trim(), newKind) { result ->
+                            result.onSuccess { id ->
+                                scope.launch { courses = repository.getCourses() }
+                                onOpen(id)
+                            }.onFailure { e ->
+                                Toast.makeText(context, "作成に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
                         }
                     },
                 ) { Text("作成") }

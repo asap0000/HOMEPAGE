@@ -56,7 +56,6 @@ import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
 import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseWithDetails
-import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.CourseSegmentStatus
 import kotlinx.coroutines.launch
 import java.io.File
@@ -75,10 +74,11 @@ private data class StopRow(val cardId: Long, val name: String)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CourseDetailScreen(
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     courseId: Long,
     onBack: () -> Unit,
 ) {
+    val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -89,17 +89,23 @@ fun CourseDetailScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
 
+    // 永続化済み順序と未確定編集中の順序の差分（このLaunchedEffectの直前、＝再読込直前の状態で判定する
+    // 必要があるため宣言をLaunchedEffectより前に置く）。dirty中はeditedStopsの再構築をスキップする
+    // （フェーズ2レビュー#7。無いと、GPX取込成功等でrefreshKey++された際にドラッグ&ドロップの
+    // 未確定並べ替えが破棄されてしまう）
+    val persistedOrder = details?.stops?.sortedBy { it.courseStop.sequenceIndex }?.map { it.courseStop.stopCardId }
+    val dirty = persistedOrder != null && persistedOrder != editedStops.map { it.cardId }
+
     LaunchedEffect(courseId, refreshKey) {
         val loaded = repository.getCourseWithDetails(courseId)
         details = loaded
-        editedStops.clear()
-        loaded?.stops?.sortedBy { it.courseStop.sequenceIndex }?.forEach {
-            editedStops.add(StopRow(cardId = it.courseStop.stopCardId, name = it.card.name))
+        if (!dirty) {
+            editedStops.clear()
+            loaded?.stops?.sortedBy { it.courseStop.sequenceIndex }?.forEach {
+                editedStops.add(StopRow(cardId = it.courseStop.stopCardId, name = it.card.name))
+            }
         }
     }
-
-    val persistedOrder = details?.stops?.sortedBy { it.courseStop.sequenceIndex }?.map { it.courseStop.stopCardId }
-    val dirty = persistedOrder != null && persistedOrder != editedStops.map { it.cardId }
 
     // LazyColumn 内の生index: 0=ヘッダ、1..editedStops.size=停留所行
     val stopRangeStart = 1
@@ -144,15 +150,14 @@ fun CourseDetailScreen(
         pendingImportEdge = null
         if (uri != null && edge != null) {
             busy = true
-            scope.launch {
-                try {
-                    repository.importAsSegmentTrack(uri, edge.first, edge.second)
+            // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+            viewModel.importAsSegmentTrack(uri, edge.first, edge.second) { result ->
+                busy = false
+                result.onSuccess {
                     Toast.makeText(context, "区間軌跡を取り込みました", Toast.LENGTH_SHORT).show()
                     refreshKey++
-                } catch (e: Exception) {
+                }.onFailure { e ->
                     Toast.makeText(context, "取り込みに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-                } finally {
-                    busy = false
                 }
             }
         }
@@ -160,30 +165,29 @@ fun CourseDetailScreen(
 
     fun confirmArrangement() {
         busy = true
-        scope.launch {
-            try {
-                repository.setCourseStops(courseId, editedStops.map { it.cardId })
+        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13。
+        // 画面破棄でコルーチンがキャンセルされないため、#7の未確定並べ替え破棄問題の根本対策にもなる）
+        viewModel.setCourseStops(courseId, editedStops.map { it.cardId }) { result ->
+            busy = false
+            result.onSuccess {
                 Toast.makeText(context, "編成を確定し、区間を再構築しました", Toast.LENGTH_SHORT).show()
                 refreshKey++
-            } catch (e: Exception) {
+            }.onFailure { e ->
                 Toast.makeText(context, "確定に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-            } finally {
-                busy = false
             }
         }
     }
 
     fun exportCourse() {
         busy = true
-        scope.launch {
-            try {
-                val file = repository.exportCourse(courseId)
+        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+        viewModel.exportCourse(courseId) { result ->
+            busy = false
+            result.onSuccess { file ->
                 pendingExportFile = file
                 createDocLauncher.launch(file.name)
-            } catch (e: Exception) {
+            }.onFailure { e ->
                 Toast.makeText(context, "エクスポートに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-            } finally {
-                busy = false
             }
         }
     }
@@ -234,8 +238,8 @@ fun CourseDetailScreen(
                 }
             }
 
-            // index 1..n: 停留所行（ドラッグ対象）
-            itemsIndexed(editedStops) { index, stop ->
+            // index 1..n: 停留所行（ドラッグ対象）。#10で重複追加を防いだ後なのでcardIdは一意（フェーズ2レビュー#9）
+            itemsIndexed(editedStops, key = { _, stop -> stop.cardId }) { index, stop ->
                 val rawIndex = index + stopRangeStart
                 val dragging = dragState.draggingItemIndex == rawIndex
                 Card(
@@ -338,7 +342,7 @@ fun CourseDetailScreen(
                 }
             }
             val segments = details?.segments?.sortedBy { it.sequenceIndex }.orEmpty()
-            itemsIndexed(segments) { _, seg ->
+            itemsIndexed(segments, key = { _, seg -> seg.fromStopCardId to seg.toStopCardId }) { _, seg ->
                 SegmentRow(
                     segment = seg,
                     cardNameById = cardNameById,
@@ -353,15 +357,22 @@ fun CourseDetailScreen(
     }
 
     if (showAddDialog) {
+        // 既にeditedStopsに含まれるカードは候補から除外する（フェーズ2レビュー#10。
+        // 無いと同じカードを重複追加できてしまい、#9のitemsIndexed keyの一意性も崩れる。
+        // そのため9（key付与）より先に直すことが指示されている）
+        val addedCardIds = editedStops.map { it.cardId }.toSet()
+        val availableCards = activeCards.filter { it.id !in addedCardIds }
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             title = { Text("停留所を追加") },
             text = {
                 if (activeCards.isEmpty()) {
                     Text("停留所カードがありません。先にカードを作成してください。")
+                } else if (availableCards.isEmpty()) {
+                    Text("追加できる停留所カードがありません（すべて追加済みです）。")
                 } else {
                     LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                        itemsIndexed(activeCards) { _, card ->
+                        itemsIndexed(availableCards, key = { _, card -> card.id }) { _, card ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()

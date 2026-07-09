@@ -31,14 +31,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.core.data.BusStopCardEntity
-import com.istech.buscourse.course.CourseRepository
-import kotlinx.coroutines.launch
 
 /**
  * 停留所カード編集（設計書§9 フェーズ2「停留所カードCRUD」）。
@@ -47,12 +44,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StopCardEditScreen(
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     stopCardId: Long,
     onBack: () -> Unit,
 ) {
+    val repository = viewModel.repository
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     var card by remember { mutableStateOf<BusStopCardEntity?>(null) }
     var name by remember { mutableStateOf("") }
@@ -62,17 +59,21 @@ fun StopCardEditScreen(
     var altText by remember { mutableStateOf("") }
     var showArchiveConfirm by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
+    // ロード中と「本当に見つからない」を区別するフラグ（フェーズ2レビュー#11。
+    // 無いと非同期ロード中に一瞬「カードが見つかりません」が表示される。StopCardListScreen等と同じパターン）
+    var loaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(stopCardId) {
-        val loaded = repository.getStopCard(stopCardId)
-        card = loaded
-        if (loaded != null) {
-            name = loaded.name
-            notes = loaded.notes.orEmpty()
-            latText = loaded.latitude.toString()
-            lonText = loaded.longitude.toString()
-            altText = loaded.altitudeM?.toString().orEmpty()
+        val loadedCard = repository.getStopCard(stopCardId)
+        card = loadedCard
+        if (loadedCard != null) {
+            name = loadedCard.name
+            notes = loadedCard.notes.orEmpty()
+            latText = loadedCard.latitude.toString()
+            lonText = loadedCard.longitude.toString()
+            altText = loadedCard.altitudeM?.toString().orEmpty()
         }
+        loaded = true
     }
 
     fun save() {
@@ -92,13 +93,13 @@ fun StopCardEditScreen(
             return
         }
         saving = true
-        scope.launch {
-            try {
-                repository.updateStopCard(stopCardId, name.trim(), lat, lon, alt, notes)
+        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+        viewModel.updateStopCard(stopCardId, name.trim(), lat, lon, alt, notes) { result ->
+            saving = false
+            result.onSuccess {
                 Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
                 onBack()
-            } catch (e: Exception) {
-                saving = false
+            }.onFailure { e ->
                 Toast.makeText(context, "保存に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
@@ -131,7 +132,9 @@ fun StopCardEditScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (current == null) {
-                Text("カードが見つかりません", color = MaterialTheme.colorScheme.error)
+                if (loaded) {
+                    Text("カードが見つかりません", color = MaterialTheme.colorScheme.error)
+                }
                 return@Column
             }
             StopCardThumbnail(
@@ -207,10 +210,14 @@ fun StopCardEditScreen(
                 TextButton(
                     onClick = {
                         showArchiveConfirm = false
-                        scope.launch {
-                            repository.archiveStopCard(stopCardId)
-                            Toast.makeText(context, "アーカイブしました", Toast.LENGTH_SHORT).show()
-                            onBack()
+                        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+                        viewModel.archiveStopCard(stopCardId) { result ->
+                            result.onSuccess {
+                                Toast.makeText(context, "アーカイブしました", Toast.LENGTH_SHORT).show()
+                                onBack()
+                            }.onFailure { e ->
+                                Toast.makeText(context, "アーカイブに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
                         }
                     },
                 ) { Text("アーカイブ") }

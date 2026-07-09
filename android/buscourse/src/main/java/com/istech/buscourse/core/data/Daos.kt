@@ -70,8 +70,13 @@ interface CourseStopDao {
     @Query("DELETE FROM course_stop WHERE course_id = :courseId")
     suspend fun deleteAllForCourse(courseId: Long)
 
-    @Query("UPDATE course_stop SET expected_chainage_m = :chainageM WHERE course_id = :courseId AND stop_card_id = :stopCardId")
-    suspend fun updateExpectedChainage(courseId: Long, stopCardId: Long, chainageM: Double?)
+    /**
+     * `course_stop.id`（主キー）単位での expected_chainage_m 更新（設計書§3.5、フェーズ2レビュー#5）。
+     * (course_id, stop_card_id) キーだと、往復・ループ等で同一停留所を複数回通る順列で
+     * 全occurrenceが同じ値に上書きされてしまうため、行を一意に特定できる主キーで更新する。
+     */
+    @Query("UPDATE course_stop SET expected_chainage_m = :chainageM WHERE id = :courseStopId")
+    suspend fun updateExpectedChainageById(courseStopId: Long, chainageM: Double?)
 }
 
 /** `course_segment`（隣接ペアごとの軌跡割当）の操作（設計書§3.8 regenerateCourseSegments が使用）。 */

@@ -83,7 +83,7 @@ private fun AppNavHost() {
         }
         composable(Routes.STOP_CARD_NEW) {
             StopCardCreateScreen(
-                repository = repository,
+                viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onCreated = { navController.popBackStack() },
             )
@@ -92,7 +92,7 @@ private fun AppNavHost() {
             val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
             if (id != null) {
                 StopCardEditScreen(
-                    repository = repository,
+                    viewModel = viewModel,
                     stopCardId = id,
                     onBack = { navController.popBackStack() },
                 )
@@ -100,7 +100,7 @@ private fun AppNavHost() {
         }
         composable(Routes.COURSES) {
             CourseListScreen(
-                repository = repository,
+                viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpen = { id -> navController.navigate(Routes.courseDetail(id)) },
             )
@@ -109,7 +109,7 @@ private fun AppNavHost() {
             val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
             if (id != null) {
                 CourseDetailScreen(
-                    repository = repository,
+                    viewModel = viewModel,
                     courseId = id,
                     onBack = { navController.popBackStack() },
                 )
@@ -117,7 +117,7 @@ private fun AppNavHost() {
         }
         composable(Routes.EXTRACTION) {
             ExtractionScreen(
-                repository = repository,
+                viewModel = viewModel,
                 onBack = { navController.popBackStack() },
             )
         }

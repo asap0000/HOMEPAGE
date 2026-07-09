@@ -419,7 +419,7 @@ object GpxCodec {
             serializer.startTag(GPX_NAMESPACE, "wpt")
             serializer.attribute(null, "lat", formatCoord(stop.lat))
             serializer.attribute(null, "lon", formatCoord(stop.lon))
-            if (stop.eleM != null) writeTextElement(serializer, "ele", stop.eleM.toString())
+            if (stop.eleM != null) writeTextElement(serializer, "ele", formatDecimal(stop.eleM))
             if (stop.name != null) writeTextElement(serializer, "name", stop.name)
             if (stop.desc != null) writeTextElement(serializer, "desc", stop.desc)
             if (stop.stopCardId != null) {
@@ -472,7 +472,7 @@ object GpxCodec {
             serializer.startTag(GPX_NAMESPACE, "trkpt")
             serializer.attribute(null, "lat", formatCoord(p.lat))
             serializer.attribute(null, "lon", formatCoord(p.lon))
-            if (p.eleM != null) writeTextElement(serializer, "ele", p.eleM.toString())
+            if (p.eleM != null) writeTextElement(serializer, "ele", formatDecimal(p.eleM))
             if (p.timeEpochMs != null) writeTextElement(serializer, "time", formatTime(p.timeEpochMs))
             serializer.endTag(GPX_NAMESPACE, "trkpt")
         }
@@ -495,8 +495,16 @@ object GpxCodec {
         serializer.endTag(GPX_NAMESPACE, name)
     }
 
-    /** 緯度経度は `Double.toString()`（ロケール非依存・小数点は常に `.`）で書く。 */
-    private fun formatCoord(value: Double): String = value.toString()
+    /**
+     * 緯度経度・標高の数値表記（GPX 1.1 XSD の lat/lon/ele は xsd:decimal で、指数表記
+     * （`1.0E-5` 等）を許容しない）。`Double.toString()` は絶対値が1e-3未満だと指数表記を
+     * 返しうるため、`BigDecimal.valueOf`（内部で `Double.toString` の最短往復表現を経由する
+     * ため精度は変わらない）→`toPlainString()` で固定小数点表記に変換する。
+     */
+    private fun formatDecimal(value: Double): String = java.math.BigDecimal.valueOf(value).toPlainString()
+
+    /** 緯度経度の数値表記（[formatDecimal] と同じ。呼び出し箇所の可読性のため別名を残す）。 */
+    private fun formatCoord(value: Double): String = formatDecimal(value)
 
     /** ISO 8601 UTC（`Z`終端、秒精度。設計書§3.11.1のサンプル形式）。 */
     private fun formatTime(epochMs: Long): String =

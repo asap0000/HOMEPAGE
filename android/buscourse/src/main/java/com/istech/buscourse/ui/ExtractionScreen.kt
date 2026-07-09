@@ -28,14 +28,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.core.data.RecordingSessionEntity
-import com.istech.buscourse.course.CourseRepository
-import kotlinx.coroutines.launch
 
 /**
  * 試走ログからの区間自動抽出（設計書§3.9・§9 フェーズ2）。
@@ -46,10 +43,10 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExtractionScreen(
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     onBack: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
+    val repository = viewModel.repository
     var sessions by remember { mutableStateOf<List<RecordingSessionEntity>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var runningSessionId by remember { mutableStateOf<Long?>(null) }
@@ -62,21 +59,21 @@ fun ExtractionScreen(
 
     fun extract(sessionId: Long) {
         runningSessionId = sessionId
-        scope.launch {
-            resultMessage = try {
-                val result = repository.extractSegmentsFromSession(sessionId)
-                buildString {
-                    append("セッション #$sessionId から ${result.extractedSegmentCount} 区間を抽出しました。\n")
-                    append("再評価したコース: ${result.affectedCourseCount} 件")
-                    if (result.skippedPairCount > 0) {
-                        append("\nGPS点不足でスキップ: ${result.skippedPairCount} 区間")
+        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
+        viewModel.extractSegmentsFromSession(sessionId) { outcome ->
+            runningSessionId = null
+            resultMessage = outcome.fold(
+                onSuccess = { result ->
+                    buildString {
+                        append("セッション #$sessionId から ${result.extractedSegmentCount} 区間を抽出しました。\n")
+                        append("再評価したコース: ${result.affectedCourseCount} 件")
+                        if (result.skippedPairCount > 0) {
+                            append("\nGPS点不足でスキップ: ${result.skippedPairCount} 区間")
+                        }
                     }
-                }
-            } catch (e: Exception) {
-                "抽出に失敗しました:\n${e.message}"
-            } finally {
-                runningSessionId = null
-            }
+                },
+                onFailure = { e -> "抽出に失敗しました:\n${e.message}" },
+            )
         }
     }
 
