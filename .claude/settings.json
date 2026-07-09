@@ -1,4 +1,26 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew :buscourse:assembleDebug*)",
+      "Bash(export JAVA_HOME=*)",
+      "Bash(./gradlew :buscourse:dependencies*)",
+      "Bash(git ls-tree *)",
+      "Bash(javap*)",
+      "Bash(git check-ignore*)",
+      "Bash(adb -s * exec-out screencap*)",
+      "Bash(adb -s * shell uiautomator dump*)",
+      "Bash(export MSYS_NO_PATHCONV=1)",
+      "Bash(adb -s * pull*)",
+      "Bash(adb -s * logcat -d*)",
+      "mcp__Claude_Preview__preview_console_logs",
+      "mcp__Claude_Preview__preview_screenshot",
+      "mcp__Claude_Preview__preview_snapshot",
+      "mcp__Claude_Preview__preview_network",
+      "mcp__claude-in-chrome__find",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "mcp__claude-in-chrome__read_page"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
