@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -223,8 +224,7 @@ fun CourseDetailScreen(
             state = dragState.lazyListState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .dragDropModifier(dragState),
+                .padding(padding),
         ) {
             // index 0: ヘッダ
             item {
@@ -260,6 +260,9 @@ fun CourseDetailScreen(
                             Icons.Filled.DragHandle,
                             contentDescription = "並べ替えハンドル",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .dragHandleModifier(dragState, rawIndex),
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(

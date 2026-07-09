@@ -19,9 +19,14 @@ import androidx.compose.ui.input.pointer.pointerInput
  * （ドラッグ&ドロップ等でUI操作）」）。外部DnDライブラリは導入せず自前実装とする
  * （オフライン方針の監査対象を増やさない。§8と同趣旨の判断）。
  *
- * 使い方: リスト側に [dragDropModifier] を付け、各アイテムに
- * `graphicsLayer { translationY = state.offsetYFor(index) }` を適用する。
+ * 使い方: 各アイテムの見た目に `graphicsLayer { translationY = state.offsetYFor(index) }` を適用し、
+ * そのアイテムのドラッグハンドルに [dragHandleModifier] を付ける（`index` はLazyColumn内の生index）。
  * 長押しでドラッグ開始し、アイテム中心が別アイテムに重なるたびに [onMove] で並びを入れ替える。
+ *
+ * 【2026-07-09実機確認】検出Modifierは必ず各アイテムの子（ハンドル等）に付けること。
+ * LazyColumn自体（親）に付けると、LazyColumn組み込みのスクロールジェスチャーが
+ * Composeのポインタイベント伝播（子が先にMainパスを処理する）により先に移動量を消費してしまい、
+ * onDragStartは発火してもonDragが一切呼ばれず、並べ替えが機能しない（実機/エミュレータで確認済みの不具合）。
  */
 class DragDropListState(
     val lazyListState: LazyListState,
@@ -40,12 +45,9 @@ class DragDropListState(
     /** [index] のアイテムに適用すべき translationY。 */
     fun offsetYFor(index: Int): Float = if (index == draggingItemIndex) draggingItemOffsetY else 0f
 
-    internal fun onDragStart(offset: Offset) {
-        val item = lazyListState.layoutInfo.visibleItemsInfo.firstOrNull {
-            offset.y.toInt() in it.offset..(it.offset + it.size)
-        } ?: return
-        if (!canDrag(item.index)) return
-        draggingItemIndex = item.index
+    internal fun onDragStart(index: Int) {
+        if (!canDrag(index)) return
+        draggingItemIndex = index
         draggingItemOffsetY = 0f
     }
 
@@ -91,11 +93,11 @@ fun rememberDragDropListState(
     }
 }
 
-/** LazyColumn 本体に適用する長押しドラッグ検出 Modifier。 */
-fun Modifier.dragDropModifier(state: DragDropListState): Modifier =
-    pointerInput(state) {
+/** 各アイテムのドラッグハンドルに適用する長押しドラッグ検出 Modifier。[index] はLazyColumn内の生index。 */
+fun Modifier.dragHandleModifier(state: DragDropListState, index: Int): Modifier =
+    pointerInput(state, index) {
         detectDragGesturesAfterLongPress(
-            onDragStart = { offset -> state.onDragStart(offset) },
+            onDragStart = { state.onDragStart(index) },
             onDrag = { change, dragAmount ->
                 change.consume()
                 state.onDrag(dragAmount)
