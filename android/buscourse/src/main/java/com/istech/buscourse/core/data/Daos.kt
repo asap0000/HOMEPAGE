@@ -93,6 +93,16 @@ interface CourseSegmentDao {
     /** RoutePreprocessor 用。CONFIRMED のみ、PENDING は欠落として許容（設計書§3.5 route_point） */
     @Query("SELECT * FROM course_segment WHERE course_id = :courseId AND status = 'CONFIRMED' ORDER BY sequence_index")
     suspend fun getOrderedConfirmed(courseId: Long): List<CourseSegmentEntity>
+
+    /**
+     * 指定の有向ペア（from→to）を区間として含む全コースのID（設計書§3.9
+     * `getCoursesReferencingAnyEdge` の1エッジ分。呼び出し側でエッジごとに集めて和集合を取る）。
+     */
+    @Query(
+        "SELECT DISTINCT course_id FROM course_segment " +
+            "WHERE from_stop_card_id = :from AND to_stop_card_id = :to"
+    )
+    suspend fun getCourseIdsReferencingEdge(from: Long, to: Long): List<Long>
 }
 
 /** `segment_track`（有向区間軌跡マスタ）の操作（設計書§3.6 の正典DAO）。 */
@@ -103,6 +113,10 @@ interface SegmentTrackDao {
 
     @Upsert
     suspend fun upsert(track: SegmentTrackEntity): Long
+
+    /** RoutePreprocessor 用（設計書§3.5 rebuildRoutePoints が course_segment.segment_track_id から引く）。 */
+    @Query("SELECT * FROM segment_track WHERE id = :id")
+    suspend fun getById(id: Long): SegmentTrackEntity?
 }
 
 /** `route_point`（chainage確定ポリライン）の再構築用操作（設計書§3.5 RoutePreprocessor が使用）。 */

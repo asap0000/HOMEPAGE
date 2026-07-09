@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- istech ブランド基調色（ブルー #3366FF）は UI 実装フェーズで適用する。骨格段階では既定の Material3 テーマ。 -->
+    <!-- istech ブランド基調色（ブルー #3366FF）は Compose テーマ（ui/theme/Theme.kt、フェーズ2）で適用済み。
+         XMLテーマは Compose 描画開始前のウィンドウ用に既定の Material3 のまま。 -->
     <style name="Theme.BusCourse" parent="Theme.Material3.DayNight.NoActionBar" />
 </resources>

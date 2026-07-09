@@ -9,6 +9,8 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    // Compose（フェーズ2 UI、:app と同じ Kotlin Compose コンパイラプラグイン。バージョンはルートで宣言済み）
+    id("org.jetbrains.kotlin.plugin.compose")
     // KSP はルートの build.gradle.kts では宣言していないため、ここでバージョンを指定する。
     // Kotlin 2.0.21（ルート宣言）に対応する KSP リリース。
     id("com.google.devtools.ksp") version "2.0.21-1.0.28"
@@ -46,6 +48,16 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
 }
 
 dependencies {
@@ -53,6 +65,20 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("com.google.android.material:material:1.12.0")
+
+    // Jetpack Compose（フェーズ2 UI、設計書§9）。BOM・各ライブラリのバージョンは :app に合わせる。
+    // いずれも androidx の UI ライブラリでありネットワーク系依存を含まない（§8 Layer1 検査で担保）。
+    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.navigation:navigation-compose:2.8.3")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Lifecycle（BusRecordingService = LifecycleService、設計書§4.1）
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
@@ -64,11 +90,13 @@ dependencies {
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
 
-    // CameraX（設計書§4.5。camera-view/Preview 常時表示は採用しない設計のため core/camera2/lifecycle のみ）
+    // CameraX（設計書§4.5。記録エンジンは Preview 常時表示を採用しないため core/camera2/lifecycle、
+    // 停留所カード新規作成画面（フェーズ2、§9）の撮影プレビューにのみ camera-view の PreviewView を使う）
     val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // ProcessCameraProvider.getInstance(context).await() に必要（設計書§2.3・§4.5.2、CameraCaptureController実装時に使用）
