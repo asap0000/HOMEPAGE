@@ -127,17 +127,37 @@ class CameraCaptureController(
     }
 
     private fun captureHiResInternal(reason: HiResReason, location: Location?, retryCount: Int, onSaved: (File) -> Unit) {
-        val file = sessionRepository.newHiResFile(reason)
+        takePictureInternal(sessionRepository.newHiResFile(reason), location, retryCount, onFailure = {}, onSaved = onSaved)
+    }
+
+    /**
+     * 記録中に既にバインド済みの[imageCapture]を再利用して、任意の出力ファイルへ単写する
+     * （P1-1 クイック採取モード。新規CameraXセッションは開かない）。リトライ方針は[captureHiRes]と同じ。
+     * [onFailure] はリトライも尽きた最終失敗時にのみ呼ばれる（呼び出し元が待機カウンタ等を
+     * 確実に解放できるようにするため、2026-07-11レビュー指摘の修正）。
+     */
+    fun captureToFile(file: File, location: Location?, onFailure: () -> Unit = {}, onSaved: (File) -> Unit) {
+        takePictureInternal(file, location, retryCount = 0, onFailure = onFailure, onSaved = onSaved)
+    }
+
+    private fun takePictureInternal(
+        file: File,
+        location: Location?,
+        retryCount: Int,
+        onFailure: () -> Unit = {},
+        onSaved: (File) -> Unit,
+    ) {
         val metadata = ImageCapture.Metadata().apply { this.location = location }
         val options = ImageCapture.OutputFileOptions.Builder(file).setMetadata(metadata).build()
         imageCapture.takePicture(options, analysisExecutor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) = onSaved(file)
             override fun onError(exc: ImageCaptureException) {
                 if (retryCount < MAX_HIRES_RETRY) {
-                    Log.w(TAG, "高解像度撮影に失敗しました。リトライします reason=$reason", exc)
-                    captureHiResInternal(reason, location, retryCount + 1, onSaved)
+                    Log.w(TAG, "撮影に失敗しました。リトライします file=${file.name}", exc)
+                    takePictureInternal(file, location, retryCount + 1, onFailure = onFailure, onSaved = onSaved)
                 } else {
-                    Log.e(TAG, "高解像度撮影に失敗しました（リトライ済み） reason=$reason", exc)
+                    Log.e(TAG, "撮影に失敗しました（リトライ済み） file=${file.name}", exc)
+                    onFailure()
                 }
             }
         })

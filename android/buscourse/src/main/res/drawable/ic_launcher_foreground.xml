@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ユーザー提供の「バス＋ナビピン」アイコン案（2026-07-11）をブランド基調色#3366FFで再構成。
+     istechロゴ由来の丸十字マーク（旧デザイン）から差し替え。
+     全図形をアイコン中心(54,54)から半径35以内に収める（円形マスクで角や車輪が
+     欠ける不具合が実機/エミュレータ確認で2回発生したため、安全マージンを広めに取る）。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ナビピン：円 -->
+    <path
+        android:fillColor="#3366FF"
+        android:pathData="M54,34 m-12,0 a12,12 0 1 1 24,0 a12,12 0 1 1 -24,0"/>
+    <!-- ナビピン：尾（バス屋根に食い込ませて重ねる） -->
+    <path
+        android:fillColor="#3366FF"
+        android:pathData="M48,44 L60,44 L54,59 Z"/>
+    <!-- ナビピン内の上向き矢印（白抜き） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,25 L48,37 L60,37 Z"/>
+    <!-- バス車体 -->
+    <path
+        android:fillColor="#3366FF"
+        android:pathData="M30,56 H78 A3,3 0 0 1 81,59 V74 A3,3 0 0 1 78,77 H30 A3,3 0 0 1 27,74 V59 A3,3 0 0 1 30,56 Z"/>
+    <!-- 車窓（白抜き） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,60 H48 A2,2 0 0 1 50,62 V71 A2,2 0 0 1 48,73 H34 A2,2 0 0 1 32,71 V62 A2,2 0 0 1 34,60 Z"/>
+    <!-- 車輪 -->
+    <path
+        android:fillColor="#3366FF"
+        android:pathData="M41,77 m-5,0 a5,5 0 1 1 10,0 a5,5 0 1 1 -10,0"/>
+    <path
+        android:fillColor="#3366FF"
+        android:pathData="M67,77 m-5,0 a5,5 0 1 1 10,0 a5,5 0 1 1 -10,0"/>
+    <!-- 車輪ハブ（白抜き） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M41,77 m-2,0 a2,2 0 1 1 4,0 a2,2 0 1 1 -4,0"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M67,77 m-2,0 a2,2 0 1 1 4,0 a2,2 0 1 1 -4,0"/>
+</vector>

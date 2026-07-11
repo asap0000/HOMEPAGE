@@ -3,8 +3,6 @@ package com.istech.buscourse.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.media.MediaRecorder
-import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,10 +30,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,7 +39,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,27 +72,27 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** GPS単発取得のタイムアウト（電波不良で永久にコールバックが来ない場合に備える、フェーズ2レビュー#12）。 */
-private const val GPS_FIX_TIMEOUT_MS = 15_000L
+private const val RETAKE_GPS_FIX_TIMEOUT_MS = 15_000L
 
 /**
- * 停留所カード新規作成（設計書§9 フェーズ2「停留所カードCRUD」・§3.3）。
- * 現在地GPS取得（GnssLocationSource＝LocationManager/GPS_PROVIDER単発取得、D1）＋CameraX撮影
- * （`stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 サムネイル自動生成）＋名前・notes入力。
+ * 停留所カードの写真・座標だけの撮り直し（P2-1、2026-07-11追加）。
+ * 別日に同じ停留所を再撮影した場合、IDを維持したまま `photo_orig.jpg` / `photo_thumb.jpg` と
+ * 緯度経度・標高だけを上書きする。名前・注意事項・乗車人数はこの画面では扱わない
+ * （StopCardCreateScreenのカメラ・GPS部分を流用し、それらの入力欄のみ削った構成）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StopCardCreateScreen(
+fun StopCardRetakeScreen(
     viewModel: BusCourseViewModel,
+    stopCardId: Long,
     onBack: () -> Unit,
-    onCreated: () -> Unit,
+    onRetaken: () -> Unit,
 ) {
     val repository = viewModel.repository
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
-    var name by remember { mutableStateOf("") }
-    var riderCountText by remember { mutableStateOf("") }
     var latitude by remember { mutableStateOf<Double?>(null) }
     var longitude by remember { mutableStateOf<Double?>(null) }
     var altitudeM by remember { mutableStateOf<Double?>(null) }
@@ -106,7 +101,6 @@ fun StopCardCreateScreen(
     var saving by remember { mutableStateOf(false) }
     var capturedFile by remember { mutableStateOf<File?>(null) }
     var capturedPreview by remember { mutableStateOf<Bitmap?>(null) }
-    var gardenColor by remember { mutableStateOf<String?>(null) }
 
     fun hasPermission(permission: String) =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -167,7 +161,7 @@ fun StopCardCreateScreen(
             }
             // 電波不良等でコールバックが永久に来ない場合に備えたタイムアウト（フェーズ2レビュー#12）
             fixTimeoutJob = scope.launch {
-                delay(GPS_FIX_TIMEOUT_MS)
+                delay(RETAKE_GPS_FIX_TIMEOUT_MS)
                 gnss.stop()
                 fixing = false
                 Toast.makeText(context, "GPSを取得できませんでした（電波状況の良い場所でお試しください）", Toast.LENGTH_LONG).show()
@@ -206,99 +200,6 @@ fun StopCardCreateScreen(
     }
     DisposableEffect(Unit) { onDispose { cameraProvider?.unbindAll() } }
 
-    // --- ボイスメモ録音（注意事項の代わり。走行中の手入力が困難なため、2026-07-11変更） ---
-    var audioGranted by remember { mutableStateOf(hasPermission(Manifest.permission.RECORD_AUDIO)) }
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        audioGranted = result[Manifest.permission.RECORD_AUDIO] ?: audioGranted
-    }
-    var isRecording by remember { mutableStateOf(false) }
-    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
-    var recordingTempFile by remember { mutableStateOf<File?>(null) }
-    // カードはまだ存在しないため、確定はDBではなく一時ファイルの保持のみ。save()時にcreateStopCardへ渡す
-    var voiceMemoTempFile by remember { mutableStateOf<File?>(null) }
-
-    fun stopRecording() {
-        val recorder = mediaRecorder ?: return
-        val tempFile = recordingTempFile
-        mediaRecorder = null
-        recordingTempFile = null
-        isRecording = false
-        val stopped = try {
-            recorder.stop()
-            true
-        } catch (e: RuntimeException) {
-            false
-        } finally {
-            recorder.release()
-        }
-        if (!stopped || tempFile == null) {
-            tempFile?.delete()
-            Toast.makeText(context, "録音に失敗しました", Toast.LENGTH_LONG).show()
-            return
-        }
-        voiceMemoTempFile?.delete()
-        voiceMemoTempFile = tempFile
-    }
-
-    fun startRecording() {
-        val hasAudioPermission = hasPermission(Manifest.permission.RECORD_AUDIO)
-        audioGranted = hasAudioPermission
-        if (!hasAudioPermission) {
-            audioPermissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
-            return
-        }
-        val tempFile = repository.newVoiceMemoTempFile()
-        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(context)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaRecorder()
-        }
-        try {
-            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            recorder.setOutputFile(tempFile.absolutePath)
-            recorder.prepare()
-            recorder.start()
-            mediaRecorder = recorder
-            recordingTempFile = tempFile
-            isRecording = true
-        } catch (e: Exception) {
-            recorder.release()
-            // MediaRecorder.setOutputFile()の時点で空ファイルが既にcacheDirへ作られているため、
-            // prepare()/start()が失敗した場合はそれを消しておく（2026-07-11レビュー指摘の修正。
-            // 放置するとマイク競合が続く端末でcacheDirに空の一時ファイルが溜まり続ける）
-            tempFile.delete()
-            Toast.makeText(context, "録音を開始できませんでした: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    // 画面破棄時に録音中のリソースが残らないようにする（StopCardEditScreenと同様、P2-2参照）。
-    // 録音中に破棄された場合、そのデータはvoiceMemoTempFileに一度も渡らないまま失われる
-    // （録音停止＝一時ファイル確定の前提のため）。そのため下のBackHandler・各ボタンのenabled/onClickで
-    // isRecording中の離脱そのものを塞ぎ、この経路には通常到達させない
-    //
-    // 併せて、保存せずに離脱した場合のcacheDir内一時ファイル（撮影済み写真・録音済み音声メモ）を
-    // 削除する（2026-07-11レビュー指摘の修正）。保存が成功していた場合はCourseRepository側で
-    // 既にリネーム/移動済みでこのパスにファイルは存在しないため、delete()は無害な空振りになる
-    DisposableEffect(Unit) {
-        onDispose {
-            mediaRecorder?.let {
-                try {
-                    it.stop()
-                } catch (e: RuntimeException) {
-                    // 開始直後の破棄等で有効なデータが無い場合に投げられる。破棄時は結果を破棄してよい
-                }
-                it.release()
-            }
-            capturedFile?.delete()
-            voiceMemoTempFile?.delete()
-        }
-    }
-
     fun capturePhoto() {
         val target = repository.newCaptureTempFile()
         val options = ImageCapture.OutputFileOptions.Builder(target).build()
@@ -328,62 +229,42 @@ fun StopCardCreateScreen(
     fun save() {
         val lat = latitude
         val lon = longitude
-        if (name.isBlank()) {
-            Toast.makeText(context, "停留所名を入力してください", Toast.LENGTH_SHORT).show()
+        val file = capturedFile
+        if (file == null) {
+            Toast.makeText(context, "写真を撮影してください", Toast.LENGTH_SHORT).show()
             return
         }
         if (lat == null || lon == null) {
             Toast.makeText(context, "現在地を取得してください", Toast.LENGTH_SHORT).show()
             return
         }
-        val riderCount = riderCountText.trim().takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 0
         saving = true
-        // 保存はViewModel（viewModelScope）経由で行う。画面破棄でコルーチンがキャンセルされて
-        // createStopCardの2回のDAO upsert・写真移動が中断しないようにするため（フェーズ2レビュー#13）
-        viewModel.createStopCard(
-            name = name.trim(),
+        viewModel.retakePhotoAndLocation(
+            cardId = stopCardId,
             latitude = lat,
             longitude = lon,
             altitudeM = altitudeM,
-            notes = null,
-            riderCount = riderCount,
-            photoTempFile = capturedFile,
-            voiceMemoTempFile = voiceMemoTempFile,
-            gardenColor = gardenColor,
+            photoTempFile = file,
         ) { result ->
             saving = false
             result.onSuccess {
-                Toast.makeText(context, "停留所カードを作成しました", Toast.LENGTH_SHORT).show()
-                onCreated()
+                Toast.makeText(context, "写真・座標を撮り直しました", Toast.LENGTH_SHORT).show()
+                onRetaken()
             }.onFailure { e ->
-                Toast.makeText(context, "作成に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "撮り直しに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // 保存中はTopAppBarの戻るボタン・システム戻るジェスチャーを無効化する（フェーズ2レビュー#8。
-    // #13でcreateStopCardがviewModelScope管理下に移ったため孤児レコードの実害は無くなったが、
-    // 保存中に画面遷移できてしまう体験自体は望ましくないため合わせて塞ぐ）
+    // 保存中はTopAppBarの戻るボタン・システム戻るジェスチャーを無効化する（StopCardCreateScreenと同様、フェーズ2レビュー#8）
     BackHandler(enabled = saving) {}
-    // 録音中の離脱で音声メモが失われないようにする（StopCardEditScreenと同様）
-    BackHandler(enabled = isRecording) {
-        Toast.makeText(context, "録音を停止してから戻ってください", Toast.LENGTH_SHORT).show()
-    }
-
-    fun guardedBack() {
-        if (isRecording) {
-            Toast.makeText(context, "録音を停止してから戻ってください", Toast.LENGTH_SHORT).show()
-        } else {
-            onBack()
-        }
-    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("停留所カードの作成") },
+                title = { Text("写真・座標の撮り直し") },
                 navigationIcon = {
-                    IconButton(onClick = { guardedBack() }, enabled = !saving) {
+                    IconButton(onClick = onBack, enabled = !saving) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
                     }
                 },
@@ -464,55 +345,9 @@ fun StopCardCreateScreen(
                 }
             }
 
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("停留所名 *") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text("注意事項（音声メモ）", style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (isRecording) {
-                    OutlinedButton(onClick = { stopRecording() }) {
-                        Icon(Icons.Filled.Stop, contentDescription = null)
-                        Spacer(Modifier.size(6.dp))
-                        Text("録音停止")
-                    }
-                } else {
-                    OutlinedButton(onClick = { startRecording() }, enabled = !saving) {
-                        Icon(Icons.Filled.Mic, contentDescription = null)
-                        Spacer(Modifier.size(6.dp))
-                        Text(if (voiceMemoTempFile == null) "録音開始" else "録音し直す")
-                    }
-                }
-                if (voiceMemoTempFile != null && !isRecording) {
-                    Text(
-                        "録音済み",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            GardenColorSelector(
-                selected = gardenColor,
-                onSelect = { gardenColor = it },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = riderCountText,
-                onValueChange = { input -> if (input.all { it.isDigit() }) riderCountText = input },
-                label = { Text("乗車人数（任意）") },
-                singleLine = true,
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
             Button(
                 onClick = { save() },
-                enabled = !saving && !isRecording,
+                enabled = !saving && capturedFile != null && latitude != null && longitude != null,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),

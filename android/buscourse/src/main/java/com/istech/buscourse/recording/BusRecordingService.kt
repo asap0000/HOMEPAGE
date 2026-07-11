@@ -7,8 +7,13 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.SensorManager
 import android.location.Location
+import android.os.Build
 import android.os.HandlerThread
 import android.os.PowerManager
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -18,14 +23,19 @@ import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.R
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.RecordingSessionEntity
+import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.core.location.GnssLocationSource
+import com.istech.buscourse.course.CourseRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 記録エンジンFGS本体（設計書§4.1〜§4.4）。`foregroundServiceType = "camera|location"`。
@@ -44,6 +54,7 @@ import java.util.concurrent.Executors
 class BusRecordingService : LifecycleService() {
 
     private val database: BusCourseDatabase by lazy { (application as BusCourseApplication).database }
+    private val courseRepository: CourseRepository by lazy { CourseRepository(this, database) }
     private lateinit var sessionRepository: RecordingSessionRepository
     private lateinit var notificationManager: RecordingNotificationManager
     private lateinit var recordingStateStore: RecordingStateStore
@@ -61,6 +72,16 @@ class BusRecordingService : LifecycleService() {
 
     @Volatile private var currentSpeedKmh: Double = 0.0
     @Volatile private var thermalDegraded: Boolean = false
+    @Volatile private var lastStopMarkElapsedMs: Long = 0L
+    @Volatile private var lastQuickCaptureElapsedMs: Long = 0L
+
+    // クイック採取（P1-1）の名前採番（件数読み取り→INSERT）を直列化する。連続撮影時に
+    // 2つのコールバックが同じ件数を読んでしまい同名カードが重複生成されるレビュー指摘の修正。
+    private val quickCaptureMutex = Mutex()
+    // 撮影→DB保存が完了していないクイック採取の件数。stopRecording()がreleaseControllers()する前に
+    // これがゼロになるまで短時間待つことで、撮影直後に運行終了した場合の孤児ファイル化を防ぐ
+    // （lifecycleScope.launchはonDestroy後にキャンセル済みのスコープへ積むと本体が一切実行されないため）。
+    private val pendingQuickCaptures = AtomicInteger(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -153,6 +174,7 @@ class BusRecordingService : LifecycleService() {
                 shockDetector = shock
 
                 notificationManager.registerStopMarkReceiver(::onManualStopMark)
+                notificationManager.registerQuickCaptureReceiver(::onQuickCapture)
 
                 guard.start(thermalExecutor)
                 shock.start(handlerThread)
@@ -160,8 +182,13 @@ class BusRecordingService : LifecycleService() {
                 gnss.start(onLocation = ::onLocationUpdate)
 
                 notificationManager.updateNotification(buildContentText(session))
+                courseRepository.logWork(
+                    WorkLogCategory.RECORDING,
+                    "運行記録を開始（セッション#${session.id}・${type.name}）",
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "記録開始処理に失敗しました", e)
+                courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の開始に失敗しました", e.toString())
                 stopRecording(RecordingSessionStatus.DISCARDED)
             }
         }
@@ -213,6 +240,10 @@ class BusRecordingService : LifecycleService() {
 
     /** 常駐通知の「停留所マーク」ボタン（設計書§4.8.3）。最寄りの登録済み停留所を対象にする。 */
     private fun onManualStopMark() {
+        if (isDebounced(lastStopMarkElapsedMs)) return
+        lastStopMarkElapsedMs = SystemClock.elapsedRealtime()
+        vibrateShort()
+
         val controller = cameraCaptureController ?: return
         val location = controller.lastKnownLocation
         val nearest = location?.let { loc ->
@@ -240,6 +271,73 @@ class BusRecordingService : LifecycleService() {
             location = location,
             distanceM = distance,
         )
+    }
+
+    /**
+     * 常駐通知の「カード撮影」ボタン（P1-1 クイック採取モード）。走行中は名前・注意事項・乗車人数を
+     * 後回しにし、現在地＋写真だけを即保存する。記録中に既にバインド済みの `imageCapture` を
+     * [CameraCaptureController.captureToFile] 経由で再利用するため、新規CameraXセッションは開かない。
+     */
+    private fun onQuickCapture() {
+        if (isDebounced(lastQuickCaptureElapsedMs)) return
+        lastQuickCaptureElapsedMs = SystemClock.elapsedRealtime()
+
+        val controller = cameraCaptureController ?: return
+        val location = controller.lastKnownLocation
+        if (location == null) {
+            Log.w(TAG, "クイック撮影: 現在地未取得のため撮影をスキップします")
+            return
+        }
+
+        pendingQuickCaptures.incrementAndGet()
+        val tempFile = courseRepository.newCaptureTempFile()
+        controller.captureToFile(
+            tempFile,
+            location,
+            onFailure = {
+                // リトライも尽きて撮影自体が失敗した場合、onSavedが呼ばれずカウンタが
+                // 減らないまま残ってしまう不具合の修正（2026-07-11レビュー指摘）。
+                pendingQuickCaptures.decrementAndGet()
+            },
+        ) { file ->
+            lifecycleScope.launch {
+                try {
+                    quickCaptureMutex.withLock {
+                        val seq = courseRepository.getActiveStopCards().size + 1
+                        courseRepository.createStopCard(
+                            name = "候補%03d".format(seq),
+                            latitude = location.latitude,
+                            longitude = location.longitude,
+                            altitudeM = if (location.hasAltitude()) location.altitude else null,
+                            notes = null,
+                            riderCount = 0,
+                            photoTempFile = file,
+                            needsMaturation = true,
+                        )
+                    }
+                    vibrateShort()
+                } finally {
+                    pendingQuickCaptures.decrementAndGet()
+                }
+            }
+        }
+    }
+
+    /** 通知アクションボタンの二度押し対策。前回発火からの経過時間が短ければtrue。 */
+    private fun isDebounced(previousElapsedMs: Long, intervalMs: Long = NOTIFICATION_BUTTON_DEBOUNCE_MS): Boolean =
+        SystemClock.elapsedRealtime() - previousElapsedMs < intervalMs
+
+    /** 通知アクションボタン押下の触覚フィードバック。 */
+    private fun vibrateShort() {
+        val effect = VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            vibratorManager.defaultVibrator.vibrate(effect)
+        } else {
+            @Suppress("DEPRECATION")
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            vibrator.vibrate(effect)
+        }
     }
 
     private fun captureAndRecordStopVisit(
@@ -311,16 +409,38 @@ class BusRecordingService : LifecycleService() {
     private fun stopRecording(status: RecordingSessionStatus) {
         lifecycleScope.launch {
             runCatching { sessionRepository.endSession(status) }
-                .onFailure { Log.e(TAG, "セッション終了処理に失敗しました", it) }
+                .onSuccess {
+                    courseRepository.logWork(WorkLogCategory.RECORDING, "運行記録を終了（${status.name}）")
+                }
+                .onFailure {
+                    Log.e(TAG, "セッション終了処理に失敗しました", it)
+                    courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の終了処理に失敗しました", it.toString())
+                }
             recordingStateStore.clear()
+            awaitPendingQuickCaptures()
             releaseControllers()
             ServiceCompat.stopForeground(this@BusRecordingService, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
 
+    /**
+     * 撮影直後に運行終了された場合、カード撮影の撮影→DB保存パイプラインが完了する前に
+     * releaseControllers()（cameraCaptureController.stop()を含む）してしまうと、撮影自体は
+     * 完了するがコールバックが本サービスのonDestroy後に走り、lifecycleScopeが既にキャンセル済みで
+     * DB保存が一切実行されない（＝撮った写真だけが孤児ファイルとして残る）。短時間だけ待つ。
+     */
+    private suspend fun awaitPendingQuickCaptures() {
+        var waitedMs = 0L
+        while (pendingQuickCaptures.get() > 0 && waitedMs < PENDING_CAPTURE_WAIT_TIMEOUT_MS) {
+            delay(PENDING_CAPTURE_POLL_INTERVAL_MS)
+            waitedMs += PENDING_CAPTURE_POLL_INTERVAL_MS
+        }
+    }
+
     private fun releaseControllers() {
         notificationManager.unregisterStopMarkReceiver()
+        notificationManager.unregisterQuickCaptureReceiver()
         gnssLocationSource?.stop()
         gnssLocationSource = null
         shockDetector?.stop()
@@ -355,5 +475,8 @@ class BusRecordingService : LifecycleService() {
 
         private const val SHOCK_PRE_WINDOW_MS = 2_000L
         private const val SHOCK_POST_WINDOW_MS = 3_000L
+        private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
+        private const val PENDING_CAPTURE_WAIT_TIMEOUT_MS = 3_000L
+        private const val PENDING_CAPTURE_POLL_INTERVAL_MS = 100L
     }
 }

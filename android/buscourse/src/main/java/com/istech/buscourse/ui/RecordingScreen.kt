@@ -200,12 +200,14 @@ private fun RecordingSetupContent(repository: CourseRepository) {
             selected = sessionType == RecordingSessionType.FULL_RUN,
             title = "本番運行（コース全体）",
             description = "実際のバス運行に添乗して、コース全体を記録します（実データ収集用）",
+            typeName = RecordingSessionType.FULL_RUN.name,
             onClick = { sessionType = RecordingSessionType.FULL_RUN },
         )
         SessionTypeOption(
             selected = sessionType == RecordingSessionType.TEST_DRIVE,
             title = "試走・実機テスト",
             description = "コース確定前の試走や、電池・発熱・容量の長時間実測に使います",
+            typeName = RecordingSessionType.TEST_DRIVE.name,
             onClick = { sessionType = RecordingSessionType.TEST_DRIVE },
         )
 
@@ -285,6 +287,7 @@ private fun SessionTypeOption(
     selected: Boolean,
     title: String,
     description: String,
+    typeName: String,
     onClick: () -> Unit,
 ) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
@@ -301,6 +304,13 @@ private fun SessionTypeOption(
                 Text(
                     description,
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // 区間抽出画面のセッション一覧にはこの生の種別名がそのまま表示されるため、
+                // 見た目上の対応が取れるよう併記する（オーナー指摘、2026-07-11）
+                Text(
+                    "種別: $typeName",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

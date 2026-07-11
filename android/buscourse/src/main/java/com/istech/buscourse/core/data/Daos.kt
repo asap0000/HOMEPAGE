@@ -8,6 +8,7 @@ import androidx.room.Relation
 import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.Upsert
+import kotlinx.coroutines.flow.Flow
 
 /** `bus_stop_card` の CRUD（設計書§3.5）。廃止は is_archived による論理削除のみ。 */
 @Dao
@@ -18,7 +19,7 @@ interface BusStopCardDao {
     @Query("SELECT * FROM bus_stop_card WHERE id = :id")
     suspend fun getById(id: Long): BusStopCardEntity?
 
-    @Query("SELECT * FROM bus_stop_card WHERE is_archived = 0 ORDER BY name")
+    @Query("SELECT * FROM bus_stop_card WHERE is_archived = 0 ORDER BY created_at DESC")
     suspend fun getAllActive(): List<BusStopCardEntity>
 
     @Query("UPDATE bus_stop_card SET is_archived = 1, updated_at = :updatedAt WHERE id = :id")
@@ -58,6 +59,12 @@ interface CourseDao {
     suspend fun getWithDetails(id: Long): CourseWithDetails?
 }
 
+/** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */
+data class StopCardUsage(val cardId: Long, val courseName: String, val courseStopId: Long)
+
+/** 全カードの使用状況の集約結果（停留所カード一覧の使用中バッジ用）。 */
+data class StopCardUsageWithOrder(val cardId: Long, val courseName: String, val sequenceIndex: Int, val courseStopId: Long)
+
 /** `course_stop`（順列）の操作。並べ替え確定時は全削除→再挿入で regenerateCourseSegments に接続（設計書§3.8）。 */
 @Dao
 interface CourseStopDao {
@@ -77,6 +84,34 @@ interface CourseStopDao {
      */
     @Query("UPDATE course_stop SET expected_chainage_m = :chainageM WHERE id = :courseStopId")
     suspend fun updateExpectedChainageById(courseStopId: Long, chainageM: Double?)
+
+    /**
+     * 他コースで使用中のカード一覧（P1-4 コース編成カード選択ダイアログの使用中バッジ用）。
+     * MIN(cs.id) を含めることで、同じカードが複数コースで使われている場合にどの行の
+     * courseName/courseStopIdが返るかをSQLite仕様上決定的にする（bare columnはmin/max対象行から
+     * 取られることがSQLiteドキュメントで保証されている。2026-07-11レビュー指摘の修正）。
+     */
+    @Query(
+        """
+        SELECT cs.stop_card_id AS cardId, c.name AS courseName, MIN(cs.id) AS courseStopId
+        FROM course_stop cs
+        JOIN course c ON c.id = cs.course_id
+        WHERE cs.course_id != :excludeCourseId
+        GROUP BY cs.stop_card_id
+    """
+    )
+    suspend fun getUsageExcluding(excludeCourseId: Long): List<StopCardUsage>
+
+    /** 全カードの使用状況一覧（停留所カード一覧の使用中バッジ用）。決定性についてはgetUsageExcluding参照。 */
+    @Query(
+        """
+        SELECT cs.stop_card_id AS cardId, c.name AS courseName, cs.sequence_index AS sequenceIndex, MIN(cs.id) AS courseStopId
+        FROM course_stop cs
+        JOIN course c ON c.id = cs.course_id
+        GROUP BY cs.stop_card_id
+    """
+    )
+    suspend fun getAllUsage(): List<StopCardUsageWithOrder>
 }
 
 /** `course_segment`（隣接ペアごとの軌跡割当）の操作（設計書§3.8 regenerateCourseSegments が使用）。 */
@@ -167,6 +202,10 @@ interface RecordingSessionDao {
     /** セッション削除（設計書§4.10.3）。子テーブルはON DELETE CASCADEで連動削除される。 */
     @Query("DELETE FROM recording_session WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** セッションメモの更新（区間抽出画面、2026-07-11追加）。 */
+    @Query("UPDATE recording_session SET memo = :memo WHERE id = :id")
+    suspend fun updateMemo(id: Long, memo: String?)
 }
 
 /** `timelapse_frame`（LORES連写／HIRES単写メタデータ）の操作（設計書§3.5、D6）。 */
@@ -225,4 +264,62 @@ interface ShockEventDao {
     /** 衝撃発生+3秒後に確定するバースト終端フレームの後追い更新（設計書§4.9.1）。 */
     @Query("UPDATE shock_event SET burst_end_frame_id = :frameId WHERE id = :id")
     suspend fun updateBurstEndFrame(id: Long, frameId: Long?)
+}
+
+/** `map_data_package`（オフライン地図パッケージのメタデータ）の操作（設計書§3.5・§5.6.4）。 */
+@Dao
+interface MapDataPackageDao {
+    @Upsert
+    suspend fun upsert(pkg: MapDataPackageEntity)
+
+    @Query("SELECT * FROM map_data_package ORDER BY display_name")
+    suspend fun getAll(): List<MapDataPackageEntity>
+
+    @Query("SELECT * FROM map_data_package WHERE region_id = :regionId")
+    suspend fun getByRegionId(regionId: String): MapDataPackageEntity?
+
+    /**
+     * 選択中パッケージの購読用（`MapDataPackageRepository.selectedPackage`、設計書§5.6.4、
+     * 2026-07-12 mapパッケージインポート機構実装で追加）。Room標準のFlow返却クエリ（suspend不可）。
+     * `map_data_package`テーブルへの書き込みで自動的に再発行される。
+     */
+    @Query("SELECT * FROM map_data_package WHERE is_selected = 1 LIMIT 1")
+    fun observeSelected(): Flow<MapDataPackageEntity?>
+
+    /**
+     * 選択状態を単一に保つ（`bus_stop_card.is_archived` と同様の単一選択パターン）。
+     * 全解除→対象のみ選択、の2段をトランザクションで実行する。
+     */
+    @Transaction
+    suspend fun setSelected(regionId: String) {
+        clearSelection()
+        selectOne(regionId)
+    }
+
+    @Query("UPDATE map_data_package SET is_selected = 0")
+    suspend fun clearSelection()
+
+    @Query("UPDATE map_data_package SET is_selected = 1 WHERE region_id = :regionId")
+    suspend fun selectOne(regionId: String)
+
+    @Query("DELETE FROM map_data_package WHERE region_id = :regionId")
+    suspend fun delete(regionId: String)
+}
+
+/** `work_log`（作業進捗ログ、依頼３ 2026-07-11）の操作。 */
+@Dao
+interface WorkLogDao {
+    @Insert
+    suspend fun insert(log: WorkLogEntity): Long
+
+    /** 新しい順。ログは増え続けるため上限付きで取得する。 */
+    @Query("SELECT * FROM work_log ORDER BY ts_epoch_ms DESC, id DESC LIMIT :limit")
+    suspend fun getRecent(limit: Int = 500): List<WorkLogEntity>
+
+    /** 保持上限を超えた古い行の間引き（呼び出しは挿入時に随時）。 */
+    @Query(
+        "DELETE FROM work_log WHERE id NOT IN " +
+            "(SELECT id FROM work_log ORDER BY ts_epoch_ms DESC, id DESC LIMIT :keep)"
+    )
+    suspend fun pruneOld(keep: Int = 2000)
 }

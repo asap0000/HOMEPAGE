@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
  * BusCourse 正典スキーマ（設計書§3）の Room データベース。
@@ -11,6 +12,27 @@ import androidx.room.RoomDatabase
  * version 1 はフェーズ1〜2（記録・編成）スコープのテーブルのみ:
  * - bus_stop_card は D5 の案内用3列（approach_radius_m 等）を含まない（フェーズ4で ALTER TABLE、§3.5）
  * - test_run_comparison 系（フェーズ5）・map_data_package（フェーズ3）は未作成
+ *
+ * version 2（2026-07-10）: bus_stop_card に rider_count 列を追加（乗車人数・定員警告用）。
+ * 実車実測で既に本番データが端末上に存在するため、破壊的マイグレーションではなく
+ * 明示的な ALTER TABLE で既存データを保持する（[MIGRATION_1_2]）。
+ *
+ * version 3（2026-07-10、P1-1/P2-2）: bus_stop_card に needs_maturation・voice_memo_rel_path 列を追加。
+ * 同じく実データ保持のため明示 ALTER TABLE（[MIGRATION_2_3]）。
+ *
+ * version 4（2026-07-11）: recording_session に memo 列を追加（区間抽出画面でセッションごとに
+ * 「いつ・何の目的で走ったか」を後から記録できるようにする）。同じく実データ保持のため
+ * 明示 ALTER TABLE（[MIGRATION_3_4]）。
+ *
+ * version 5（2026-07-11、依頼３）: work_log テーブルを新設（作業進捗ログ。[WorkLogEntity]）。
+ * 新テーブル追加のみで既存テーブルは無変更（[MIGRATION_4_5]）。
+ *
+ * version 6（2026-07-11、依頼１続き）: bus_stop_card に garden_color 列を追加（園区分の色選択、任意項目。
+ * 色と園の対応はアプリでは固定せず運用で決める）。同じく実データ保持のため明示 ALTER TABLE（[MIGRATION_5_6]）。
+ *
+ * version 7（2026-07-11）: map_data_package テーブルを新設（オフライン地図パッケージのメタデータ、
+ * フェーズ3、設計書§3.5・§5.6.4。[MapDataPackageEntity]）。`.iscmap`インポート時（設計書§5.6.3手順6）に
+ * `manifest.json` から1行UPSERTされる。新テーブル追加のみで既存テーブルは無変更（[MIGRATION_6_7]）。
  */
 @Database(
     entities = [
@@ -25,8 +47,10 @@ import androidx.room.RoomDatabase
         GpsPointEntity::class,
         StopVisitEventEntity::class,
         ShockEventEntity::class,
+        WorkLogEntity::class,
+        MapDataPackageEntity::class,
     ],
-    version = 1,
+    version = 7,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -41,6 +65,8 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun gpsPointDao(): GpsPointDao
     abstract fun stopVisitEventDao(): StopVisitEventDao
     abstract fun shockEventDao(): ShockEventDao
+    abstract fun workLogDao(): WorkLogDao
+    abstract fun mapDataPackageDao(): MapDataPackageDao
 
     companion object {
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
@@ -49,6 +75,94 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 context.applicationContext,
                 BusCourseDatabase::class.java,
                 BusCourseStorage.DATABASE_NAME,
+            ).addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
             ).build()
+
+        /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
+        val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN rider_count INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * bus_stop_card.needs_maturation・voice_memo_rel_path 追加（P1-1クイック採取／P2-2音声メモ、
+         * 2026-07-10）。既存データは保持する。
+         */
+        val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN needs_maturation INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN voice_memo_rel_path TEXT")
+            }
+        }
+
+        /** recording_session.memo 追加（セッションメモ、2026-07-11）。既存データは保持する。 */
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE recording_session ADD COLUMN memo TEXT")
+            }
+        }
+
+        /** work_log 新設（作業進捗ログ、依頼３ 2026-07-11）。既存テーブルは無変更。 */
+        val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS work_log (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "ts_epoch_ms INTEGER NOT NULL, " +
+                        "category TEXT NOT NULL, " +
+                        "message TEXT NOT NULL, " +
+                        "detail TEXT)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_work_log_ts_epoch_ms ON work_log (ts_epoch_ms)")
+            }
+        }
+
+        /** bus_stop_card.garden_color 追加（園区分の色選択、依頼１続き 2026-07-11）。既存データは保持する。 */
+        val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN garden_color TEXT")
+            }
+        }
+
+        /**
+         * map_data_package 新設（オフライン地図パッケージのメタデータ、フェーズ3、2026-07-11、
+         * 設計書§3.5・§5.6.4）。既存テーブルは無変更。列は[MapDataPackageEntity]のスキーマと
+         * 完全一致させる（実物の`.iscmap`/`manifest.json`から実測した実物スキーマ、同エンティティKDoc参照）。
+         */
+        val MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS map_data_package (" +
+                        "region_id TEXT NOT NULL, " +
+                        "display_name TEXT NOT NULL, " +
+                        "prepared_at TEXT NOT NULL, " +
+                        "prepared_by TEXT NOT NULL, " +
+                        "attribution TEXT NOT NULL, " +
+                        "schema_version INTEGER NOT NULL, " +
+                        "mbtiles_rel_path TEXT NOT NULL, " +
+                        "mbtiles_sha256 TEXT NOT NULL, " +
+                        "minzoom INTEGER NOT NULL, " +
+                        "maxzoom INTEGER NOT NULL, " +
+                        "bounds_west REAL NOT NULL, " +
+                        "bounds_south REAL NOT NULL, " +
+                        "bounds_east REAL NOT NULL, " +
+                        "bounds_north REAL NOT NULL, " +
+                        "style_rel_path TEXT NOT NULL, " +
+                        "style_sha256 TEXT NOT NULL, " +
+                        "glyphs_dir_rel_path TEXT NOT NULL, " +
+                        "glyph_fontstacks_csv TEXT NOT NULL, " +
+                        "imported_at INTEGER NOT NULL, " +
+                        "is_selected INTEGER NOT NULL DEFAULT 0, " +
+                        "PRIMARY KEY(region_id))"
+                )
+            }
+        }
     }
 }

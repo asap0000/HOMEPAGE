@@ -5,10 +5,15 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.buscourse.BusCourseApplication
+import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.MapDataPackageEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
+import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.SegmentExtractionResult
+import com.istech.buscourse.map.MapDataPackageRepository
+import com.istech.buscourse.map.MapPackageImporter
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -35,6 +40,57 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         CourseRepository(application, (application as BusCourseApplication).database)
     }
 
+    /**
+     * mapパッケージ（`.iscmap`）関連の窓口2つ（フェーズ3、設計書§5.6.4・§9次工程）。
+     * [repository]（[CourseRepository]）とは別系統のため、`database`は[getApplication]経由で
+     * 個別に取得する（`application`はプライマリコンストラクタのパラメータのため、[repository]の
+     * `lazy`初期化ブロックの外＝通常のメンバ関数からは直接参照できない。[getApplication]は
+     * `AndroidViewModel`が提供するジェネリックメソッドで、どの文脈からでも呼べる）。
+     */
+    private val database: BusCourseDatabase by lazy { getApplication<BusCourseApplication>().database }
+
+    /** 取り込み済み地図パッケージの一覧・選択状態（読み取りは画面から直接呼んでよい、既存方針どおり）。 */
+    val mapRepository: MapDataPackageRepository by lazy { MapDataPackageRepository(database) }
+
+    private val mapPackageImporter: MapPackageImporter by lazy {
+        MapPackageImporter(getApplication<BusCourseApplication>(), mapRepository)
+    }
+
+    /**
+     * courseIdごとの編成下書き（画面破棄・戻る操作で失われないようViewModelに保持する）。
+     * cardIdの並び順だけを持つ。name/riderCountは他画面でのカード編集を反映できるよう、
+     * 復元時に呼び出し側（CourseDetailScreen）が都度最新のカードデータから引き直す。
+     */
+    private val courseStopDrafts = mutableMapOf<Long, List<Long>>()
+
+    /**
+     * 作業進捗ログ（依頼３ 2026-07-11）の共通記録。書き込み操作の成否確定後に呼ぶ。
+     * 成功時は [successMessage]（nullなら成功は記録しない）、失敗時は ERROR として例外要約を残す。
+     * ログ記録自体の失敗は logWork 側で握りつぶされるため、onResult への影響はない。
+     */
+    private suspend fun <T> logOutcome(
+        result: Result<T>,
+        category: WorkLogCategory,
+        opName: String,
+        successMessage: (suspend (T) -> String)? = null,
+    ) {
+        result.onSuccess { value ->
+            if (successMessage != null) repository.logWork(category, successMessage(value))
+        }.onFailure { e ->
+            repository.logWork(WorkLogCategory.ERROR, "$opName に失敗しました", e.toString())
+        }
+    }
+
+    fun getCourseStopDraft(courseId: Long): List<Long>? = courseStopDrafts[courseId]
+
+    fun setCourseStopDraft(courseId: Long, cardIdOrder: List<Long>) {
+        courseStopDrafts[courseId] = cardIdOrder
+    }
+
+    fun clearCourseStopDraft(courseId: Long) {
+        courseStopDrafts.remove(courseId)
+    }
+
     /** 停留所カードの新規作成（§3.3。StopCardCreateScreen「保存」）。 */
     fun createStopCard(
         name: String,
@@ -42,12 +98,30 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         longitude: Double,
         altitudeM: Double?,
         notes: String?,
+        riderCount: Int,
         photoTempFile: File?,
+        voiceMemoTempFile: File? = null,
+        needsMaturation: Boolean = false,
+        gardenColor: String? = null,
         onResult: (Result<Long>) -> Unit = {},
     ) {
         viewModelScope.launch {
             val result = runCatching {
-                repository.createStopCard(name, latitude, longitude, altitudeM, notes, photoTempFile)
+                repository.createStopCard(
+                    name = name,
+                    latitude = latitude,
+                    longitude = longitude,
+                    altitudeM = altitudeM,
+                    notes = notes,
+                    riderCount = riderCount,
+                    photoTempFile = photoTempFile,
+                    voiceMemoTempFile = voiceMemoTempFile,
+                    needsMaturation = needsMaturation,
+                    gardenColor = gardenColor,
+                )
+            }
+            logOutcome(result, WorkLogCategory.STOP_CARD, "停留所カードの作成") {
+                "停留所カード『$name』を作成" + if (voiceMemoTempFile != null) "（音声メモ付き）" else ""
             }
             onResult(result)
         }
@@ -61,12 +135,15 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         longitude: Double,
         altitudeM: Double?,
         notes: String?,
+        riderCount: Int,
+        gardenColor: String? = null,
         onResult: (Result<Unit>) -> Unit = {},
     ) {
         viewModelScope.launch {
             val result = runCatching {
-                repository.updateStopCard(id, name, latitude, longitude, altitudeM, notes)
+                repository.updateStopCard(id, name, latitude, longitude, altitudeM, notes, riderCount, gardenColor)
             }
+            logOutcome(result, WorkLogCategory.STOP_CARD, "停留所カードの編集") { "停留所カード『$name』を編集" }
             onResult(result)
         }
     }
@@ -74,7 +151,44 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     /** 停留所カードのアーカイブ（論理削除、StopCardEditScreen）。 */
     fun archiveStopCard(id: Long, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
+            val cardName = runCatching { repository.getStopCard(id)?.name }.getOrNull()
             val result = runCatching { repository.archiveStopCard(id) }
+            logOutcome(result, WorkLogCategory.STOP_CARD, "停留所カードのアーカイブ") {
+                "停留所カード『${cardName ?: "ID:$id"}』をアーカイブ"
+            }
+            onResult(result)
+        }
+    }
+
+    /** 写真・座標だけの撮り直し（StopCardRetakeScreen「保存」、P2-1）。 */
+    fun retakePhotoAndLocation(
+        cardId: Long,
+        latitude: Double,
+        longitude: Double,
+        altitudeM: Double?,
+        photoTempFile: File,
+        onResult: (Result<Unit>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching {
+                repository.retakePhotoAndLocation(cardId, latitude, longitude, altitudeM, photoTempFile)
+            }
+            logOutcome(result, WorkLogCategory.STOP_CARD, "写真・座標の撮り直し") {
+                val cardName = runCatching { repository.getStopCard(cardId)?.name }.getOrNull()
+                "停留所カード『${cardName ?: "ID:$cardId"}』の写真・座標を撮り直し"
+            }
+            onResult(result)
+        }
+    }
+
+    /** 録音済み音声メモの添付確定（StopCardEditScreen、P2-2）。 */
+    fun attachVoiceMemo(cardId: Long, recordedTempFile: File, onResult: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { repository.attachVoiceMemo(cardId, recordedTempFile) }
+            logOutcome(result, WorkLogCategory.STOP_CARD, "音声メモの添付") {
+                val cardName = runCatching { repository.getStopCard(cardId)?.name }.getOrNull()
+                "停留所カード『${cardName ?: "ID:$cardId"}』に音声メモを添付"
+            }
             onResult(result)
         }
     }
@@ -83,6 +197,10 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     fun setCourseStops(courseId: Long, stopCardIds: List<Long>, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
             val result = runCatching { repository.setCourseStops(courseId, stopCardIds) }
+            logOutcome(result, WorkLogCategory.COURSE, "編成の確定") {
+                val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
+                "コース『${courseName ?: "ID:$courseId"}』の編成を確定（停留所${stopCardIds.size}件・区間再構築）"
+            }
             onResult(result)
         }
     }
@@ -96,6 +214,9 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         viewModelScope.launch {
             val result = runCatching { repository.importAsSegmentTrack(gpxFile, from, to) }
+            logOutcome(result, WorkLogCategory.GPX, "GPX取り込み") {
+                "GPXを区間（カードID $from→$to）として取り込み"
+            }
             onResult(result)
         }
     }
@@ -104,6 +225,10 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     fun exportCourse(courseId: Long, onResult: (Result<File>) -> Unit = {}) {
         viewModelScope.launch {
             val result = runCatching { repository.exportCourse(courseId) }
+            logOutcome(result, WorkLogCategory.GPX, "GPXエクスポート") { file ->
+                val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
+                "コース『${courseName ?: "ID:$courseId"}』をGPXエクスポート（${file.name}）"
+            }
             onResult(result)
         }
     }
@@ -115,6 +240,50 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         viewModelScope.launch {
             val result = runCatching { repository.extractSegmentsFromSession(sessionId) }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "区間抽出") { r ->
+                "セッション#${sessionId}から区間抽出（作成${r.extractedSegmentCount}件・スキップ${r.skippedPairCount}件）"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * コースを指定した遡及区間抽出（ExtractionScreen、2026-07-10追加、P0-1）。
+     * 記録時に停留所カード未登録等で `stop_visit_event` が得られなかったセッションでも、
+     * コースの停留所順列とGPS点列だけで区間を復元する。
+     */
+    fun extractSegmentsForCourse(
+        courseId: Long,
+        sessionId: Long,
+        onResult: (Result<SegmentExtractionResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { repository.extractSegmentsForCourse(courseId, sessionId) }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "コース指定の区間抽出") { r ->
+                "セッション#${sessionId}からコース指定で区間抽出（作成${r.extractedSegmentCount}件・スキップ${r.skippedPairCount}件・未達${r.unmatchedStops.size}件）"
+            }
+            onResult(result)
+        }
+    }
+
+    /** セッションメモの更新（ExtractionScreen、2026-07-11追加）。 */
+    fun updateSessionMemo(sessionId: Long, memo: String?, onResult: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { repository.updateSessionMemo(sessionId, memo) }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "セッションメモの更新") {
+                if (memo.isNullOrBlank()) "セッション#${sessionId}のメモを削除" else "セッション#${sessionId}のメモを更新"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * 全アクティブ停留所カードのサムネイル一括再生成（StopCardListScreen、2026-07-10追加）。
+     * EXIF回転バグ修正前に生成された既存サムネイルの是正用。
+     */
+    fun regenerateAllThumbnails(onResult: (Result<Int>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { repository.regenerateAllThumbnails() }
             onResult(result)
         }
     }
@@ -128,6 +297,36 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         viewModelScope.launch {
             val result = runCatching { repository.createCourse(name, kind, baseCourseId) }
+            logOutcome(result, WorkLogCategory.COURSE, "コースの作成") {
+                "コース『$name』を作成" + if (kind == CourseKind.TEMPORARY) "（臨時）" else ""
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * `.iscmap`地図パッケージの取り込み（MapImportScreen、設計書§5.6.3・§9次工程）。
+     * ZIP展開・SHA-256照合・DB UPSERTと複数の工程にまたがる書き込みのため、他の書き込み系関数と
+     * 同様に[viewModelScope]管理下で実行する（画面破棄で中断させない、フェーズ2レビュー#13の方針を
+     * mapパッケージ取り込みにも適用）。
+     */
+    fun importMapPackage(uri: Uri, onResult: (Result<MapDataPackageEntity>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { mapPackageImporter.import(uri) }
+            logOutcome(result, WorkLogCategory.MAP, "地図パッケージの取り込み") { pkg ->
+                "地図パッケージ『${pkg.displayName}』（${pkg.regionId}）を取り込み"
+            }
+            onResult(result)
+        }
+    }
+
+    /** 使用中の地図パッケージの切り替え（MapImportScreen「選択」、設計書§5.6.4 selectPackage）。 */
+    fun selectMapPackage(regionId: String, displayName: String, onResult: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { mapRepository.selectPackage(regionId) }
+            logOutcome(result, WorkLogCategory.MAP, "地図パッケージの選択切替") {
+                "使用中の地図パッケージを『$displayName』に切り替え"
+            }
             onResult(result)
         }
     }

@@ -33,6 +33,7 @@ class RecordingNotificationManager(private val context: Context) {
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private var stopMarkReceiver: StopMarkReceiver? = null
+    private var quickCaptureReceiver: QuickCaptureReceiver? = null
 
     /** 通知チャンネルを作成する（冪等・API26未満では何もしない）。サービス起動時に必ず呼ぶこと。 */
     fun createChannelIfNeeded() {
@@ -67,12 +68,36 @@ class RecordingNotificationManager(private val context: Context) {
         stopMarkReceiver = null
     }
 
+    /** 「カード撮影」ボタンの動的レシーバを登録する。[onQuickCapture] はメインスレッドで呼ばれる。 */
+    fun registerQuickCaptureReceiver(onQuickCapture: () -> Unit) {
+        if (quickCaptureReceiver != null) return
+        val receiver = QuickCaptureReceiver(onQuickCapture)
+        quickCaptureReceiver = receiver
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(ACTION_QUICK_CAPTURE), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    /** 登録済みレシーバを解除する（`BusRecordingService.onDestroy`から呼ぶ）。冪等。 */
+    fun unregisterQuickCaptureReceiver() {
+        quickCaptureReceiver?.let {
+            runCatching { context.unregisterReceiver(it) }
+        }
+        quickCaptureReceiver = null
+    }
+
     /** FGS常駐通知を構築する（設計書§4.3・§4.8.3）。 */
     fun buildOngoingNotification(contentText: String): Notification {
         val markStopIntent = PendingIntent.getBroadcast(
             context,
             REQ_MARK_STOP,
             Intent(ACTION_MARK_STOP).setPackage(context.packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val quickCaptureIntent = PendingIntent.getBroadcast(
+            context,
+            REQ_QUICK_CAPTURE,
+            Intent(ACTION_QUICK_CAPTURE).setPackage(context.packageName),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(context, CHANNEL_ID)
@@ -84,6 +109,7 @@ class RecordingNotificationManager(private val context: Context) {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(R.drawable.ic_stop_mark, context.getString(R.string.notification_action_mark_stop), markStopIntent)
+            .addAction(R.drawable.ic_quick_capture, context.getString(R.string.notification_action_quick_capture), quickCaptureIntent)
             .build()
     }
 
@@ -101,10 +127,21 @@ class RecordingNotificationManager(private val context: Context) {
         }
     }
 
+    /** 動的登録される「カード撮影」ボタンの受信先（P1-1）。[StopMarkReceiver]と同一パターン。 */
+    private class QuickCaptureReceiver(private val onQuickCapture: () -> Unit) : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_QUICK_CAPTURE) {
+                onQuickCapture()
+            }
+        }
+    }
+
     companion object {
         const val CHANNEL_ID = "recording_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_MARK_STOP = "com.istech.buscourse.action.MARK_STOP"
+        const val ACTION_QUICK_CAPTURE = "com.istech.buscourse.action.QUICK_CAPTURE"
         private const val REQ_MARK_STOP = 1
+        private const val REQ_QUICK_CAPTURE = 2
     }
 }

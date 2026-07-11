@@ -17,10 +17,15 @@ import com.istech.buscourse.ui.CourseDetailScreen
 import com.istech.buscourse.ui.CourseListScreen
 import com.istech.buscourse.ui.ExtractionScreen
 import com.istech.buscourse.ui.HomeScreen
+import com.istech.buscourse.ui.MapImportScreen
 import com.istech.buscourse.ui.RecordingScreen
+import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.StopCardCreateScreen
 import com.istech.buscourse.ui.StopCardEditScreen
 import com.istech.buscourse.ui.StopCardListScreen
+import com.istech.buscourse.ui.StopCardRetakeScreen
+import com.istech.buscourse.ui.TopScreen
+import com.istech.buscourse.ui.WorkLogScreen
 import com.istech.buscourse.ui.theme.BusCourseTheme
 
 /**
@@ -30,6 +35,8 @@ import com.istech.buscourse.ui.theme.BusCourseTheme
  * - 停留所カード CRUD（一覧・新規作成〔GPS＋CameraX撮影〕・編集/アーカイブ）
  * - コース編成（一覧・作成・DnD並べ替え・§3.8 regenerateCourseSegments・GPX入出力 §3.11）
  * - 試走ログからの区間自動抽出（§3.9）
+ * - 地図データ管理（`.iscmap`インポート・使用パッケージ切替、§5.6）・コースの地図表示
+ *   （§5.7 オーバーレイ一式の画面組み込み、フェーズ3、2026-07-12追加）
  */
 class MainActivity : ComponentActivity() {
 
@@ -47,16 +54,24 @@ class MainActivity : ComponentActivity() {
 }
 
 private object Routes {
+    const val TOP = "top"
     const val HOME = "home"
+    const val WORK_LOG = "worklog"
     const val RECORDING = "recording"
     const val STOP_CARDS = "stopcards"
     const val STOP_CARD_NEW = "stopcards/new"
     const val STOP_CARD_EDIT = "stopcards/{id}"
+    const val STOP_CARD_RETAKE = "stopcards/{id}/retake"
     const val COURSES = "courses"
     const val COURSE_DETAIL = "courses/{id}"
+    const val COURSE_MAP = "courses/{id}/map"
     const val EXTRACTION = "extraction"
+    // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
+    const val MAP_IMPORT = "map_import"
     fun stopCardEdit(id: Long) = "stopcards/$id"
+    fun stopCardRetake(id: Long) = "stopcards/$id/retake"
     fun courseDetail(id: Long) = "courses/$id"
+    fun courseMap(id: Long) = "courses/$id/map"
 }
 
 @Composable
@@ -64,15 +79,28 @@ private fun AppNavHost() {
     val navController = rememberNavController()
     // Activityスコープの単一ViewModelで CourseRepository を全画面共有（:app と同じ方式）
     val viewModel: BusCourseViewModel = viewModel()
-    val repository = viewModel.repository
 
-    NavHost(navController = navController, startDestination = Routes.HOME) {
+    NavHost(navController = navController, startDestination = Routes.TOP) {
+        composable(Routes.TOP) {
+            TopScreen(
+                onOpenDesign = { navController.navigate(Routes.HOME) },
+            )
+        }
         composable(Routes.HOME) {
             HomeScreen(
+                onBack = { navController.popBackStack() },
                 onOpenRecording = { navController.navigate(Routes.RECORDING) },
                 onOpenStopCards = { navController.navigate(Routes.STOP_CARDS) },
                 onOpenCourses = { navController.navigate(Routes.COURSES) },
                 onOpenExtraction = { navController.navigate(Routes.EXTRACTION) },
+                onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
+                onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+            )
+        }
+        composable(Routes.WORK_LOG) {
+            WorkLogScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() },
             )
         }
         composable(Routes.RECORDING) {
@@ -83,7 +111,7 @@ private fun AppNavHost() {
         }
         composable(Routes.STOP_CARDS) {
             StopCardListScreen(
-                repository = repository,
+                viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onCreate = { navController.navigate(Routes.STOP_CARD_NEW) },
                 onEdit = { id -> navController.navigate(Routes.stopCardEdit(id)) },
@@ -103,6 +131,18 @@ private fun AppNavHost() {
                     viewModel = viewModel,
                     stopCardId = id,
                     onBack = { navController.popBackStack() },
+                    onRetake = { navController.navigate(Routes.stopCardRetake(id)) },
+                )
+            }
+        }
+        composable(Routes.STOP_CARD_RETAKE) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                StopCardRetakeScreen(
+                    viewModel = viewModel,
+                    stopCardId = id,
+                    onBack = { navController.popBackStack() },
+                    onRetaken = { navController.popBackStack() },
                 )
             }
         }
@@ -120,11 +160,29 @@ private fun AppNavHost() {
                     viewModel = viewModel,
                     courseId = id,
                     onBack = { navController.popBackStack() },
+                    onOpenMap = { navController.navigate(Routes.courseMap(id)) },
+                )
+            }
+        }
+        composable(Routes.COURSE_MAP) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                RouteMapScreen(
+                    viewModel = viewModel,
+                    courseId = id,
+                    onBack = { navController.popBackStack() },
+                    onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
                 )
             }
         }
         composable(Routes.EXTRACTION) {
             ExtractionScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.MAP_IMPORT) {
+            MapImportScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
             )

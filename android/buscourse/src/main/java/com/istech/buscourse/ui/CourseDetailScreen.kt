@@ -2,6 +2,7 @@ package com.istech.buscourse.ui
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -24,10 +25,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,7 +66,13 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /** 編成中の停留所1行（並べ替え用ローカル状態）。 */
-private data class StopRow(val cardId: Long, val name: String)
+data class StopRow(val cardId: Long, val name: String, val riderCount: Int)
+
+/** 中型マイクロバス定員（幼児、2026-07-10）。停留所カードの乗車人数を参照する運用が変わったら見直す。 */
+private const val BUS_CAPACITY = 39
+
+/** 累計乗車人数がこの値以上になったらイエローシグナルを表示する（2026-07-10、オーナー指定）。 */
+private const val BUS_CAPACITY_WARNING = 35
 
 /**
  * コース詳細＝編成画面（設計書§3.8「臨時コース編成」・§9 フェーズ2）。
@@ -71,6 +81,7 @@ private data class StopRow(val cardId: Long, val name: String)
  * - 区間一覧（CONFIRMED / PENDING）表示。PENDING 区間は §3.11.3 `importAsSegmentTrack` による
  *   GPX取り込み（SAF ACTION_OPEN_DOCUMENT）で補完できる
  * - コース全体のGPXエクスポート（§3.11.3 `exportCourse`＋SAF ACTION_CREATE_DOCUMENT）
+ * - 地図表示（[RouteMapScreen]、設計書§5.7、フェーズ3、2026-07-12追加）への導線
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,6 +89,7 @@ fun CourseDetailScreen(
     viewModel: BusCourseViewModel,
     courseId: Long,
     onBack: () -> Unit,
+    onOpenMap: () -> Unit,
 ) {
     val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -88,7 +100,10 @@ fun CourseDetailScreen(
     var refreshKey by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showLeaveConfirm by remember { mutableStateOf(false) }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
+    var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
+    var unusedOnlyFilter by remember { mutableStateOf(false) }
 
     // 永続化済み順序と未確定編集中の順序の差分（このLaunchedEffectの直前、＝再読込直前の状態で判定する
     // 必要があるため宣言をLaunchedEffectより前に置く）。dirty中はeditedStopsの再構築をスキップする
@@ -101,9 +116,28 @@ fun CourseDetailScreen(
         val loaded = repository.getCourseWithDetails(courseId)
         details = loaded
         if (!dirty) {
+            val draftOrder = viewModel.getCourseStopDraft(courseId)
             editedStops.clear()
-            loaded?.stops?.sortedBy { it.courseStop.sequenceIndex }?.forEach {
-                editedStops.add(StopRow(cardId = it.courseStop.stopCardId, name = it.card.name))
+            if (draftOrder != null) {
+                // 下書きはcardIdの並びだけを保持する。name/riderCountは他画面での編集を
+                // 取りこぼさないよう、常に最新値を引き直す（レビュー指摘: 下書きにStopRowを
+                // スナップショット保存すると、コース編成中に別画面でカードの乗車人数を変更しても
+                // 定員警告が古い値のまま表示され続けていた）。
+                // カードIDごとに repository.getStopCard(id)（is_archivedを問わず取得）で引き直す。
+                // getActiveStopCards()（未アーカイブのみ）だと、下書きに含まれるカードが後から
+                // 他画面でアーカイブされていた場合に一覧から消えてしまう（実機検証で発覚。
+                // 「追加」したがまだ「編成を確定」していないカードは loaded.stops にも出てこない
+                // ため、そちらも参照元にできない）。
+                draftOrder.forEach { cardId ->
+                    val live = repository.getStopCard(cardId) ?: return@forEach
+                    editedStops.add(StopRow(cardId = cardId, name = live.name, riderCount = live.riderCount))
+                }
+            } else {
+                loaded?.stops?.sortedBy { it.courseStop.sequenceIndex }?.forEach {
+                    editedStops.add(
+                        StopRow(cardId = it.courseStop.stopCardId, name = it.card.name, riderCount = it.card.riderCount)
+                    )
+                }
             }
         }
     }
@@ -118,6 +152,7 @@ fun CourseDetailScreen(
             val to = rawToStop(toRaw)
             if (from in editedStops.indices && to in editedStops.indices) {
                 editedStops.add(to, editedStops.removeAt(from))
+                viewModel.setCourseStopDraft(courseId, editedStops.map { it.cardId })
             }
         },
     )
@@ -171,6 +206,7 @@ fun CourseDetailScreen(
         viewModel.setCourseStops(courseId, editedStops.map { it.cardId }) { result ->
             busy = false
             result.onSuccess {
+                viewModel.clearCourseStopDraft(courseId)
                 Toast.makeText(context, "編成を確定し、区間を再構築しました", Toast.LENGTH_SHORT).show()
                 refreshKey++
             }.onFailure { e ->
@@ -197,6 +233,9 @@ fun CourseDetailScreen(
         details?.stops?.associate { it.card.id to it.card.name }.orEmpty()
     }
 
+    // 未確定の並べ替えがある状態でのシステム戻る操作は確認ダイアログを挟む(下書きはViewModel保持済みのため消失はしない)。
+    BackHandler(enabled = dirty) { showLeaveConfirm = true }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -208,11 +247,14 @@ fun CourseDetailScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { if (dirty) showLeaveConfirm = true else onBack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
                     }
                 },
                 actions = {
+                    IconButton(onClick = onOpenMap) {
+                        Icon(Icons.Filled.Map, contentDescription = "地図表示")
+                    }
                     IconButton(onClick = { exportCourse() }, enabled = !busy && details != null) {
                         Icon(Icons.Filled.FileUpload, contentDescription = "GPXエクスポート")
                     }
@@ -242,6 +284,13 @@ fun CourseDetailScreen(
             itemsIndexed(editedStops, key = { _, stop -> stop.cardId }) { index, stop ->
                 val rawIndex = index + stopRangeStart
                 val dragging = dragState.draggingItemIndex == rawIndex
+                // その停留所まで乗せた場合の累計乗車人数（定員警告用、2026-07-10）
+                val cumulativeRiders = editedStops.take(index + 1).sumOf { it.riderCount }
+                val capacityColor = when {
+                    cumulativeRiders > BUS_CAPACITY -> MaterialTheme.colorScheme.error
+                    cumulativeRiders >= BUS_CAPACITY_WARNING -> Color(0xFFF9A825) // イエローシグナル
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -271,17 +320,50 @@ fun CourseDetailScreen(
                             color = MaterialTheme.colorScheme.primary,
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text(
-                            stop.name,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        IconButton(onClick = { editedStops.removeAt(index) }, enabled = !busy) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                stop.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (stop.riderCount > 0) {
+                                Text(
+                                    "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = capacityColor,
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = {
+                                editedStops.removeAt(index)
+                                viewModel.setCourseStopDraft(courseId, editedStops.map { it.cardId })
+                            },
+                            enabled = !busy,
+                        ) {
                             Icon(Icons.Filled.Close, contentDescription = "コースから除外")
                         }
                     }
+                }
+            }
+
+            // コース合計乗車人数（定員警告、2026-07-10）
+            if (editedStops.isNotEmpty()) {
+                item {
+                    val totalRiders = editedStops.sumOf { it.riderCount }
+                    val totalColor = when {
+                        totalRiders > BUS_CAPACITY -> MaterialTheme.colorScheme.error
+                        totalRiders >= BUS_CAPACITY_WARNING -> Color(0xFFF9A825)
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Text(
+                        "コース合計乗車人数: $totalRiders / $BUS_CAPACITY 名" +
+                            if (totalRiders > BUS_CAPACITY) "（定員超過）" else if (totalRiders >= BUS_CAPACITY_WARNING) "（定員に近づいています）" else "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = totalColor,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
                 }
             }
 
@@ -297,6 +379,7 @@ fun CourseDetailScreen(
                         onClick = {
                             scope.launch {
                                 activeCards = repository.getActiveStopCards()
+                                usageMap = repository.getStopCardUsage(courseId)
                                 showAddDialog = true
                             }
                         },
@@ -364,31 +447,74 @@ fun CourseDetailScreen(
         // 無いと同じカードを重複追加できてしまい、#9のitemsIndexed keyの一意性も崩れる。
         // そのため9（key付与）より先に直すことが指示されている）
         val addedCardIds = editedStops.map { it.cardId }.toSet()
-        val availableCards = activeCards.filter { it.id !in addedCardIds }
+        val availableCards = activeCards
+            .filter { it.id !in addedCardIds }
+            .filter { !unusedOnlyFilter || !usageMap.containsKey(it.id) }
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             title = { Text("停留所を追加") },
             text = {
-                if (activeCards.isEmpty()) {
-                    Text("停留所カードがありません。先にカードを作成してください。")
-                } else if (availableCards.isEmpty()) {
-                    Text("追加できる停留所カードがありません（すべて追加済みです）。")
-                } else {
-                    LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                        itemsIndexed(availableCards, key = { _, card -> card.id }) { _, card ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        editedStops.add(StopRow(card.id, card.name))
-                                        showAddDialog = false
+                Column {
+                    FilterChip(
+                        selected = unusedOnlyFilter,
+                        onClick = { unusedOnlyFilter = !unusedOnlyFilter },
+                        label = { Text("未使用のみ") },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    if (activeCards.isEmpty()) {
+                        Text("停留所カードがありません。先にカードを作成してください。")
+                    } else if (availableCards.isEmpty()) {
+                        Text("追加できる停留所カードがありません（すべて追加済みです）。")
+                    } else {
+                        LazyColumn(Modifier.heightIn(max = 400.dp)) {
+                            itemsIndexed(availableCards, key = { _, card -> card.id }) { _, card ->
+                                val usedInCourseName = usageMap[card.id]
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            editedStops.add(StopRow(card.id, card.name, card.riderCount))
+                                            viewModel.setCourseStopDraft(courseId, editedStops.map { it.cardId })
+                                            showAddDialog = false
+                                        }
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    StopCardThumbnail(
+                                        file = repository.stopCardThumbFile(card),
+                                        modifier = Modifier.size(40.dp),
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    // 名前とバッジをRow内で横並び競合させない（レビュー指摘の修正: 実機の
+                                    // 文字サイズ大設定でSuggestionChipの実測幅が広がり、weight(1f)の
+                                    // 名前列が潰れてカード名が全く見えなくなっていた）。バッジは名前の
+                                    // 下に縦積みし、常にカード名を優先表示する。
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            card.name,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (card.riderCount > 0) {
+                                            Text(
+                                                "${card.riderCount}名",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        if (usedInCourseName != null) {
+                                            Text(
+                                                "使用中: $usedInCourseName",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                     }
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(card.name, modifier = Modifier.weight(1f))
+                                }
+                                HorizontalDivider()
                             }
-                            HorizontalDivider()
                         }
                     }
                 }
@@ -396,6 +522,28 @@ fun CourseDetailScreen(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showAddDialog = false }) { Text("閉じる") }
+            },
+        )
+    }
+
+    if (showLeaveConfirm) {
+        AlertDialog(
+            onDismissRequest = { showLeaveConfirm = false },
+            title = { Text("編成が未確定です") },
+            text = {
+                Text(
+                    "「編成を確定」していない変更があります。このまま戻ってもアプリを終了しない限り下書きは保持され、" +
+                        "次にこのコースを開いたときに復元されます（アプリを完全に終了した場合は下書きが失われます）。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLeaveConfirm = false
+                    onBack()
+                }) { Text("戻る") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLeaveConfirm = false }) { Text("編成画面に留まる") }
             },
         )
     }

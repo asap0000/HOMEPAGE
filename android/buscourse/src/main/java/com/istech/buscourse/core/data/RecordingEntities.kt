@@ -47,6 +47,12 @@ data class RecordingSessionEntity(
     @ColumnInfo(name = "total_distance_m") val totalDistanceM: Double?,
     /** RECORDING | COMPLETED | DISCARDED | INTERRUPTED */
     val status: String,
+    /**
+     * セッションメモ（2026-07-11追加）。「いつ・何の目的で走ったか」を後から自由記述する。
+     * コース編成・区間抽出を後日まとめて別の担当者が行うことがあるため、区間抽出画面の
+     * セッション一覧から編集する。
+     */
+    val memo: String? = null,
 )
 
 /**

@@ -2,19 +2,21 @@ package com.istech.buscourse.course
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
 import androidx.room.withTransaction
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.BusStopCardEntity
+import com.istech.buscourse.core.photo.ExifAwareBitmap
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseStopEntity
 import com.istech.buscourse.core.data.CourseWithDetails
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
+import com.istech.buscourse.core.data.WorkLogCategory
+import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.core.gpx.GpxCodec
 import com.istech.buscourse.core.gpx.GpxCourseExport
@@ -42,6 +44,12 @@ enum class CourseKind { STANDARD, TEMPORARY }
 /** `course_segment.status` の許容値（設計書§3.5）。 */
 enum class CourseSegmentStatus { CONFIRMED, PENDING }
 
+/** ジオフェンス半径内で一致しなかった停留所（気づきにくい抽出失敗の可視化、2026-07-11追加）。 */
+data class UnmatchedStop(
+    val name: String,
+    val nearestDistanceM: Double,
+)
+
 /** §3.9 区間自動抽出の実行結果サマリ（UI表示用）。 */
 data class SegmentExtractionResult(
     /** UPSERTした区間（有向ペア）の数。 */
@@ -50,6 +58,10 @@ data class SegmentExtractionResult(
     val affectedCourseCount: Int,
     /** GPS点不足等でスキップした隣接ペアの数。 */
     val skippedPairCount: Int,
+    /** GPS点不足等でスキップした隣接ペア（from停留所名, to停留所名）。 */
+    val skippedPairs: List<Pair<String, String>> = emptyList(),
+    /** 半径内マッチしなかった停留所（2026-07-11追加）。 */
+    val unmatchedStops: List<UnmatchedStop> = emptyList(),
 )
 
 /**
@@ -74,9 +86,34 @@ class CourseRepository(
     private val recordingSessionDao = database.recordingSessionDao()
     private val gpsPointDao = database.gpsPointDao()
     private val stopVisitEventDao = database.stopVisitEventDao()
+    private val workLogDao = database.workLogDao()
 
     /** route_point / expected_chainage_m の再生成主体（§3.5・§3.9。2026-07-08決定で course 所属）。 */
     val routePreprocessor = RoutePreprocessor(context, database)
+
+    // ------------------------------------------------------------------
+    // 作業進捗ログ（依頼３ 2026-07-11。work_log）
+    // ------------------------------------------------------------------
+
+    /**
+     * 作業進捗ログを1件記録する。ログ書き込み自体の失敗で本体操作を巻き添えにしないため、
+     * 例外は握りつぶす（記録は本体操作の成否確定後に呼ぶこと）。
+     */
+    suspend fun logWork(category: WorkLogCategory, message: String, detail: String? = null) {
+        runCatching {
+            workLogDao.insert(
+                WorkLogEntity(
+                    tsEpochMs = System.currentTimeMillis(),
+                    category = category.name,
+                    message = message,
+                    detail = detail,
+                )
+            )
+            workLogDao.pruneOld()
+        }
+    }
+
+    suspend fun getRecentWorkLogs(limit: Int = 500): List<WorkLogEntity> = workLogDao.getRecent(limit)
 
     // ------------------------------------------------------------------
     // 停留所カードCRUD（§3.5 bus_stop_card）
@@ -97,9 +134,17 @@ class CourseRepository(
         longitude: Double,
         altitudeM: Double?,
         notes: String?,
+        riderCount: Int,
         photoTempFile: File?,
+        voiceMemoTempFile: File? = null,
+        needsMaturation: Boolean = false,
+        gardenColor: String? = null,
     ): Long = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
+        // DB確定（voiceMemoRelPathの非null/null）と実ファイル移動を同じ判定基準にする
+        // （2026-07-11レビュー指摘の修正: 別々の条件だと、確定直前にtempFileが消えるケースで
+        // DBは「録音済み」を示すのに実ファイルが存在しない不整合が生まれうる）
+        val voiceMemoAvailable = voiceMemoTempFile?.exists() == true
         val draft = BusStopCardEntity(
             name = name,
             photoDirRelPath = "",
@@ -107,14 +152,25 @@ class CourseRepository(
             longitude = longitude,
             altitudeM = altitudeM,
             notes = notes?.takeIf { it.isNotBlank() },
+            riderCount = riderCount,
+            needsMaturation = needsMaturation,
+            gardenColor = gardenColor,
             createdAt = now,
             updatedAt = now,
         )
-        // IDなし作成→photoDirRelPath確定の2回のupsertを1トランザクションに直列化し、途中キャンセル時に
-        // photoDirRelPath="" の孤児レコードが残らないようにする（フェーズ2レビュー#8）
+        // IDなし作成→photoDirRelPath確定（+ voiceMemoTempFileがあればvoiceMemoRelPathも同時確定）の
+        // 2回のupsertを1トランザクションに直列化し、途中キャンセル時に photoDirRelPath="" の
+        // 孤児レコードが残らないようにする（フェーズ2レビュー#8）
         val id = database.withTransaction {
             val newId = busStopCardDao.upsert(draft)
-            busStopCardDao.upsert(draft.copy(id = newId, photoDirRelPath = "${BusCourseStorage.DIR_STOPCARDS}/$newId/"))
+            val dirRelPath = "${BusCourseStorage.DIR_STOPCARDS}/$newId/"
+            busStopCardDao.upsert(
+                draft.copy(
+                    id = newId,
+                    photoDirRelPath = dirRelPath,
+                    voiceMemoRelPath = if (voiceMemoAvailable) "$dirRelPath${BusCourseStorage.FILE_STOPCARD_VOICE_MEMO}" else null,
+                )
+            )
             newId
         }
         val dirRelPath = "${BusCourseStorage.DIR_STOPCARDS}/$id/"
@@ -123,6 +179,9 @@ class CourseRepository(
         dir.mkdirs()
         if (photoTempFile != null && photoTempFile.exists()) {
             attachPhoto(dir, photoTempFile)
+        }
+        if (voiceMemoAvailable) {
+            moveVoiceMemoFile(dir, voiceMemoTempFile!!)
         }
         id
     }
@@ -135,6 +194,8 @@ class CourseRepository(
         longitude: Double,
         altitudeM: Double?,
         notes: String?,
+        riderCount: Int,
+        gardenColor: String? = null,
     ) {
         val current = busStopCardDao.getById(id) ?: return
         busStopCardDao.upsert(
@@ -144,6 +205,9 @@ class CourseRepository(
                 longitude = longitude,
                 altitudeM = altitudeM,
                 notes = notes?.takeIf { it.isNotBlank() },
+                riderCount = riderCount,
+                needsMaturation = false,
+                gardenColor = gardenColor,
                 updatedAt = System.currentTimeMillis(),
             )
         )
@@ -152,6 +216,28 @@ class CourseRepository(
     /** アーカイブ（論理削除。物理削除しない＝過去コース・過去軌跡のFK整合を保つ、§3.5）。 */
     suspend fun archiveStopCard(id: Long) {
         busStopCardDao.archive(id, System.currentTimeMillis())
+    }
+
+    /**
+     * 写真・座標だけをID維持で上書きする（P2-1、2026-07-11追加）。別日に同じ停留所を撮り直した際、
+     * 新規作成→旧カードアーカイブだとコース編成のFK参照が旧カードに残ってしまうため、
+     * name/notes/riderCount/needsMaturationは変更せずphoto_orig.jpg/photo_thumb.jpgと座標だけ差し替える。
+     */
+    suspend fun retakePhotoAndLocation(
+        cardId: Long,
+        latitude: Double,
+        longitude: Double,
+        altitudeM: Double?,
+        photoTempFile: File,
+    ): Unit = withContext(Dispatchers.IO) {
+        val current = busStopCardDao.getById(cardId) ?: return@withContext
+        val dir = BusCourseStorage.resolve(context, current.photoDirRelPath)
+        // DB確定を先に行う。ファイル上書きを先に行うと、その後のDB書き込みが失敗した場合に
+        // 位置情報と写真が食い違ったまま復旧不能になる（レビュー指摘の修正）
+        busStopCardDao.upsert(
+            current.copy(latitude = latitude, longitude = longitude, altitudeM = altitudeM, updatedAt = System.currentTimeMillis())
+        )
+        attachPhoto(dir, photoTempFile)
     }
 
     /** カードのサムネイルファイル（未撮影なら存在しない）。UI一覧表示用。 */
@@ -166,6 +252,36 @@ class CourseRepository(
     fun newCaptureTempFile(): File =
         File(context.cacheDir, "stopcard_capture_${System.currentTimeMillis()}.jpg")
 
+    /** カードの音声メモファイル（未録音なら存在しない、P2-2）。 */
+    fun stopCardVoiceMemoFile(card: BusStopCardEntity): File =
+        File(BusCourseStorage.resolve(context, card.photoDirRelPath), BusCourseStorage.FILE_STOPCARD_VOICE_MEMO)
+
+    /** 録音一時ファイルの置き場（アプリ専用領域内。保存確定時に voice_memo.m4a へ移動する、P2-2）。 */
+    fun newVoiceMemoTempFile(): File =
+        File(context.cacheDir, "stopcard_voice_${System.currentTimeMillis()}.m4a")
+
+    /** 録音済み一時ファイルをカードの音声メモとして確定する（P2-2）。 */
+    suspend fun attachVoiceMemo(cardId: Long, recordedTempFile: File): Unit = withContext(Dispatchers.IO) {
+        val current = busStopCardDao.getById(cardId) ?: return@withContext
+        val dir = BusCourseStorage.resolve(context, current.photoDirRelPath)
+        dir.mkdirs()
+        // DB確定を先に行う（retakePhotoAndLocationと同じ理由。ファイル上書きが先だとDB書き込み失敗時に
+        // 旧音声メモが既に消えているのにDBが更新されない中途半端な状態になる）
+        busStopCardDao.upsert(
+            current.copy(voiceMemoRelPath = "${current.photoDirRelPath}${BusCourseStorage.FILE_STOPCARD_VOICE_MEMO}", updatedAt = System.currentTimeMillis())
+        )
+        moveVoiceMemoFile(dir, recordedTempFile)
+    }
+
+    /** 録音一時ファイルを `voice_memo.m4a` へ移動する（[createStopCard]・[attachVoiceMemo]共用）。 */
+    private fun moveVoiceMemoFile(cardDir: File, tempFile: File) {
+        val target = File(cardDir, BusCourseStorage.FILE_STOPCARD_VOICE_MEMO)
+        if (!tempFile.renameTo(target)) {
+            tempFile.copyTo(target, overwrite = true)
+            tempFile.delete()
+        }
+    }
+
     private fun attachPhoto(cardDir: File, photoTempFile: File) {
         val orig = File(cardDir, BusCourseStorage.FILE_STOPCARD_PHOTO_ORIG)
         if (!photoTempFile.renameTo(orig)) {
@@ -179,21 +295,17 @@ class CourseRepository(
         }
     }
 
-    /** 長辺 [THUMB_LONG_EDGE_PX]px・JPEG q[THUMB_JPEG_QUALITY] のサムネイルを生成する（§3.3）。 */
+    /**
+     * 長辺 [THUMB_LONG_EDGE_PX]px・JPEG q[THUMB_JPEG_QUALITY] のサムネイルを生成する（§3.3）。
+     * EXIF回転タグをピクセルに焼き込んでから縮小する（2026-07-10実車テストで発覚した
+     * 「サムネイルが90度回転する」不具合の修正、[ExifAwareBitmap]参照）。
+     */
     private fun generateThumbnail(orig: File, thumb: File) {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(orig.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        val bitmap = ExifAwareBitmap.decode(orig.absolutePath, THUMB_LONG_EDGE_PX)
+        if (bitmap == null) {
             Log.w(TAG, "JPEGを解釈できずサムネイル生成をスキップしました: ${orig.path}")
             return
         }
-        // まず inSampleSize で長辺が目標の2倍未満になるまで間引き読み（メモリ節約）、その後正確に縮小
-        var sample = 1
-        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= THUMB_LONG_EDGE_PX) sample *= 2
-        val bitmap = BitmapFactory.decodeFile(
-            orig.absolutePath,
-            BitmapFactory.Options().apply { inSampleSize = sample },
-        ) ?: return
         try {
             val scale = THUMB_LONG_EDGE_PX.toDouble() / max(bitmap.width, bitmap.height)
             val scaled = if (scale < 1.0) {
@@ -214,6 +326,35 @@ class CourseRepository(
         } finally {
             bitmap.recycle()
         }
+    }
+
+    /**
+     * 既存カードのサムネイルを原本（photo_orig.jpg）から再生成する（2026-07-10追加）。
+     * EXIF回転修正前に生成された既存サムネイルは、修正後のコード（[generateThumbnail]）で
+     * 再生成しない限り回転したままになる（原本のEXIF情報自体は無傷なので再生成すれば直る）。
+     * 一括再生成はStopCardListScreenの「サムネイル再生成」から呼ぶ想定。
+     */
+    suspend fun regenerateThumbnail(cardId: Long) = withContext(Dispatchers.IO) {
+        val card = busStopCardDao.getById(cardId) ?: return@withContext
+        val dir = BusCourseStorage.resolve(context, card.photoDirRelPath)
+        val orig = File(dir, BusCourseStorage.FILE_STOPCARD_PHOTO_ORIG)
+        if (orig.exists()) {
+            generateThumbnail(orig, File(dir, BusCourseStorage.FILE_STOPCARD_PHOTO_THUMB))
+        }
+    }
+
+    /** 全アクティブカードのサムネイルを一括再生成する（[regenerateThumbnail]参照）。失敗件数を返す。 */
+    suspend fun regenerateAllThumbnails(): Int = withContext(Dispatchers.IO) {
+        var failed = 0
+        for (card in busStopCardDao.getAllActive()) {
+            try {
+                regenerateThumbnail(card.id)
+            } catch (e: Exception) {
+                Log.e(TAG, "サムネイル再生成に失敗しました: id=${card.id}", e)
+                failed++
+            }
+        }
+        failed
     }
 
     // ------------------------------------------------------------------
@@ -296,6 +437,14 @@ class CourseRepository(
     suspend fun getPendingSegments(courseId: Long): List<CourseSegmentEntity> =
         courseSegmentDao.getByStatus(courseId, CourseSegmentStatus.PENDING.name)
 
+    /** カード選択ダイアログの使用中バッジ用（P1-4）。他コースで使用中のカードID→コース名。 */
+    suspend fun getStopCardUsage(excludeCourseId: Long): Map<Long, String> =
+        courseStopDao.getUsageExcluding(excludeCourseId).associate { it.cardId to it.courseName }
+
+    /** 停留所カード一覧の使用中バッジ用。全カードの使用状況（カードID→(コース名, 0始まりの順序)）。 */
+    suspend fun getAllStopCardUsage(): Map<Long, Pair<String, Int>> =
+        courseStopDao.getAllUsage().associate { it.cardId to (it.courseName to it.sequenceIndex) }
+
     // ------------------------------------------------------------------
     // 試走ログからの区間自動抽出（§3.9）
     // ------------------------------------------------------------------
@@ -304,6 +453,11 @@ class CourseRepository(
     suspend fun getExtractableSessions() =
         recordingSessionDao.getByStatus(RecordingSessionStatus.COMPLETED.name)
             .filter { it.type in EXTRACTABLE_SESSION_TYPES }
+
+    /** セッションメモの更新（区間抽出画面「いつの何の目的で走ったか」の後付け記録、2026-07-11追加）。 */
+    suspend fun updateSessionMemo(sessionId: Long, memo: String?) {
+        recordingSessionDao.updateMemo(sessionId, memo?.takeIf { it.isNotBlank() })
+    }
 
     /**
      * 完了済みセッションから停留所間の区間を切り出して `segment_track` へUPSERTする（設計書§3.9）。
@@ -352,38 +506,14 @@ class CourseRepository(
         // 各到着に対応するGPS点インデックスは、対象停留所座標へのhaversine距離走査（ジオフェンス、
         // 設計書§3.9本来の方式）で求める。stop_visit_event.event_ts と gps_point.ts_epoch_ms は
         // 独立した壁時計列で、NTP補正等の不連続に弱いため、event_ts は「訪問順序」（visited の並び）
-        // の決定にのみ使い、区間内の正確な到着点特定には使わない。
-        // 単調増加になるよう、探索は直前の到着インデックス以降に限定する（直前より後方＝走行前進側）。
-        val arrivalIdx = IntArray(visited.size)
-        var prevIdx = 0
-        for (i in visited.indices) {
-            val stopCardId = visited[i].first
-            val card = busStopCardDao.getById(stopCardId)
-            val searchSpace = points.subList(prevIdx, points.size)
-            val idx = if (card == null || searchSpace.isEmpty()) {
-                prevIdx
-            } else {
-                // 半径内（StopMaster.DEFAULT_ARRIVAL_RADIUS_M、§3.5 arrival_radius_m既定値）に
-                // 最初に入った点。無ければ最も近い点にフォールバックする
-                val withinRadius = searchSpace.indexOfFirst {
-                    GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= StopMaster.DEFAULT_ARRIVAL_RADIUS_M
-                }
-                val relIdx = if (withinRadius >= 0) {
-                    withinRadius
-                } else {
-                    searchSpace.indices.minByOrNull {
-                        GeoMath.haversineM(searchSpace[it].lat, searchSpace[it].lon, card.latitude, card.longitude)
-                    } ?: 0
-                }
-                prevIdx + relIdx
-            }
-            arrivalIdx[i] = idx
-            prevIdx = idx
-        }
+        // の決定にのみ使い、区間内の正確な到着点特定には使わない（走査本体は[computeArrivalIndices]、
+        // [extractSegmentsForCourse]と共用、2026-07-10）。
+        val (arrivalIdx, unmatchedStops) = computeArrivalIndices(visited.map { it.first }, points)
 
         var extracted = 0
         var skipped = 0
         val affectedEdges = mutableListOf<Pair<Long, Long>>()
+        val skippedPairs = mutableListOf<Pair<String, String>>()
         for (i in 0 until visited.size - 1) {
             val fromId = visited[i].first
             val toId = visited[i + 1].first
@@ -391,6 +521,7 @@ class CourseRepository(
             if (slice.size < 2) {
                 Log.w(TAG, "GPS点が2点未満のため区間をスキップします: $fromId -> $toId")
                 skipped++
+                skippedPairs += stopDisplayName(fromId) to stopDisplayName(toId)
                 continue
             }
             upsertSegmentTrackFromPoints(
@@ -415,6 +546,130 @@ class CourseRepository(
             extractedSegmentCount = extracted,
             affectedCourseCount = affectedCourses.size,
             skippedPairCount = skipped,
+            skippedPairs = skippedPairs,
+            unmatchedStops = unmatchedStops,
+        )
+    }
+
+    /**
+     * 順序付き停留所列に対して、GPS点列上の到着インデックスをジオフェンス走査（§3.9本来の方式、
+     * 対象停留所座標へのhaversine距離走査）で求める。半径内に最初に入った点、無ければ最も近い点に
+     * フォールバックする。単調増加になるよう、各探索は直前の到着インデックス以降に限定する。
+     * [extractSegmentsFromSession]（イベント起点の訪問列）と[extractSegmentsForCourse]
+     * （コース定義起点の順列、2026-07-10追加、P0-1）の両方から使う共通ロジック。
+     */
+    private suspend fun computeArrivalIndices(
+        orderedStopCardIds: List<Long>,
+        points: List<GpsPointEntity>,
+        radiusM: Double = StopMaster.DEFAULT_ARRIVAL_RADIUS_M,
+    ): Pair<IntArray, List<UnmatchedStop>> {
+        val arrivalIdx = IntArray(orderedStopCardIds.size)
+        val unmatched = mutableListOf<UnmatchedStop>()
+        var prevIdx = 0
+        for (i in orderedStopCardIds.indices) {
+            val card = busStopCardDao.getById(orderedStopCardIds[i])
+            val displayName = card?.name ?: "ID:${orderedStopCardIds[i]}"
+            val searchSpace = points.subList(prevIdx, points.size)
+            val idx = if (card == null || searchSpace.isEmpty()) {
+                unmatched += UnmatchedStop(displayName, Double.NaN)
+                prevIdx
+            } else {
+                val withinRadius = searchSpace.indexOfFirst {
+                    GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= radiusM
+                }
+                if (withinRadius >= 0) {
+                    prevIdx + withinRadius
+                } else {
+                    val nearestRelIdx = searchSpace.indices.minByOrNull {
+                        GeoMath.haversineM(searchSpace[it].lat, searchSpace[it].lon, card.latitude, card.longitude)
+                    } ?: 0
+                    val nearestDistanceM = GeoMath.haversineM(
+                        searchSpace[nearestRelIdx].lat, searchSpace[nearestRelIdx].lon, card.latitude, card.longitude,
+                    )
+                    unmatched += UnmatchedStop(displayName, nearestDistanceM)
+                    prevIdx + nearestRelIdx
+                }
+            }
+            arrivalIdx[i] = idx
+            prevIdx = idx
+        }
+        return arrivalIdx to unmatched
+    }
+
+    /** カードIDからの表示名解決（未存在なら "ID:{id}"）。skippedPairsの診断表示用。 */
+    private suspend fun stopDisplayName(id: Long): String = busStopCardDao.getById(id)?.name ?: "ID:$id"
+
+    /**
+     * コースを指定した遡及区間抽出（設計書§3.9の拡張、2026-07-10追加、P0-1）。
+     *
+     * [extractSegmentsFromSession] は `stop_visit_event`（ARRIVED イベント）に依存するため、
+     * 記録開始時点で当該停留所カードが未登録・未マーキングだった場合はイベントが得られず抽出できない
+     * （2026-07-10実車テスト第2回で発生・確認）。本関数はイベントを一切使わず、[courseId] の
+     * 停留所順列（`course_stop.sequence_index` 順）と [sessionId] のGPS点列だけを
+     * ジオフェンス走査（[computeArrivalIndices]）で突き合わせて区間を復元する。欠席等で停車せず
+     * 通過しただけの停留所も、走行経路が半径圏内を通っていれば抽出できる（停車の有無は判定に無関係）。
+     */
+    suspend fun extractSegmentsForCourse(
+        courseId: Long,
+        sessionId: Long,
+        radiusM: Double = StopMaster.DEFAULT_ARRIVAL_RADIUS_M,
+    ): SegmentExtractionResult = withContext(Dispatchers.IO) {
+        val session = recordingSessionDao.getById(sessionId)
+            ?: throw IllegalArgumentException("セッションが見つかりません: id=$sessionId")
+        check(session.status == RecordingSessionStatus.COMPLETED.name) {
+            "完了済み（COMPLETED）セッションのみ抽出できます（現在: ${session.status}）"
+        }
+        check(session.type in EXTRACTABLE_SESSION_TYPES) {
+            "抽出可能なセッション種別ではありません（現在: ${session.type}）"
+        }
+
+        val orderedStopCardIds = courseStopDao.getOrderedStops(courseId).map { it.stopCardId }
+        check(orderedStopCardIds.size >= 2) { "このコースには2つ以上の停留所が必要です" }
+
+        val points = gpsPointDao.getBySession(sessionId)
+        check(points.isNotEmpty()) { "このセッションにはGPS点列（gps_point）がありません" }
+
+        val (arrivalIdx, unmatchedStops) = computeArrivalIndices(orderedStopCardIds, points, radiusM)
+
+        var extracted = 0
+        var skipped = 0
+        val affectedEdges = mutableListOf<Pair<Long, Long>>()
+        val skippedPairs = mutableListOf<Pair<String, String>>()
+        for (i in 0 until orderedStopCardIds.size - 1) {
+            val fromId = orderedStopCardIds[i]
+            val toId = orderedStopCardIds[i + 1]
+            val slice = points.subList(arrivalIdx[i], arrivalIdx[i + 1] + 1)
+            if (slice.size < 2) {
+                Log.w(TAG, "GPS点が2点未満のため区間をスキップします: $fromId -> $toId")
+                skipped++
+                skippedPairs += stopDisplayName(fromId) to stopDisplayName(toId)
+                continue
+            }
+            upsertSegmentTrackFromPoints(
+                fromStopCardId = fromId,
+                toStopCardId = toId,
+                points = slice.map { GpxPoint(lat = it.lat, lon = it.lon, eleM = it.altM, timeEpochMs = it.tsEpochMs) },
+                distanceM = polylineLengthM(slice),
+                durationSec = (slice.last().elapsedRealtimeNanos - slice.first().elapsedRealtimeNanos) / 1_000_000_000,
+                recordedSessionId = sessionId,
+            )
+            affectedEdges += fromId to toId
+            extracted++
+        }
+
+        // 対象コース自身は必ず再評価する（course_segment が未確定＝PENDINGのみだった場合、
+        // getCourseIdsReferencingEdge に引っかからない可能性があるための安全策）
+        val affectedCourses = (affectedEdges
+            .flatMap { (from, to) -> courseSegmentDao.getCourseIdsReferencingEdge(from, to) } + courseId)
+            .toSortedSet()
+        affectedCourses.forEach { regenerateCourseSegments(it) }
+
+        SegmentExtractionResult(
+            extractedSegmentCount = extracted,
+            affectedCourseCount = affectedCourses.size,
+            skippedPairCount = skipped,
+            skippedPairs = skippedPairs,
+            unmatchedStops = unmatchedStops,
         )
     }
 
