@@ -1,7 +1,10 @@
 package com.istech.buscourse.recording
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.hardware.camera2.CameraCharacteristics
@@ -223,7 +226,12 @@ class LoresFrameAnalyzer(
             val now = SystemClock.elapsedRealtime()
             if (now - lastCaptureElapsed >= intervalMsProvider()) {
                 lastCaptureElapsed = now
-                val jpeg = image.toNv21JpegByteArray(quality = 75)
+                // センサーは横向き(1280x960)固定でストリームされるため、端末の物理的な向きに
+                // 応じて`rotationDegrees`（正立に必要な時計回り回転角）が付与される。
+                // YuvImage経由のJPEG化はEXIFを書かないため、ここで回転を適用しないと
+                // 保存フレームが倒れたまま残る（既存フレームはこの修正では直らない）。
+                val rotation = image.imageInfo.rotationDegrees
+                val jpeg = image.toNv21JpegByteArray(quality = 75, rotationDegrees = rotation)
                 onFrame(jpeg, System.currentTimeMillis())
             }
         } catch (e: Exception) {
@@ -242,14 +250,37 @@ class LoresFrameAnalyzer(
  * そのため単純な `ByteBuffer.get(ByteArray)` によるバルクコピーは行わず、
  * [ImageProxy.PlaneProxy.rowStride] / [ImageProxy.PlaneProxy.pixelStride] を都度参照して
  * 行・画素単位で正しい位置から読み出し、NV21（Y全面 → V,U 1画素おきに交互）へ再配置する。
+ *
+ * [rotationDegrees] はセンサー向き画像を正立させるための時計回り回転角
+ * （`ImageProxy.imageInfo.rotationDegrees`）。YuvImage経由のJPEG化はEXIF Orientationを
+ * 書かないため、タグ付与ではなくピクセル自体をここで正立させる（②の位置同期・映像用途では
+ * EXIF非対応の消費側でも正しく表示され、DBのwidth/heightも実寸法と一致させられるため）。
+ * 0の場合は再デコード・再エンコードのコストを避けてセンサー向きJPEGバイト列をそのまま返す。
+ * 連写は約1〜2fpsのため、回転が必要な場合のみ発生する再デコード＋回転＋再エンコードのコストは許容する。
  */
-fun ImageProxy.toNv21JpegByteArray(quality: Int): ByteArray {
+fun ImageProxy.toNv21JpegByteArray(quality: Int, rotationDegrees: Int = 0): ByteArray {
     require(format == ImageFormat.YUV_420_888) { "unexpected image format: $format" }
     val nv21 = toNv21ByteArray()
     val out = ByteArrayOutputStream()
     YuvImage(nv21, ImageFormat.NV21, width, height, null)
         .compressToJpeg(Rect(0, 0, width, height), quality, out)
-    return out.toByteArray()
+    val sensorOrientedJpeg = out.toByteArray()
+    if (rotationDegrees == 0) return sensorOrientedJpeg
+
+    val sensorBitmap = BitmapFactory.decodeByteArray(sensorOrientedJpeg, 0, sensorOrientedJpeg.size)
+        ?: return sensorOrientedJpeg
+    val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+    val rotatedBitmap = Bitmap.createBitmap(
+        sensorBitmap, 0, 0, sensorBitmap.width, sensorBitmap.height, matrix, true
+    )
+    try {
+        val rotatedOut = ByteArrayOutputStream()
+        rotatedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, rotatedOut)
+        return rotatedOut.toByteArray()
+    } finally {
+        sensorBitmap.recycle()
+        if (rotatedBitmap !== sensorBitmap) rotatedBitmap.recycle()
+    }
 }
 
 private fun ImageProxy.toNv21ByteArray(): ByteArray {
