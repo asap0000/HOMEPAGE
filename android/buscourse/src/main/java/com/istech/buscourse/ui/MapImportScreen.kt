@@ -1,6 +1,8 @@
 package com.istech.buscourse.ui
 
+import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,9 +48,21 @@ import com.istech.buscourse.core.data.MapDataPackageEntity
 /**
  * `.iscmap`（オフライン地図パッケージ）のインポート・管理画面（フェーズ3、設計書§5.6.3・§9次工程）。
  *
- * - `Intent.ACTION_OPEN_DOCUMENT`（`ActivityResultContracts.OpenDocument()`）でMIMEタイプ
- *   `application/zip`を指定し`.iscmap`を1つ選択させる（設計書§5.6.3手順1。`ACTION_OPEN_DOCUMENT_TREE`
- *   は使わず単一ファイル選択に限定）。
+ * - `Intent.ACTION_OPEN_DOCUMENT`（`ActivityResultContracts.OpenDocument()`）で`.iscmap`を1つ選択させる
+ *   （設計書§5.6.3手順1。`ACTION_OPEN_DOCUMENT_TREE`は使わず単一ファイル選択に限定）。
+ *   設計書§5.6.3はMIMEタイプ`application/zip`指定を挙げていたが、`.iscmap`はSAFの拡張子→MIME推定
+ *   （`MimeTypeMap`）に存在しないカスタム拡張子のため、実機・エミュレータのSAFピッカーでは
+ *   `application/octet-stream`扱いとなり`application/zip`フィルタでは選択自体ができない（グレーアウト）
+ *   ことを確認した。Android公式の定石（[ActivityResultContracts.OpenDocument]のドキュメント）どおり
+ *   MIMEフィルタを全許容ワイルドカード（アスタリスク・スラッシュ・アスタリスク）へ広げ、
+ *   選択後のコンテンツ検証を必須にする方針へ変更した。コンテンツ検証は
+ *   既存の[com.istech.buscourse.map.MapPackageValidator]（manifest.json schemaVersion検証・
+ *   SHA-256照合）と[com.istech.buscourse.map.MapPackageImporter]のZIP/manifest構造検証が担うため、
+ *   全許容ワイルドカード化に伴う「拡張子偽装ファイルを開いてしまう」リスクは実質的に既存の検証で吸収される
+ *   （fail-closedでロールバックされる、[MapPackageImporter]のKDoc参照）。表示名が`.iscmap`で
+ *   終わらない場合は選択直後に軽量なガード（[isLikelyIscmapFile]）で早期にToast表示するが、これは
+ *   UX向上のための補助であり、最終的な正当性判定はあくまで既存のコンテンツ検証に委ねる
+ *   （拡張子は偽装可能なため、表示名チェックだけでは正当性を担保しない）。
  * - 選択後は[BusCourseViewModel.importMapPackage]（内部で[com.istech.buscourse.map.MapPackageImporter]
  *   を呼ぶ）へ委譲する。展開・SHA-256照合・DB UPSERTは`viewModelScope`管理下（フェーズ2レビュー#13の
  *   方針をmapパッケージ取り込みにも適用）で行われるため、画面を離れても取り込み処理自体は中断されない。
@@ -82,6 +96,14 @@ fun MapImportScreen(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            if (!isLikelyIscmapFile(context, uri)) {
+                Toast.makeText(
+                    context,
+                    "選択されたファイルは.iscmapではないようです。取り込みを試みますが、失敗する場合は" +
+                        "正しい.iscmapファイルを選び直してください。",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
             importing = true
             viewModel.importMapPackage(uri) { result ->
                 importing = false
@@ -122,7 +144,10 @@ fun MapImportScreen(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Button(
-                onClick = { openDocLauncher.launch(arrayOf("application/zip")) },
+                // `.iscmap`はSAFの拡張子→MIME推定に存在しないカスタム拡張子で`application/zip`
+                // フィルタでは選択できない（グレーアウト）ため、`*/*`へ広げて選択後にコンテンツ検証する
+                // 定石に従う（このファイルのクラスKDoc参照）。
+                onClick = { openDocLauncher.launch(arrayOf("*/*")) },
                 enabled = !importing,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -206,4 +231,27 @@ private fun MapPackageRow(
             OutlinedButton(onClick = onSelect, enabled = enabled) { Text("選択") }
         }
     }
+}
+
+/**
+ * SAFで選択された[uri]の表示名（`OpenableColumns.DISPLAY_NAME`）が`.iscmap`で終わっているかどうかの
+ * 軽量な事前チェック（UX向上目的のみ）。全許容ワイルドカードMIMEフィルタ採用（このファイルのクラスKDoc参照）により
+ * `.iscmap`以外の任意ファイルも選択できてしまうため、明らかに違うファイルを選んだ場合は取り込み処理
+ * （ZIP展開・manifest検証）を始める前にユーザーへ早期に気づかせる。
+ *
+ * 拡張子は偽装可能なため、ここでtrueが返っても正当性は担保しない。最終的な正当性判定は
+ * [com.istech.buscourse.map.MapPackageImporter]・[com.istech.buscourse.map.MapPackageValidator]の
+ * manifest.json検証・SHA-256照合に委ねる（本関数はfalseの場合に警告Toastを出すだけで、
+ * インポート自体はブロックしない）。
+ */
+private fun isLikelyIscmapFile(context: Context, uri: Uri): Boolean {
+    val displayName = runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+        }
+    }.getOrNull()
+    // 表示名が取得できない場合はガードのしようがないため、疑わしいと決めつけずtrueを返す
+    // （既存のコンテンツ検証に判定を委ねる）。
+    return displayName?.endsWith(".iscmap", ignoreCase = true) ?: true
 }
