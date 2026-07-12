@@ -33,6 +33,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * version 7（2026-07-11）: map_data_package テーブルを新設（オフライン地図パッケージのメタデータ、
  * フェーズ3、設計書§3.5・§5.6.4。[MapDataPackageEntity]）。`.iscmap`インポート時（設計書§5.6.3手順6）に
  * `manifest.json` から1行UPSERTされる。新テーブル追加のみで既存テーブルは無変更（[MIGRATION_6_7]）。
+ *
+ * version 8（2026-07-12、運行記録③機能）: timelapse_frame に stop_card_id 列を追加。手動停留所マーク
+ * （`BusRecordingService.onManualStopMark`）でHIRES撮影をやめ、押下時刻に最も近いLORESフレームへ
+ * マーカーとして記録する方式に変更したための列追加（[TimelapseFrameEntity]）。意図的にFK制約は付けず
+ * 単純な ALTER TABLE ADD COLUMN に留める（テーブル再作成を避けるため）。既存データは保持する
+ * （[MIGRATION_7_8]）。
  */
 @Database(
     entities = [
@@ -50,7 +56,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WorkLogEntity::class,
         MapDataPackageEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -82,6 +88,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_4_5,
                 MIGRATION_5_6,
                 MIGRATION_6_7,
+                MIGRATION_7_8,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -162,6 +169,16 @@ abstract class BusCourseDatabase : RoomDatabase() {
                         "is_selected INTEGER NOT NULL DEFAULT 0, " +
                         "PRIMARY KEY(region_id))"
                 )
+            }
+        }
+
+        /**
+         * timelapse_frame.stop_card_id 追加（手動停留所マークのLORESマーカー化、運行記録③機能、
+         * 2026-07-12）。FK制約は付けない単純な ALTER TABLE。既存データは保持する。
+         */
+        val MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timelapse_frame ADD COLUMN stop_card_id INTEGER")
             }
         }
     }

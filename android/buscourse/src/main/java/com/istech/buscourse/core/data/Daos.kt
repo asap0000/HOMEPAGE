@@ -230,6 +230,13 @@ interface TimelapseFrameDao {
             "AND captured_at >= :tsEpochMs ORDER BY captured_at ASC LIMIT 1"
     )
     suspend fun findClosestLoresAtOrAfter(sessionId: Long, tsEpochMs: Long): TimelapseFrameEntity?
+
+    /**
+     * 手動停留所マーク時のLORESマーカー付与用（運行記録③機能、2026-07-12）。
+     * 対象フレームの `stop_card_id` を更新する（version 8で追加、[BusCourseDatabase.MIGRATION_7_8]）。
+     */
+    @Query("UPDATE timelapse_frame SET stop_card_id = :stopCardId WHERE id = :frameId")
+    suspend fun markStopCardOnLoresFrame(frameId: Long, stopCardId: Long)
 }
 
 /** `gps_point`（正典GPS点列）の操作。セッション終了時に JSONL から一括インポートされる（D4）。 */

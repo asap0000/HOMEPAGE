@@ -353,6 +353,15 @@ class RecordingSessionRepository(
         frame?.id
     }
 
+    /**
+     * 手動停留所マーク時、押下時刻に最も近いLORESフレームへ [stopCardId] をマーカーとして記録する
+     * （運行記録③機能、2026-07-12）。HIRES撮影を伴わない停留所マーク方式のため、既に保存済みの
+     * LORESフレームへの後追いUPDATEのみで完結する。
+     */
+    suspend fun markStopCardOnLoresFrame(frameId: Long, stopCardId: Long) = withContext(writeDispatcher) {
+        timelapseFrameDao.markStopCardOnLoresFrame(frameId, stopCardId)
+    }
+
     // ------------------------------------------------------------------
     // 停留所通過イベント・衝撃検知イベント
     // ------------------------------------------------------------------

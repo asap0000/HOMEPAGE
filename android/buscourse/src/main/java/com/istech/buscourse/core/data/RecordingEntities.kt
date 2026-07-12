@@ -86,6 +86,12 @@ data class TimelapseFrameEntity(
     val width: Int?,
     val height: Int?,
     @ColumnInfo(name = "size_bytes") val sizeBytes: Long?,
+    /**
+     * 手動停留所マーク時に、そのコマが表す停留所カードidを記録（②のスクラバ上の停留所ピン用）。
+     * NULL=通常フレーム。version 8（2026-07-12）で追加。意図的にFK制約は付けない
+     * （ALTER TABLE ADD COLUMNのみで済ませ、テーブル再作成を避けるため。[BusCourseDatabase.MIGRATION_7_8]）。
+     */
+    @ColumnInfo(name = "stop_card_id") val stopCardId: Long? = null,
 )
 
 /**

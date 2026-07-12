@@ -29,13 +29,10 @@ import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.course.CourseRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 記録エンジンFGS本体（設計書§4.1〜§4.4）。`foregroundServiceType = "camera|location"`。
@@ -73,15 +70,6 @@ class BusRecordingService : LifecycleService() {
     @Volatile private var currentSpeedKmh: Double = 0.0
     @Volatile private var thermalDegraded: Boolean = false
     @Volatile private var lastStopMarkElapsedMs: Long = 0L
-    @Volatile private var lastQuickCaptureElapsedMs: Long = 0L
-
-    // クイック採取（P1-1）の名前採番（件数読み取り→INSERT）を直列化する。連続撮影時に
-    // 2つのコールバックが同じ件数を読んでしまい同名カードが重複生成されるレビュー指摘の修正。
-    private val quickCaptureMutex = Mutex()
-    // 撮影→DB保存が完了していないクイック採取の件数。stopRecording()がreleaseControllers()する前に
-    // これがゼロになるまで短時間待つことで、撮影直後に運行終了した場合の孤児ファイル化を防ぐ
-    // （lifecycleScope.launchはonDestroy後にキャンセル済みのスコープへ積むと本体が一切実行されないため）。
-    private val pendingQuickCaptures = AtomicInteger(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -174,7 +162,6 @@ class BusRecordingService : LifecycleService() {
                 shockDetector = shock
 
                 notificationManager.registerStopMarkReceiver(::onManualStopMark)
-                notificationManager.registerQuickCaptureReceiver(::onQuickCapture)
 
                 guard.start(thermalExecutor)
                 shock.start(handlerThread)
@@ -238,7 +225,15 @@ class BusRecordingService : LifecycleService() {
         }
     }
 
-    /** 常駐通知の「停留所マーク」ボタン（設計書§4.8.3）。最寄りの登録済み停留所を対象にする。 */
+    /**
+     * 常駐通知の「停留所マーク」ボタン（設計書§4.8.3）。最寄りの登録済み停留所を対象にする。
+     *
+     * オーナー確定方針（2026-07-12、運行記録③機能）：手動マークではHIRES撮影を行わない。
+     * (a) `stop_visit_event` を `hires_frame_id = null` でARRIVED記録し、(b) 押下時刻に最も近い
+     * 直前のLORESフレームへ `stop_card_id` をマーカーとして付与する（②のスクラバ用）。
+     * AUTO検出（[captureAndRecordStopVisit] 経由、[onLocationUpdate] 参照）はHIRES撮影＋イベント記録の
+     * 従来方式のまま変更しない（意図的な非対称。オーナー確認済み）。
+     */
     private fun onManualStopMark() {
         if (isDebounced(lastStopMarkElapsedMs)) return
         lastStopMarkElapsedMs = SystemClock.elapsedRealtime()
@@ -254,71 +249,32 @@ class BusRecordingService : LifecycleService() {
             // 要確認（設計との齟齬）：stop_visit_event.stop_card_id はNOT NULL・FK RESTRICT
             // （core.data.StopVisitEventEntity）のため、登録済み停留所が1件も無い場合や現在地未取得の
             // 場合はイベント行を作成できない。設計書§4.8.1は「未登録の臨時停車」も手動ボタンの対象に
-            // 挙げているが、フェーズ0で凍結済みのスキーマ上は表現できない。写真のみ保存し警告ログに留める。
-            controller.captureHiRes(HiResReason.STOP_MANUAL, location) { file ->
-                lifecycleScope.launch { sessionRepository.recordHiResFrame(file, System.currentTimeMillis(), location) }
-            }
-            Log.w(TAG, "手動停留所マーク: 対象停留所を特定できないため stop_visit_event を記録できません")
+            // 挙げているが、フェーズ0で凍結済みのスキーマ上は表現できない。
+            // HIRES撮影をやめた新方式では stop_card_id 参照が無くマーカーもイベントも作れないため、
+            // 写真保存はせず警告ログのみに留める。
+            Log.w(TAG, "手動停留所マーク: 対象停留所を特定できないため記録できません")
             return
         }
 
+        val markTs = System.currentTimeMillis()
         val distance = location?.let {
             GeoMath.haversineM(it.latitude, it.longitude, nearest.latitude, nearest.longitude)
         }
-        captureAndRecordStopVisit(
-            stopCardId = nearest.id,
-            triggerType = StopVisitTriggerType.MANUAL,
-            location = location,
-            distanceM = distance,
-        )
-    }
-
-    /**
-     * 常駐通知の「カード撮影」ボタン（P1-1 クイック採取モード）。走行中は名前・注意事項・乗車人数を
-     * 後回しにし、現在地＋写真だけを即保存する。記録中に既にバインド済みの `imageCapture` を
-     * [CameraCaptureController.captureToFile] 経由で再利用するため、新規CameraXセッションは開かない。
-     */
-    private fun onQuickCapture() {
-        if (isDebounced(lastQuickCaptureElapsedMs)) return
-        lastQuickCaptureElapsedMs = SystemClock.elapsedRealtime()
-
-        val controller = cameraCaptureController ?: return
-        val location = controller.lastKnownLocation
-        if (location == null) {
-            Log.w(TAG, "クイック撮影: 現在地未取得のため撮影をスキップします")
-            return
-        }
-
-        pendingQuickCaptures.incrementAndGet()
-        val tempFile = courseRepository.newCaptureTempFile()
-        controller.captureToFile(
-            tempFile,
-            location,
-            onFailure = {
-                // リトライも尽きて撮影自体が失敗した場合、onSavedが呼ばれずカウンタが
-                // 減らないまま残ってしまう不具合の修正（2026-07-11レビュー指摘）。
-                pendingQuickCaptures.decrementAndGet()
-            },
-        ) { file ->
-            lifecycleScope.launch {
-                try {
-                    quickCaptureMutex.withLock {
-                        val seq = courseRepository.getActiveStopCards().size + 1
-                        courseRepository.createStopCard(
-                            name = "候補%03d".format(seq),
-                            latitude = location.latitude,
-                            longitude = location.longitude,
-                            altitudeM = if (location.hasAltitude()) location.altitude else null,
-                            notes = null,
-                            riderCount = 0,
-                            photoTempFile = file,
-                            needsMaturation = true,
-                        )
-                    }
-                    vibrateShort()
-                } finally {
-                    pendingQuickCaptures.decrementAndGet()
-                }
+        lifecycleScope.launch {
+            sessionRepository.recordStopVisitEvent(
+                stopCardId = nearest.id,
+                eventType = StopVisitEventType.ARRIVED,
+                triggerType = StopVisitTriggerType.MANUAL,
+                location = location,
+                distanceAtEventM = distance,
+                positionErrorM = distance,
+                hiresFrameId = null,
+            )
+            val frameId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = markTs)
+            if (frameId != null) {
+                sessionRepository.markStopCardOnLoresFrame(frameId, nearest.id)
+            } else {
+                Log.w(TAG, "手動停留所マーク: マーカーを付与するLORESフレームが見つかりません stopCardId=${nearest.id}")
             }
         }
     }
@@ -417,30 +373,14 @@ class BusRecordingService : LifecycleService() {
                     courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の終了処理に失敗しました", it.toString())
                 }
             recordingStateStore.clear()
-            awaitPendingQuickCaptures()
             releaseControllers()
             ServiceCompat.stopForeground(this@BusRecordingService, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
 
-    /**
-     * 撮影直後に運行終了された場合、カード撮影の撮影→DB保存パイプラインが完了する前に
-     * releaseControllers()（cameraCaptureController.stop()を含む）してしまうと、撮影自体は
-     * 完了するがコールバックが本サービスのonDestroy後に走り、lifecycleScopeが既にキャンセル済みで
-     * DB保存が一切実行されない（＝撮った写真だけが孤児ファイルとして残る）。短時間だけ待つ。
-     */
-    private suspend fun awaitPendingQuickCaptures() {
-        var waitedMs = 0L
-        while (pendingQuickCaptures.get() > 0 && waitedMs < PENDING_CAPTURE_WAIT_TIMEOUT_MS) {
-            delay(PENDING_CAPTURE_POLL_INTERVAL_MS)
-            waitedMs += PENDING_CAPTURE_POLL_INTERVAL_MS
-        }
-    }
-
     private fun releaseControllers() {
         notificationManager.unregisterStopMarkReceiver()
-        notificationManager.unregisterQuickCaptureReceiver()
         gnssLocationSource?.stop()
         gnssLocationSource = null
         shockDetector?.stop()
@@ -476,7 +416,5 @@ class BusRecordingService : LifecycleService() {
         private const val SHOCK_PRE_WINDOW_MS = 2_000L
         private const val SHOCK_POST_WINDOW_MS = 3_000L
         private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
-        private const val PENDING_CAPTURE_WAIT_TIMEOUT_MS = 3_000L
-        private const val PENDING_CAPTURE_POLL_INTERVAL_MS = 100L
     }
 }
