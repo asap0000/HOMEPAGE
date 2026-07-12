@@ -184,49 +184,53 @@ fun ExtractionScreen(
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(sessions, key = { it.id }) { session ->
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "#${session.id}  ${session.type}",
-                                style = MaterialTheme.typography.titleSmall,
-                            )
-                            Text(
-                                "${formatDateTime(session.startedAt)}  走行 ${formatDistance(session.totalDistanceM)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                session.memo?.takeIf { it.isNotBlank() } ?: "メモなし",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(
-                            onClick = {
-                                editingMemoSessionId = session.id
-                                memoDraftText = session.memo ?: ""
-                            },
+                        // 上段: テキスト3種をフル幅で表示（横に詰めるとテキストが潰れるため縦積みに変更）。
+                        Text(
+                            "#${session.id}  ${session.type}",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "${formatDateTime(session.startedAt)}  走行 ${formatDistance(session.totalDistanceM)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            session.memo?.takeIf { it.isNotBlank() } ?: "メモなし",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                        )
+                        // 下段: アクション群を右寄せで配置。
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
-                        }
-                        TextButton(
-                            onClick = { courseDialogSessionId = session.id },
-                            enabled = runningSessionId == null && courses.isNotEmpty(),
-                        ) {
-                            Text("コース指定")
-                        }
-                        Button(
-                            onClick = { extract(session.id) },
-                            enabled = runningSessionId == null,
-                        ) {
-                            Text(if (runningSessionId == session.id) "抽出中…" else "抽出実行")
+                            Spacer(Modifier.weight(1f))
+                            IconButton(
+                                onClick = {
+                                    editingMemoSessionId = session.id
+                                    memoDraftText = session.memo ?: ""
+                                },
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
+                            }
+                            TextButton(
+                                onClick = { courseDialogSessionId = session.id },
+                                enabled = runningSessionId == null && courses.isNotEmpty(),
+                            ) {
+                                Text("コース指定")
+                            }
+                            Button(
+                                onClick = { extract(session.id) },
+                                enabled = runningSessionId == null,
+                            ) {
+                                Text(if (runningSessionId == session.id) "抽出中…" else "抽出実行")
+                            }
                         }
                     }
                     HorizontalDivider()

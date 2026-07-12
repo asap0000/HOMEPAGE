@@ -3,6 +3,7 @@ package com.istech.buscourse.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -14,9 +15,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,7 +56,12 @@ import com.istech.buscourse.map.MapVehiclePositionOverlay
 import com.istech.buscourse.map.RouteTrackOverlay
 import com.istech.buscourse.map.StopSymbolInfo
 import com.istech.buscourse.map.StopSymbolOverlay
+import kotlin.math.max
 import kotlinx.coroutines.launch
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.location.LocationComponentActivationOptions
 import org.maplibre.android.location.modes.RenderMode
 import org.maplibre.android.maps.MapLibreMap
@@ -215,6 +223,16 @@ private fun RouteMapContent(
         if (map == null) return@LaunchedEffect
         val styleFile = BusCourseStorage.resolve(context, pkg.styleRelPath)
         map.setStyle(Style.Builder().fromUri("file://${styleFile.absolutePath}")) { style ->
+            // (B) パンガード＝DL地図パッケージのbbox外へカメラ中心が出られないようにする（迷子防止）。
+            // あわせてタイルの無い過度なズームインを防ぐため、パッケージのmaxzoomを上限として設定する
+            // （minZoomは既定のまま）。
+            val packageBounds = LatLngBounds.Builder()
+                .include(LatLng(pkg.boundsSouth, pkg.boundsWest))
+                .include(LatLng(pkg.boundsNorth, pkg.boundsEast))
+                .build()
+            map.setLatLngBoundsForCameraTarget(packageBounds)
+            map.setMaxZoomPreference(pkg.maxzoom.toDouble())
+
             scope.launch {
                 val details = database.courseDao().getWithDetails(courseId)
                 val stops = details?.stops?.sortedBy { it.courseStop.sequenceIndex }.orEmpty()
@@ -239,6 +257,29 @@ private fun RouteMapContent(
                 )
                 overlay.showAllActiveStops(sequenceIndexByCardId)
                 stopSymbolOverlay = overlay
+
+                // (A) 初期カメラ＝開いたコースの停留所範囲へauto-fit（設計書§9次工程の仕上げ）。
+                // 停留所が2件未満（0件 or 1件で点になりgetCameraForLatLngBoundsが扱いにくい）、
+                // または地図サイズ未確定でgetCameraForLatLngBoundsがnullを返す場合は、
+                // パッケージbbox中心＋既定ズームへフォールバックする。
+                val stopLatLngs = stops.map { LatLng(it.card.latitude, it.card.longitude) }
+                val fittedCameraPosition = if (stopLatLngs.size >= 2) {
+                    val stopsBounds = LatLngBounds.Builder().apply {
+                        stopLatLngs.forEach { include(it) }
+                    }.build()
+                    map.getCameraForLatLngBounds(stopsBounds, intArrayOf(96, 96, 96, 96))
+                } else {
+                    null
+                }
+                map.cameraPosition = fittedCameraPosition ?: CameraPosition.Builder()
+                    .target(
+                        LatLng(
+                            (pkg.boundsSouth + pkg.boundsNorth) / 2.0,
+                            (pkg.boundsWest + pkg.boundsEast) / 2.0,
+                        )
+                    )
+                    .zoom(minOf(14.0, pkg.maxzoom.toDouble()))
+                    .build()
             }
 
             // 自車位置（設計書§5.7.3）。位置取得エンジンはLocationComponent既定実装ではなく
@@ -262,7 +303,43 @@ private fun RouteMapContent(
         }
     }
 
-    AndroidView(modifier = modifier.fillMaxSize(), factory = { mapView })
+    Box(modifier = modifier.fillMaxSize()) {
+        AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView })
+
+        // (C) 現在地ジャンプFAB。位置情報未許可ならToastで案内し、許可済みでも測位未完了（GNSS未捕捉／
+        // LocationComponent未活性化）ならその旨をToastで伝える（例外を投げず穏当にフォールバック）。
+        FloatingActionButton(
+            onClick = {
+                if (!locationGranted) {
+                    Toast.makeText(context, "位置情報の許可が必要です", Toast.LENGTH_SHORT).show()
+                } else {
+                    val currentMap = mapLibreMap
+                    val locationComponent = currentMap?.locationComponent
+                    val lastLocation =
+                        if (locationComponent?.isLocationComponentActivated == true) {
+                            locationComponent.lastKnownLocation
+                        } else {
+                            null
+                        }
+                    if (currentMap != null && lastLocation != null) {
+                        currentMap.animateCamera(
+                            CameraUpdateFactory.newLatLngZoom(
+                                LatLng(lastLocation.latitude, lastLocation.longitude),
+                                max(currentMap.cameraPosition.zoom, 16.0),
+                            )
+                        )
+                    } else {
+                        Toast.makeText(
+                            context, "現在地を取得できませんでした（測位中）", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        ) {
+            Icon(Icons.Filled.MyLocation, contentDescription = "現在地へ移動")
+        }
+    }
 
     tappedStop?.let { info ->
         AlertDialog(

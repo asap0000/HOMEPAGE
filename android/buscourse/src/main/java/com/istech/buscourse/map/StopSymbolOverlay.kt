@@ -65,6 +65,10 @@ class StopSymbolOverlay(
         style.addImage(ICON_ID, requireNotNull(ContextCompat.getDrawable(context, R.drawable.ic_map_stop_pin)) {
             "R.drawable.ic_map_stop_pin を解決できませんでした"
         })
+        // ズームで隣接ピンが重なると衝突判定で間引かれ消えてしまうため、重なり許容＋
+        // 他レイヤーとの配置競合の無視を設定し、常に全ピンを描画させる（重なって表示されて構わない）。
+        symbolManager.iconAllowOverlap = true
+        symbolManager.iconIgnorePlacement = true
         symbolManager.addClickListener { symbol ->
             val info = parseData(symbol)
             if (info != null) {
