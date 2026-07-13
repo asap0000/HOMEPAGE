@@ -217,6 +217,14 @@ interface TimelapseFrameDao {
     @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
 
+    /**
+     * 手動停留所マーク済みフレームの取得（②「コース編成(抽出)」フェーズA-1 セッション解析レポート、
+     * 読み取り専用、2026-07-13追加）。session8のような長回し記録に付いた停留所マーカー
+     * （version 8の `stop_card_id`）をseq順に取得する。
+     */
+    @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId AND stop_card_id IS NOT NULL ORDER BY seq")
+    suspend fun getMarkedFrames(sessionId: Long): List<TimelapseFrameEntity>
+
     /** 衝撃バーストの開始側フレーム特定用（設計書§4.9.1）。指定時刻以前で最も近いLORESフレーム。 */
     @Query(
         "SELECT * FROM timelapse_frame WHERE session_id = :sessionId AND kind = 'LORES' " +

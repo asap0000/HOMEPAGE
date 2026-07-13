@@ -94,8 +94,8 @@ fun HomeScreen(
             )
             HomeMenuCard(
                 icon = Icons.Filled.Timeline,
-                title = "区間抽出（試走ログ）",
-                description = "完了済みの走行記録から停留所間の区間軌跡を抽出します",
+                title = "コース編成（抽出）",
+                description = "記録セッションを解析してコースを編成します",
                 onClick = onOpenExtraction,
             )
             HomeMenuCard(

@@ -65,6 +65,45 @@ data class SegmentExtractionResult(
 )
 
 /**
+ * セッション解析レポートのマーカー時系列1行（②「コース編成(抽出)」フェーズA-1、読み取り専用、
+ * 2026-07-13追加）。[distanceM] は、そのマーカーコマの撮影位置と紐づく停留所カード座標との
+ * Haversine距離。マーカーコマにGPS座標が無い、またはカードが見つからない場合はnull。
+ */
+data class MarkerTimelineRow(
+    val frameId: Long,
+    val capturedAt: Long,
+    val stopCardId: Long,
+    val stopName: String,
+    val distanceM: Double?,
+)
+
+/**
+ * ダブり検出（統合候補）の1グループ（フェーズA-1、読み取り専用）。seq順で同一stop_card_idが
+ * 連続し、かつ captured_at 間隔が [CourseRepository.DUPLICATE_GROUP_INTERVAL_MS] 未満の
+ * マーカーコマ列をまとめたもの。
+ */
+data class MarkerDuplicateGroup(
+    val stopCardId: Long,
+    val stopName: String,
+    val count: Int,
+    val timestamps: List<Long>,
+)
+
+/** セッション解析レポート全体（フェーズA-1、[CourseRepository.analyzeSessionMarkers] の返り値）。 */
+data class SessionMarkerAnalysis(
+    val sessionId: Long,
+    val sessionType: String,
+    val startedAt: Long,
+    /** endedAtが無い（異常終了等）セッションではnull。 */
+    val durationSec: Long?,
+    val gpsPointCount: Int,
+    val markerCount: Int,
+    val distinctMarkedStopCount: Int,
+    val timeline: List<MarkerTimelineRow>,
+    val duplicates: List<MarkerDuplicateGroup>,
+)
+
+/**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
  *
  * - 停留所カードCRUD（写真の `stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 の
@@ -86,6 +125,7 @@ class CourseRepository(
     private val recordingSessionDao = database.recordingSessionDao()
     private val gpsPointDao = database.gpsPointDao()
     private val stopVisitEventDao = database.stopVisitEventDao()
+    private val timelapseFrameDao = database.timelapseFrameDao()
     private val workLogDao = database.workLogDao()
 
     /** route_point / expected_chainage_m の再生成主体（§3.5・§3.9。2026-07-08決定で course 所属）。 */
@@ -457,6 +497,86 @@ class CourseRepository(
     /** セッションメモの更新（区間抽出画面「いつの何の目的で走ったか」の後付け記録、2026-07-11追加）。 */
     suspend fun updateSessionMemo(sessionId: Long, memo: String?) {
         recordingSessionDao.updateMemo(sessionId, memo?.takeIf { it.isNotBlank() })
+    }
+
+    // ------------------------------------------------------------------
+    // セッション解析レポート（②「コース編成(抽出)」フェーズA-1、2026-07-13追加、読み取り専用）
+    // ------------------------------------------------------------------
+
+    /**
+     * session8のような長回し記録に付いた停留所マーカー（`timelapse_frame.stop_card_id`、
+     * 運行記録③機能・version 8）を解析する（フェーズA-1）。**読み取り専用**：DB書き込み・
+     * スキーマ変更は一切行わない。ExtractionScreenのセッション一覧「解析」ボタンから呼ばれる。
+     *
+     * - マーカー時系列: seq順のマーク済みフレームそれぞれについて、撮影位置と紐づく停留所カード
+     *   座標とのHaversine距離を計算する（誤吸着＝離れた停留所に誤って割り当てられた疑いの目安）。
+     * - ダブり検出: seq順で同一stop_card_idが連続し、かつcaptured_at間隔が
+     *   [DUPLICATE_GROUP_INTERVAL_MS] 未満のマーカー列を統合候補としてグループ化する。
+     */
+    suspend fun analyzeSessionMarkers(sessionId: Long): SessionMarkerAnalysis = withContext(Dispatchers.IO) {
+        val session = recordingSessionDao.getById(sessionId)
+            ?: throw IllegalArgumentException("セッションが見つかりません: id=$sessionId")
+
+        val markedFrames = timelapseFrameDao.getMarkedFrames(sessionId) // seq順、stop_card_id IS NOT NULL
+        val gpsPointCount = gpsPointDao.getBySession(sessionId).size
+
+        // 停留所カードはアーカイブ済み（is_archived=1）でも過去マーカーの解析対象になりうるため、
+        // getAllActive() ではなく getById を都度引く（idごとにキャッシュして重複クエリを避ける）
+        val cardCache = mutableMapOf<Long, BusStopCardEntity?>()
+        suspend fun cardFor(id: Long): BusStopCardEntity? = cardCache.getOrPut(id) { busStopCardDao.getById(id) }
+
+        val timeline = markedFrames.map { frame ->
+            val stopCardId = requireNotNull(frame.stopCardId) { "getMarkedFramesはstop_card_id IS NOT NULLで絞っているはず" }
+            val card = cardFor(stopCardId)
+            val distanceM = if (card != null && frame.latitude != null && frame.longitude != null) {
+                GeoMath.haversineM(frame.latitude, frame.longitude, card.latitude, card.longitude)
+            } else {
+                null
+            }
+            MarkerTimelineRow(
+                frameId = frame.id,
+                capturedAt = frame.capturedAt,
+                stopCardId = stopCardId,
+                stopName = card?.name ?: "停留所#$stopCardId",
+                distanceM = distanceM,
+            )
+        }
+
+        val duplicates = mutableListOf<MarkerDuplicateGroup>()
+        var i = 0
+        while (i < markedFrames.size) {
+            var j = i + 1
+            while (
+                j < markedFrames.size &&
+                markedFrames[j].stopCardId == markedFrames[i].stopCardId &&
+                (markedFrames[j].capturedAt - markedFrames[j - 1].capturedAt) < DUPLICATE_GROUP_INTERVAL_MS
+            ) {
+                j++
+            }
+            if (j - i > 1) {
+                val stopCardId = requireNotNull(markedFrames[i].stopCardId)
+                val card = cardFor(stopCardId)
+                duplicates += MarkerDuplicateGroup(
+                    stopCardId = stopCardId,
+                    stopName = card?.name ?: "停留所#$stopCardId",
+                    count = j - i,
+                    timestamps = (i until j).map { markedFrames[it].capturedAt },
+                )
+            }
+            i = j
+        }
+
+        SessionMarkerAnalysis(
+            sessionId = session.id,
+            sessionType = session.type,
+            startedAt = session.startedAt,
+            durationSec = session.endedAt?.let { (it - session.startedAt) / 1000 },
+            gpsPointCount = gpsPointCount,
+            markerCount = markedFrames.size,
+            distinctMarkedStopCount = markedFrames.mapNotNull { it.stopCardId }.distinct().size,
+            timeline = timeline,
+            duplicates = duplicates,
+        )
     }
 
     /**
@@ -845,6 +965,12 @@ class CourseRepository(
         /** サムネイル仕様（§3.3: 長辺320px, JPEG q80）。 */
         private const val THUMB_LONG_EDGE_PX = 320
         private const val THUMB_JPEG_QUALITY = 80
+
+        /**
+         * セッション解析レポート（フェーズA-1）のダブり検出しきい値。同一停留所への連続マーカーの
+         * captured_at 間隔がこれ未満なら「誤って連打・多重マークした」統合候補とみなす。
+         */
+        private const val DUPLICATE_GROUP_INTERVAL_MS = 120_000L
 
         /**
          * 区間抽出対象のセッション種別（§3.9）。設計書は PARTIAL_RUN を主対象に記述しているが、

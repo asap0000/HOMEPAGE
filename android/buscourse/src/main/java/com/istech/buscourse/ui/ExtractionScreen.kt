@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
+import com.istech.buscourse.course.SessionMarkerAnalysis
 import com.istech.buscourse.course.UnmatchedStop
 import kotlinx.coroutines.launch
 
@@ -95,6 +96,9 @@ fun ExtractionScreen(
     var courseDialogSessionId by remember { mutableStateOf<Long?>(null) }
     var editingMemoSessionId by remember { mutableStateOf<Long?>(null) }
     var memoDraftText by remember { mutableStateOf("") }
+    // セッション解析レポート（②「コース編成(抽出)」フェーズA-1、2026-07-13追加、読み取り専用）
+    var analyzingSessionId by remember { mutableStateOf<Long?>(null) }
+    var analysisResult by remember { mutableStateOf<SessionMarkerAnalysis?>(null) }
 
     LaunchedEffect(Unit) {
         sessions = repository.getExtractableSessions()
@@ -139,6 +143,16 @@ fun ExtractionScreen(
         }
     }
 
+    fun analyzeSession(sessionId: Long) {
+        analyzingSessionId = sessionId
+        composeScope.launch {
+            runCatching { repository.analyzeSessionMarkers(sessionId) }
+                .onSuccess { analysisResult = it }
+                .onFailure { e -> Toast.makeText(context, "解析に失敗しました: ${e.message}", Toast.LENGTH_LONG).show() }
+            analyzingSessionId = null
+        }
+    }
+
     fun extractForCourse(sessionId: Long, courseId: Long) {
         courseDialogSessionId = null
         runningSessionId = sessionId
@@ -164,7 +178,7 @@ fun ExtractionScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("区間抽出（試走ログ）") },
+                title = { Text("コース編成（抽出）") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
@@ -218,6 +232,12 @@ fun ExtractionScreen(
                                 },
                             ) {
                                 Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
+                            }
+                            TextButton(
+                                onClick = { analyzeSession(session.id) },
+                                enabled = analyzingSessionId == null,
+                            ) {
+                                Text(if (analyzingSessionId == session.id) "解析中…" else "解析")
                             }
                             TextButton(
                                 onClick = { courseDialogSessionId = session.id },
@@ -281,6 +301,10 @@ fun ExtractionScreen(
                 TextButton(onClick = { courseDialogSessionId = null }) { Text("キャンセル") }
             },
         )
+    }
+
+    analysisResult?.let { result ->
+        SessionAnalysisDialog(analysis = result, onDismiss = { analysisResult = null })
     }
 
     editingMemoSessionId?.let { sessionId ->
