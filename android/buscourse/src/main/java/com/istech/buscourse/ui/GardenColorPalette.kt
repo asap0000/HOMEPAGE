@@ -32,16 +32,18 @@ import androidx.compose.ui.unit.dp
  * そのため色の呼称も「赤」「青」等の色名のみとし、園名を連想させる名称は付けない。
  */
 
-/** 選択可能な8色（"#RRGGBB"形式）。 */
+/**
+ * 選択可能な色（"#RRGGBB"形式）。2026-07-14にオーナー指定でマゼンタ(#EC407A)・
+ * ターコイズ(#00ACC1)・緑(#43A047)を外し、白・黒を追加した。
+ */
 val GARDEN_COLOR_PALETTE: List<String> = listOf(
     "#E53935", // 赤
     "#1E88E5", // 青
     "#FDD835", // 黄
-    "#43A047", // 緑
     "#8E24AA", // 紫
     "#FB8C00", // 橙
-    "#EC407A", // 桃
-    "#00ACC1", // 水
+    "#FFFFFF", // 白
+    "#000000", // 黒
 )
 
 /** "#RRGGBB" 文字列 → Compose Color。パース失敗時はnull（不正値で描画が落ちないようにする）。 */
@@ -49,7 +51,7 @@ private fun parseColorHexOrNull(colorHex: String): Color? =
     runCatching { Color(android.graphics.Color.parseColor(colorHex)) }.getOrNull()
 
 /**
- * 園区分（色）選択部品。8色を横一列（画面幅が狭い場合は折り返し）に並べ、タップで選択する。
+ * 区分（色）選択部品。7色を横一列（画面幅が狭い場合は折り返し）に並べ、タップで選択する。
  * 選択中の色を再タップすると選択解除（null）になる。
  *
  * @param selected 現在選択中の色（"#RRGGBB"）。未選択はnull。
@@ -63,7 +65,7 @@ fun GardenColorSelector(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
-        Text("園区分（色・任意）", style = MaterialTheme.typography.bodyMedium)
+        Text("区分（任意）", style = MaterialTheme.typography.bodyMedium)
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
