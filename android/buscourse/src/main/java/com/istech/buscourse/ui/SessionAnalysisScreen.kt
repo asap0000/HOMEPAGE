@@ -100,6 +100,8 @@ fun SessionAnalysisDialog(
     var findOrCreateCandidates by remember(analysis.sessionId) { mutableStateOf<List<FindOrCreateCandidate>>(emptyList()) }
     var selectedFindOrCreateFrameIds by remember(analysis.sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
     var applying by remember(analysis.sessionId) { mutableStateOf(false) }
+    // コース確定（フェーズC-1、2026-07-14追加）の実行中フラグ。承認キュー適用（[applying]）とは別系統の書き込み。
+    var confirmingRoute by remember(analysis.sessionId) { mutableStateOf(false) }
     // 適用のたびに増分し、coverage・find-or-create候補の再取得をトリガーする（[analysis]自体は
     // 内容が変わらない場合は同一値のためLaunchedEffectのキーに使えない、2026-07-14追加）。
     var refreshTrigger by remember(analysis.sessionId) { mutableStateOf(0) }
@@ -154,6 +156,29 @@ fun SessionAnalysisDialog(
                 onReanalyze()
             }.onFailure { e ->
                 Toast.makeText(context, "適用に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * コース確定（②「コース編成(抽出)」フェーズC-1、2026-07-14追加）。「欠損/割り込みレポート」で
+     * 選択中のコースに対し、このセッションからナビ用連続トラックを確定してroute_pointへ保存する。
+     */
+    fun confirmCourseRoute() {
+        val courseId = selectedCourseId ?: return
+        val courseName = courses.find { it.id == courseId }?.name ?: "コース#$courseId"
+        confirmingRoute = true
+        viewModel.confirmCourseRoute(courseId, analysis.sessionId) { outcome ->
+            confirmingRoute = false
+            outcome.onSuccess { pointCount ->
+                val message = if (pointCount > 0) {
+                    "コース確定: $courseName（route_point ${pointCount}点）"
+                } else {
+                    "このセッションに該当コースのマーカーがありません"
+                }
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }.onFailure { e ->
+                Toast.makeText(context, "コース確定に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -267,6 +292,8 @@ fun SessionAnalysisDialog(
                                 selectedInterruptionStopIds - stopId
                             }
                         },
+                        confirmingRoute = confirmingRoute,
+                        onConfirmRoute = { confirmCourseRoute() },
                     )
                 }
             }
@@ -468,6 +495,8 @@ private fun CoverageSection(
     coverage: CourseCoverageReport?,
     selectedInterruptionStopIds: Set<Long>,
     onToggleInterruption: (Long, Boolean) -> Unit,
+    confirmingRoute: Boolean,
+    onConfirmRoute: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         if (courses.isEmpty()) {
@@ -484,6 +513,12 @@ private fun CoverageSection(
                     onClick = { onSelectCourse(course.id) },
                     label = { Text(course.name) },
                 )
+            }
+        }
+        if (selectedCourseId != null) {
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onConfirmRoute, enabled = !confirmingRoute) {
+                Text(if (confirmingRoute) "確定中…" else "このセッションでコースを確定（ルート生成）")
             }
         }
         Spacer(Modifier.height(8.dp))

@@ -29,6 +29,13 @@ data class CourseEntity(
     @ColumnInfo(name = "base_course_id") val baseCourseId: Long?,
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    /**
+     * コース確定（②「コース編成(抽出)」フェーズC-1、2026-07-14追加）の出所セッション。
+     * [com.istech.buscourse.course.CourseRepository.confirmCourseRouteFromSession] で
+     * route_point を生成した際のセッションIDを記録する。FK制約は付けない（既存の
+     * `is_hub`・`stop_card_id` 列と同様、単純な ALTER TABLE ADD COLUMN に留める方針、§3.5）。
+     */
+    @ColumnInfo(name = "source_session_id") val sourceSessionId: Long? = null,
 )
 
 /**

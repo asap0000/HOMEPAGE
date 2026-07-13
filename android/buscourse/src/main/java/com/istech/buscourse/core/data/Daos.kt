@@ -64,6 +64,13 @@ interface CourseDao {
     @Transaction
     @Query("SELECT * FROM course WHERE id = :id")
     suspend fun getWithDetails(id: Long): CourseWithDetails?
+
+    /**
+     * コース確定の出所セッション記録用の更新（②「コース編成(抽出)」フェーズC-1、2026-07-14追加、
+     * [com.istech.buscourse.course.CourseRepository.confirmCourseRouteFromSession]が使用）。
+     */
+    @Query("UPDATE course SET source_session_id = :sourceSessionId, updated_at = :updatedAt WHERE id = :courseId")
+    suspend fun updateSourceSession(courseId: Long, sourceSessionId: Long, updatedAt: Long)
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */

@@ -14,7 +14,9 @@ import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseStopEntity
 import com.istech.buscourse.core.data.CourseWithDetails
 import com.istech.buscourse.core.data.GpsPointEntity
+import com.istech.buscourse.core.data.RoutePointEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
+import com.istech.buscourse.core.data.TimelapseFrameEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.core.geo.GeoMath
@@ -205,6 +207,7 @@ class CourseRepository(
     private val gpsPointDao = database.gpsPointDao()
     private val stopVisitEventDao = database.stopVisitEventDao()
     private val timelapseFrameDao = database.timelapseFrameDao()
+    private val routePointDao = database.routePointDao()
     private val workLogDao = database.workLogDao()
 
     /** route_point / expected_chainage_m の再生成主体（§3.5・§3.9。2026-07-08決定で course 所属）。 */
@@ -966,6 +969,196 @@ class CourseRepository(
         )
     }
 
+    // ------------------------------------------------------------------
+    // コース確定→route_point生成（②「コース編成(抽出)」フェーズC-1、2026-07-14追加）
+    //
+    // フェーズB（承認キュー）を経て停留所マーカーが整った承認済みセッションから、そのコースの
+    // ナビ用連続トラックを確定し `route_point` へ保存する。範囲はコースの拠点→拠点にクリップする。
+    // 描画側（RouteMapScreen）の変更はC-2で行うためここでは扱わない。
+    // ------------------------------------------------------------------
+
+    /**
+     * コース確定（フェーズC-1）。[sessionId] のセッションから、[courseId] のコースのナビ用連続
+     * トラックを確定し、既存の `route_point` テーブルへ保存する（`course.source_session_id` にも
+     * 出所として記録する）。
+     *
+     * **時間窓（クリップ窓）の決め方（2026-07-14見直し）**:
+     * 共有停留所（複数コースに属す停留所）が別コースの走行中にマークされると、旧ロジック
+     * （コース停留所マーカーの[最小,最大]captured_at）では窓がその時刻まで伸びてしまい、
+     * 隣コースの脚まで route_point に混入する不具合があった（実測: course1が7km→13kmに膨張）。
+     * これを避けるため、次の優先順で窓を決める。
+     *
+     * 一次: 拠点フラグでフラグメント化（[HUB_FRAGMENT_MIN_COURSE_STOPS]参照）
+     * 1. セッション内の全マーカー（`timelapse_frame.stop_card_id`、コースの停留所に限らない）を
+     *    拠点（`bus_stop_card.is_hub=1`）のマークを境界にフラグメント化する。連続する拠点マークは
+     *    1つの境界イベントにまとめ、境界イベント間の非拠点マーク列を1フラグメントとする
+     *    （セクション4「拠点で分割」＝[com.istech.buscourse.ui.SessionAnalysisScreen]の
+     *    `splitByHubs` と同じ考え方）。セッションに拠点マークが1つも無ければこの経路は試さない。
+     * 2. 各フラグメントについて、含まれるマークの `stop_card_id` と `courseStopIds` の重なり数
+     *    （マーク件数ベース）を数え、最多のフラグメントを選ぶ。
+     * 3. **誤用ガード**: 選んだフラグメントの重なり数が [HUB_FRAGMENT_MIN_COURSE_STOPS] 未満なら、
+     *    この経路は無効とみなしフォールバックへ進む。
+     * 4. 有効なら window = 選んだフラグメントの[最小,最大]captured_at。さらに、その直前の拠点境界
+     *    イベントの最後の拠点マーク／直後の拠点境界イベントの最初の拠点マークがあれば、そこまで
+     *    前後に延伸する（拠点→拠点）。
+     *
+     * フォールバック: 拠点マークが無い、または一次が誤用ガードで無効だった場合（[CLUSTER_GAP_MS]参照）
+     * 1. コースの停留所（`course_stop.stop_card_id`）のうち、このセッションでマーク済みのもの
+     *    （courseMarks）を時刻順に集める。空ならこの関数は0を返す（現行どおり）。
+     * 2. courseMarks を時間ギャップが [CLUSTER_GAP_MS] を超える箇所で連続クラスタに分割する。
+     * 3. course停留所の異なり数が最多のクラスタを選ぶ（同数なら継続時間が最長のもの）。これにより
+     *    別コース走行中に紛れ込んだ孤立マーカー（例: 08:37の#13）は別クラスタとして除外される。
+     * 4. window = 選んだクラスタの[最小,最大]captured_at。セッションに拠点マークがある場合は、
+     *    この窓の直前直後1件が拠点であれば延伸する（一次と同じ「直前/直後の1件」限定の延伸方式。
+     *    拠点を探して遡り続けることはしない）。
+     *
+     * 窓 [windowStart, windowEnd]（captured_at基準）に入る `gps_point`（`ts_epoch_ms` 基準、seq順）
+     * だけを連続トラックとして採用する（以降は現行どおり）。
+     *
+     * `route_point` は `routePointDao.deleteAllForCourse` → 再挿入で書き込むため、同じセッション・
+     * 同じマーカー状態で再実行しても同じ結果になる（冪等）。`course.source_session_id` の更新も
+     * 同じUPDATEを繰り返すだけなので冪等。すべて `database.withTransaction {}` で1つにまとめる。
+     *
+     * @return 生成した `route_point` の件数。次の場合は0を返す（`source_session_id` の更新自体は
+     *   行ってよい）: このセッションに該当コースの停留所マーカーが1つも無い場合／窓内のGPS点が
+     *   2点未満の場合。
+     */
+    suspend fun confirmCourseRouteFromSession(courseId: Long, sessionId: Long): Int = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            val now = System.currentTimeMillis()
+            courseDao.updateSourceSession(courseId, sessionId, now)
+
+            val details = courseDao.getWithDetails(courseId) ?: return@withTransaction 0
+            val courseStopIds = details.stops.map { it.card.id }.toSet()
+            if (courseStopIds.isEmpty()) return@withTransaction 0
+
+            // セッション内の全マーカー（seq順＝時系列順）。拠点分割／拠点延伸の探索にはコース外のマーカーも要る。
+            // getMarkedFramesはSQL側でstop_card_id IS NOT NULLに絞っているが、エンティティの型自体は
+            // 引き続きLong?のため、下記のnull安全な参照で扱う。
+            val marks = timelapseFrameDao.getMarkedFrames(sessionId)
+
+            val hubCache = mutableMapOf<Long, Boolean>()
+            suspend fun isHub(stopCardId: Long): Boolean =
+                hubCache.getOrPut(stopCardId) { busStopCardDao.getById(stopCardId)?.isHub == true }
+
+            // マークごとに拠点マークか否かを判定しておく（以降のフラグメント化・延伸探索の両方で使う）
+            val hubFlagByMark = marks.map { mark ->
+                val stopId = mark.stopCardId
+                stopId != null && isHub(stopId)
+            }
+
+            // marksを拠点マークの境界でフラグメント化した1断片（拠点境界イベント or 非拠点マーク列）。
+            data class MarkSegment(val isHubGroup: Boolean, val marks: List<TimelapseFrameEntity>)
+
+            val segments = mutableListOf<MarkSegment>()
+            run {
+                var i = 0
+                while (i < marks.size) {
+                    val hub = hubFlagByMark[i]
+                    val start = i
+                    while (i < marks.size && hubFlagByMark[i] == hub) i++
+                    segments += MarkSegment(hub, marks.subList(start, i).toList())
+                }
+            }
+
+            // --- 一次: 拠点フラグでフラグメント化し、コース停留所との重なりが最多のフラグメントを選ぶ ---
+            val hubWindow: Pair<Long, Long>? = run {
+                if (hubFlagByMark.none { it }) return@run null // 拠点マークが1つも無ければこの経路は試さない
+
+                var bestIdx = -1
+                var bestOverlap = -1
+                for ((idx, seg) in segments.withIndex()) {
+                    if (seg.isHubGroup) continue
+                    val overlap = seg.marks.count { it.stopCardId != null && it.stopCardId in courseStopIds }
+                    if (overlap > bestOverlap) {
+                        bestOverlap = overlap
+                        bestIdx = idx
+                    }
+                }
+                if (bestIdx == -1) return@run null
+                if (bestOverlap < HUB_FRAGMENT_MIN_COURSE_STOPS) return@run null // 誤用ガード→フォールバックへ
+
+                val chosen = segments[bestIdx]
+                var start = chosen.marks.minOf { it.capturedAt }
+                var end = chosen.marks.maxOf { it.capturedAt }
+                // 直前/直後の拠点境界イベント（あれば）まで延伸する
+                segments.getOrNull(bestIdx - 1)?.takeIf { it.isHubGroup }?.let { start = it.marks.last().capturedAt }
+                segments.getOrNull(bestIdx + 1)?.takeIf { it.isHubGroup }?.let { end = it.marks.first().capturedAt }
+                start to end
+            }
+
+            var windowStart: Long
+            var windowEnd: Long
+
+            if (hubWindow != null) {
+                windowStart = hubWindow.first
+                windowEnd = hubWindow.second
+            } else {
+                // --- フォールバック: 拠点マーク無し、または一次が誤用ガードで無効だった場合 ---
+                val courseMarks = marks
+                    .filter { it.stopCardId != null && it.stopCardId in courseStopIds }
+                    .sortedBy { it.capturedAt }
+                if (courseMarks.isEmpty()) return@withTransaction 0
+
+                // 時間ギャップ > CLUSTER_GAP_MS で連続クラスタに分割する
+                val clusters = mutableListOf<MutableList<TimelapseFrameEntity>>()
+                for (mark in courseMarks) {
+                    val current = clusters.lastOrNull()
+                    if (current != null && mark.capturedAt - current.last().capturedAt <= CLUSTER_GAP_MS) {
+                        current += mark
+                    } else {
+                        clusters += mutableListOf(mark)
+                    }
+                }
+
+                // course停留所の異なり数が最多のクラスタを選ぶ（同数なら継続時間が最長のもの）
+                val bestCluster = clusters.maxWithOrNull(
+                    compareBy(
+                        { cluster: List<TimelapseFrameEntity> -> cluster.mapNotNull { it.stopCardId }.toSet().size },
+                        { cluster: List<TimelapseFrameEntity> -> cluster.last().capturedAt - cluster.first().capturedAt },
+                    )
+                ) ?: return@withTransaction 0
+
+                windowStart = bestCluster.first().capturedAt
+                windowEnd = bestCluster.last().capturedAt
+
+                // 開始直前の1件のマーカーが拠点なら、そのcaptured_atまで前へ延伸する（該当が無ければ延伸しない）
+                marks.lastOrNull { it.capturedAt < windowStart }?.let { candidate ->
+                    val stopId = candidate.stopCardId
+                    if (stopId != null && isHub(stopId)) {
+                        windowStart = candidate.capturedAt
+                    }
+                }
+                // 終了直後の1件のマーカーが拠点なら、そのcaptured_atまで後ろへ延伸する（該当が無ければ延伸しない）
+                marks.firstOrNull { it.capturedAt > windowEnd }?.let { candidate ->
+                    val stopId = candidate.stopCardId
+                    if (stopId != null && isHub(stopId)) {
+                        windowEnd = candidate.capturedAt
+                    }
+                }
+            }
+
+            val windowPoints = gpsPointDao.getBySession(sessionId) // seq順
+                .filter { it.tsEpochMs in windowStart..windowEnd }
+            if (windowPoints.size < 2) return@withTransaction 0
+
+            var cumulativeM = 0.0
+            val routePoints = windowPoints.mapIndexed { index, point ->
+                if (index > 0) {
+                    cumulativeM += GeoMath.haversineM(
+                        windowPoints[index - 1].lat, windowPoints[index - 1].lon,
+                        point.lat, point.lon,
+                    )
+                }
+                RoutePointEntity(courseId = courseId, seq = index, lat = point.lat, lon = point.lon, chainageM = cumulativeM)
+            }
+
+            routePointDao.deleteAllForCourse(courseId)
+            routePointDao.insertAll(routePoints)
+            routePoints.size
+        }
+    }
+
     /**
      * 完了済みセッションから停留所間の区間を切り出して `segment_track` へUPSERTする（設計書§3.9）。
      *
@@ -1381,6 +1574,22 @@ class CourseRepository(
 
         /** find-or-create適用（フェーズB(c)）で作成する新規カード名 "候補NNN" のパース用。 */
         private val CANDIDATE_NAME_REGEX = Regex("^候補(\\d{3})$")
+
+        /**
+         * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定の一次経路
+         * （拠点フラグでのフラグメント化）で選んだフラグメントを採用してよいと判定する、コース停留所
+         * との重なり数（マーク件数ベース）の最小しきい値。これ未満なら誤用（拠点分割が実態と噛み合って
+         * いない等）とみなし、フォールバック（クラスタリング）経路へ切り替える。2026-07-14暫定値。
+         */
+        private const val HUB_FRAGMENT_MIN_COURSE_STOPS = 2
+
+        /**
+         * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定のフォールバック
+         * 経路（拠点マーク無し／一次が誤用ガードで無効）で、コース停留所マーカー列を連続クラスタに
+         * 分割する際の時間ギャップしきい値。これを超える間隔が空いたら別クラスタとみなす
+         * （共有停留所が別コース走行中に単発でマークされた場合の孤立を切り離すため）。2026-07-14暫定値。
+         */
+        private const val CLUSTER_GAP_MS = 600_000L
 
         /**
          * 区間抽出対象のセッション種別（§3.9）。設計書は PARTIAL_RUN を主対象に記述しているが、

@@ -46,6 +46,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 承認キュー経由の書き込み（ダブり統合・割り込み・find-or-create・拠点フラグ）を導入するため、
  * 対応する4つの適用メソッド（[com.istech.buscourse.course.CourseRepository]）はすべて
  * `database.withTransaction {}` で囲み冪等に実装する（既存データを壊さないための要件）。
+ *
+ * version 10（2026-07-14、②「コース編成(抽出)」フェーズC-1＝コース確定→route_point生成）: course に
+ * source_session_id 列を追加（コース確定に使ったセッションの記録。[CourseEntity]）。
+ * 同じく実データ保持のため明示 ALTER TABLE（[MIGRATION_9_10]）。
+ * [com.istech.buscourse.course.CourseRepository.confirmCourseRouteFromSession] が
+ * `database.withTransaction {}` で囲み冪等に書き込む（route_point は delete＋insertのため
+ * 再実行しても重複しない）。
  */
 @Database(
     entities = [
@@ -63,7 +70,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WorkLogEntity::class,
         MapDataPackageEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -97,6 +104,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_6_7,
                 MIGRATION_7_8,
                 MIGRATION_8_9,
+                MIGRATION_9_10,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -197,6 +205,16 @@ abstract class BusCourseDatabase : RoomDatabase() {
         val MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN is_hub INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * course.source_session_id 追加（コース確定の出所セッション記録、②「コース編成(抽出)」
+         * フェーズC-1、2026-07-14）。既存データは保持する（default NULL＝既存コースは未確定のまま）。
+         */
+        val MIGRATION_9_10 = object : androidx.room.migration.Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE course ADD COLUMN source_session_id INTEGER")
             }
         }
     }

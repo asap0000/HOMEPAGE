@@ -302,6 +302,26 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * コース確定→route_point生成（②「コース編成(抽出)」フェーズC-1、SessionAnalysisDialog
+     * 「欠損/割り込みレポート」の「このセッションでコースを確定（ルート生成）」ボタン、2026-07-14追加）。
+     * 承認済み（フェーズB）のセッションから、そのコースのナビ用連続トラックを拠点→拠点にクリップして
+     * 確定し、`route_point` へ保存する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
+     */
+    fun confirmCourseRoute(
+        courseId: Long,
+        sessionId: Long,
+        onResult: (Result<Int>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { repository.confirmCourseRouteFromSession(courseId, sessionId) }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "コース確定（ルート生成）") { count ->
+                "セッション#${sessionId}からコース#${courseId}を確定（route_point ${count}点）"
+            }
+            onResult(result)
+        }
+    }
+
     /** セッションメモの更新（ExtractionScreen、2026-07-11追加）。 */
     fun updateSessionMemo(sessionId: Long, memo: String?, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
