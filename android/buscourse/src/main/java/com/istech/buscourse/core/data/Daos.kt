@@ -24,6 +24,13 @@ interface BusStopCardDao {
 
     @Query("UPDATE bus_stop_card SET is_archived = 1, updated_at = :updatedAt WHERE id = :id")
     suspend fun archive(id: Long, updatedAt: Long)
+
+    /**
+     * 拠点フラグの設定（②「コース編成(抽出)」フェーズB(d)、2026-07-14追加）。同じ値を再設定しても
+     * 結果は変わらないため冪等（[com.istech.buscourse.course.CourseRepository.applyHubFlags]参照）。
+     */
+    @Query("UPDATE bus_stop_card SET is_hub = :hub, updated_at = :t WHERE id = :id")
+    suspend fun setHub(id: Long, hub: Boolean, t: Long)
 }
 
 /** `course_stop` を停留所カードと JOIN した集約（設計書§3.6 CourseWithDetails 用）。 */
@@ -218,6 +225,14 @@ interface TimelapseFrameDao {
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
 
     /**
+     * 単一フレームの取得（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加）。find-or-create適用の
+     * 冪等ガード（[com.istech.buscourse.course.CourseRepository.applyFindOrCreate]）で、候補取得時点と
+     * 適用直前の stop_card_id を突き合わせるために使う。
+     */
+    @Query("SELECT * FROM timelapse_frame WHERE id = :id")
+    suspend fun getById(id: Long): TimelapseFrameEntity?
+
+    /**
      * 手動停留所マーク済みフレームの取得（②「コース編成(抽出)」フェーズA-1 セッション解析レポート、
      * 読み取り専用、2026-07-13追加）。session8のような長回し記録に付いた停留所マーカー
      * （version 8の `stop_card_id`）をseq順に取得する。
@@ -245,6 +260,14 @@ interface TimelapseFrameDao {
      */
     @Query("UPDATE timelapse_frame SET stop_card_id = :stopCardId WHERE id = :frameId")
     suspend fun markStopCardOnLoresFrame(frameId: Long, stopCardId: Long)
+
+    /**
+     * ダブり統合適用時、代表以外のコマの stop_card_id を NULL に戻す（②「コース編成(抽出)」
+     * フェーズB(a)、2026-07-14追加）。既に NULL のフレームに対して呼んでも結果は変わらないため冪等
+     * （[com.istech.buscourse.course.CourseRepository.applyDuplicateMerges]参照）。
+     */
+    @Query("UPDATE timelapse_frame SET stop_card_id = NULL WHERE id = :frameId")
+    suspend fun clearStopCardOnFrame(frameId: Long)
 }
 
 /** `gps_point`（正典GPS点列）の操作。セッション終了時に JSONL から一括インポートされる（D4）。 */

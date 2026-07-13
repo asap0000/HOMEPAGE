@@ -307,8 +307,11 @@ fun ExtractionScreen(
         SessionAnalysisDialog(
             analysis = result,
             courses = courses,
-            repository = repository,
+            viewModel = viewModel,
             onDismiss = { analysisResult = null },
+            // 承認キュー適用後の再解析（②「コース編成(抽出)」フェーズB、2026-07-14追加）。
+            // analyzeSession自体は読み取り専用のため、書き込み成功後にそのまま呼び直せる。
+            onReanalyze = { analyzeSession(result.sessionId) },
         )
     }
 

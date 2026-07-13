@@ -48,4 +48,11 @@ data class BusStopCardEntity(
      * この色で園を識別する）。選択肢は[com.istech.buscourse.ui.GardenColorPalette]参照。
      */
     @ColumnInfo(name = "garden_color") val gardenColor: String? = null,
+    /**
+     * 拠点フラグ（②「コース編成(抽出)」フェーズB、2026-07-14追加）。セッション解析の「拠点で分割」
+     * （[com.istech.buscourse.ui.SessionAnalysisDialog]）で選ばれた停留所を承認・適用した結果を
+     * 永続化する。将来のコース編成（拠点を境に別コースへ分割する運用）で参照する想定、
+     * フェーズBでは記録のみでコース分割ロジックへの反映は行わない。
+     */
+    @ColumnInfo(name = "is_hub", defaultValue = "0") val isHub: Boolean = false,
 )

@@ -9,8 +9,11 @@ import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.MapDataPackageEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
+import com.istech.buscourse.course.ApplyApprovedResult
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
+import com.istech.buscourse.course.DuplicateFrameCandidate
+import com.istech.buscourse.course.FindOrCreateCandidate
 import com.istech.buscourse.course.SegmentExtractionResult
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
@@ -261,6 +264,39 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.extractSegmentsForCourse(courseId, sessionId) }
             logOutcome(result, WorkLogCategory.EXTRACTION, "コース指定の区間抽出") { r ->
                 "セッション#${sessionId}からコース指定で区間抽出（作成${r.extractedSegmentCount}件・スキップ${r.skippedPairCount}件・未達${r.unmatchedStops.size}件）"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * 承認キューの一括適用（②「コース編成(抽出)」フェーズB、SessionAnalysisDialog「承認して適用」、
+     * 2026-07-14追加）。ダブり統合・割り込み・find-or-create・拠点フラグの4種を1回のViewModel呼び出しで
+     * まとめて適用する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する
+     * （フェーズ2レビュー#13の方針をフェーズBにも適用。初のDBマイグレーション＋書き込み実装のため
+     * 画面遷移によるスコープキャンセルで中途半端な適用状態を残さないことが特に重要）。
+     */
+    fun applyApprovedCandidates(
+        sessionId: Long,
+        duplicateGroups: List<List<DuplicateFrameCandidate>>,
+        interruptionStopIds: List<Long>,
+        findOrCreateCandidates: List<FindOrCreateCandidate>,
+        hubStopIds: List<Long>,
+        onResult: (Result<ApplyApprovedResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching {
+                repository.applyApprovedCandidates(
+                    sessionId = sessionId,
+                    duplicateGroups = duplicateGroups,
+                    interruptionStopIds = interruptionStopIds,
+                    findOrCreateCandidates = findOrCreateCandidates,
+                    hubStopIds = hubStopIds,
+                )
+            }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "承認キューの適用") { r ->
+                "セッション#${sessionId}の承認キューを適用（統合${r.duplicatesMerged}・割り込み${r.interruptionsApplied}" +
+                    "・新規${r.findOrCreateApplied}・拠点${r.hubFlagsApplied}）"
             }
             onResult(result)
         }

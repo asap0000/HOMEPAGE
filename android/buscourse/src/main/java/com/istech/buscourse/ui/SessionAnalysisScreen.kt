@@ -1,19 +1,25 @@
 package com.istech.buscourse.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -29,13 +35,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.course.CourseCoverageReport
-import com.istech.buscourse.course.CourseRepository
+import com.istech.buscourse.course.FindOrCreateCandidate
 import com.istech.buscourse.course.MarkerDuplicateGroup
 import com.istech.buscourse.course.MarkerTimelineRow
 import com.istech.buscourse.course.MissingStop
@@ -47,33 +55,56 @@ import kotlin.math.roundToInt
 private const val MARKER_DISTANCE_WARNING_THRESHOLD_M = 100.0
 
 /**
- * セッション解析レポート（②「コース編成(抽出)」フェーズA-1/A-2、2026-07-13追加）。
- * ExtractionScreenのセッション一覧「解析」から開く**読み取り専用**の全画面ダイアログ。
+ * セッション解析レポート（②「コース編成(抽出)」フェーズA-1/A-2/B、2026-07-13〜14追加）。
+ * ExtractionScreenのセッション一覧「解析」から開く全画面ダイアログ。
  * `timelapse_frame.stop_card_id` に記録済みの停留所マーカー（session8のような長回し記録に
  * 付いたもの）をサマリ・時系列・ダブり検出（フェーズA-1）に加え、拠点分割・欠損/割り込み
- * レポート（フェーズA-2）で可視化する。DB書き込みは一切行わない。
+ * レポート（フェーズA-2）で可視化する。
+ *
+ * フェーズB（承認キュー、2026-07-14追加）: ダブり統合・割り込み・find-or-create・拠点フラグの
+ * 4種の候補にチェックボックスを付け、下部の「承認して適用」で選択済み候補だけを書き込む。
+ * **チェックして「適用」を押すまで一切書き込まない**（表示・解析はすべて読み取り専用のまま）。
+ * 適用後はToastで結果件数を表示し、[CourseRepository.analyzeSessionMarkers] 等を再実行して
+ * 画面を更新する（冪等な適用メソッドのため、再実行のたびに候補が減っていく）。
  *
  * @param courses コース選択チップ用（セクション5）。
- * @param repository 欠損/割り込みレポート（[CourseRepository.analyzeCourseCoverage]、読み取り専用）
- *   をコース選択時に都度呼ぶために使う。フェーズA-1同様、書き込みを伴わないためViewModelを介さず
- *   直接呼ぶ。
+ * @param viewModel 読み取り（[CourseRepository.analyzeCourseCoverage]・
+ *   [CourseRepository.analyzeFindOrCreateCandidates]、フェーズA-1同様ViewModelを介さず
+ *   `viewModel.repository` を直接呼ぶ）と、承認キューの書き込み
+ *   （[BusCourseViewModel.applyApprovedCandidates]、[viewModelScope]管理下）の両方に使う。
+ * @param onReanalyze 承認キュー適用成功後、呼び出し元（ExtractionScreen）にセッション解析の
+ *   再取得を依頼するコールバック（`analysisResult` state の更新→この[analysis]引数が更新される）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionAnalysisDialog(
     analysis: SessionMarkerAnalysis,
     courses: List<CourseEntity>,
-    repository: CourseRepository,
+    viewModel: BusCourseViewModel,
     onDismiss: () -> Unit,
+    onReanalyze: () -> Unit,
 ) {
-    // 拠点(HUB)選択・突き合わせ対象コースは、まだスキーマに拠点フラグが無いための画面上の一時選択
-    // （セッション単位でremember。ダイアログを開き直せばリセットされる）。
+    val repository = viewModel.repository
+    val context = LocalContext.current
+
+    // 拠点(HUB)選択・突き合わせ対象コースの画面上の一時選択（セッション単位でremember。
+    // ダイアログを開き直せばリセットされる）。
     var hubSelection by remember(analysis.sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
     var selectedCourseId by remember(analysis.sessionId) { mutableStateOf<Long?>(null) }
     var coverage by remember(analysis.sessionId) { mutableStateOf<CourseCoverageReport?>(null) }
     var coverageLoading by remember(analysis.sessionId) { mutableStateOf(false) }
 
-    LaunchedEffect(selectedCourseId) {
+    // フェーズB承認キューの選択状態（チェックボックス）。
+    var selectedDuplicateGroups by remember(analysis.sessionId) { mutableStateOf<Set<Int>>(emptySet()) }
+    var selectedInterruptionStopIds by remember(analysis.sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
+    var findOrCreateCandidates by remember(analysis.sessionId) { mutableStateOf<List<FindOrCreateCandidate>>(emptyList()) }
+    var selectedFindOrCreateFrameIds by remember(analysis.sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
+    var applying by remember(analysis.sessionId) { mutableStateOf(false) }
+    // 適用のたびに増分し、coverage・find-or-create候補の再取得をトリガーする（[analysis]自体は
+    // 内容が変わらない場合は同一値のためLaunchedEffectのキーに使えない、2026-07-14追加）。
+    var refreshTrigger by remember(analysis.sessionId) { mutableStateOf(0) }
+
+    LaunchedEffect(selectedCourseId, refreshTrigger) {
         val courseId = selectedCourseId
         if (courseId == null) {
             coverage = null
@@ -82,6 +113,49 @@ fun SessionAnalysisDialog(
         coverageLoading = true
         coverage = runCatching { repository.analyzeCourseCoverage(analysis.sessionId, courseId) }.getOrNull()
         coverageLoading = false
+        // コース切り替え・再取得のたびに、そのコースにもう存在しない停留所IDの選択が残らないようにする
+        selectedInterruptionStopIds = emptySet()
+    }
+
+    LaunchedEffect(analysis.sessionId, refreshTrigger) {
+        findOrCreateCandidates = runCatching { repository.analyzeFindOrCreateCandidates(analysis.sessionId) }.getOrDefault(emptyList())
+        selectedFindOrCreateFrameIds = emptySet()
+    }
+
+    fun applyApproved() {
+        val duplicateGroups = analysis.duplicates
+            .filterIndexed { index, _ -> index in selectedDuplicateGroups }
+            .map { it.frameCandidates }
+        val interruptionStopIds = selectedInterruptionStopIds.toList()
+        val findOrCreateSelected = findOrCreateCandidates.filter { it.frameId in selectedFindOrCreateFrameIds }
+        val hubStopIds = hubSelection.toList()
+
+        if (duplicateGroups.isEmpty() && interruptionStopIds.isEmpty() && findOrCreateSelected.isEmpty() && hubStopIds.isEmpty()) {
+            Toast.makeText(context, "適用する候補が選択されていません。", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        applying = true
+        viewModel.applyApprovedCandidates(
+            sessionId = analysis.sessionId,
+            duplicateGroups = duplicateGroups,
+            interruptionStopIds = interruptionStopIds,
+            findOrCreateCandidates = findOrCreateSelected,
+            hubStopIds = hubStopIds,
+        ) { outcome ->
+            applying = false
+            outcome.onSuccess { result ->
+                Toast.makeText(context, "${result.total}件適用しました。", Toast.LENGTH_LONG).show()
+                selectedDuplicateGroups = emptySet()
+                selectedInterruptionStopIds = emptySet()
+                selectedFindOrCreateFrameIds = emptySet()
+                hubSelection = emptySet()
+                refreshTrigger++
+                onReanalyze()
+            }.onFailure { e ->
+                Toast.makeText(context, "適用に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     Dialog(
@@ -98,6 +172,21 @@ fun SessionAnalysisDialog(
                         }
                     },
                 )
+            },
+            bottomBar = {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    val selectedCount = selectedDuplicateGroups.size + selectedInterruptionStopIds.size +
+                        selectedFindOrCreateFrameIds.size + hubSelection.size
+                    Button(
+                        onClick = { applyApproved() },
+                        enabled = !applying && selectedCount > 0,
+                    ) {
+                        Text(if (applying) "適用中…" else "承認して適用（$selectedCount 件）")
+                    }
+                }
             },
         ) { padding ->
             LazyColumn(
@@ -119,8 +208,18 @@ fun SessionAnalysisDialog(
                 if (analysis.duplicates.isEmpty()) {
                     item { EmptyHint("重複なし") }
                 } else {
-                    items(analysis.duplicates) { group ->
-                        DuplicateGroupRowView(group)
+                    itemsIndexed(analysis.duplicates) { index, group ->
+                        DuplicateGroupRowView(
+                            group = group,
+                            checked = index in selectedDuplicateGroups,
+                            onCheckedChange = { checked ->
+                                selectedDuplicateGroups = if (checked) {
+                                    selectedDuplicateGroups + index
+                                } else {
+                                    selectedDuplicateGroups - index
+                                }
+                            },
+                        )
                         HorizontalDivider()
                     }
                 }
@@ -138,6 +237,20 @@ fun SessionAnalysisDialog(
                         },
                     )
                 }
+                item { SectionHeader("find-or-create候補（誤吸着の疑い）") }
+                item {
+                    FindOrCreateSection(
+                        candidates = findOrCreateCandidates,
+                        selected = selectedFindOrCreateFrameIds,
+                        onToggle = { frameId, checked ->
+                            selectedFindOrCreateFrameIds = if (checked) {
+                                selectedFindOrCreateFrameIds + frameId
+                            } else {
+                                selectedFindOrCreateFrameIds - frameId
+                            }
+                        },
+                    )
+                }
                 item { SectionHeader("欠損/割り込みレポート") }
                 item {
                     CoverageSection(
@@ -146,6 +259,14 @@ fun SessionAnalysisDialog(
                         onSelectCourse = { selectedCourseId = it },
                         coverageLoading = coverageLoading,
                         coverage = coverage,
+                        selectedInterruptionStopIds = selectedInterruptionStopIds,
+                        onToggleInterruption = { stopId, checked ->
+                            selectedInterruptionStopIds = if (checked) {
+                                selectedInterruptionStopIds + stopId
+                            } else {
+                                selectedInterruptionStopIds - stopId
+                            }
+                        },
                     )
                 }
             }
@@ -199,15 +320,30 @@ private fun MarkerTimelineRowView(row: MarkerTimelineRow) {
     )
 }
 
+/**
+ * ダブりグループの1行（フェーズA-1表示＋フェーズB(a)承認チェックボックス）。チェックすると
+ * [group.frameCandidates] のうちカード座標との距離が最小の1枚を代表として残し、他を統合候補とする
+ * （実際の書き込みは「承認して適用」ボタンから）。
+ */
 @Composable
-private fun DuplicateGroupRowView(group: MarkerDuplicateGroup) {
+private fun DuplicateGroupRowView(
+    group: MarkerDuplicateGroup,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
     val times = group.timestamps.joinToString(", ") { formatTimeOfDay(it) }
-    Text(
-        "重複(統合候補): ${group.stopName} ×${group.count}（$times）",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.error,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Text(
+            "重複(統合候補): ${group.stopName} ×${group.count}（$times）",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 // ------------------------------------------------------------------
@@ -330,6 +466,8 @@ private fun CoverageSection(
     onSelectCourse: (Long) -> Unit,
     coverageLoading: Boolean,
     coverage: CourseCoverageReport?,
+    selectedInterruptionStopIds: Set<Long>,
+    onToggleInterruption: (Long, Boolean) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         if (courses.isEmpty()) {
@@ -355,15 +493,27 @@ private fun CoverageSection(
             coverage == null -> EmptyHint("解析中…")
             coverage.missing.isEmpty() -> EmptyHint("欠損停留所なし（全停留所マーク済み）")
             else -> coverage.missing.forEach { stop ->
-                MissingStopRowView(stop)
+                MissingStopRowView(
+                    stop = stop,
+                    checked = stop.stopId in selectedInterruptionStopIds,
+                    onCheckedChange = { checked -> onToggleInterruption(stop.stopId, checked) },
+                )
                 HorizontalDivider()
             }
         }
     }
 }
 
+/**
+ * 欠損停留所の1行（フェーズA-2表示＋フェーズB(b)承認チェックボックス）。割り込み候補
+ * （STOP_CONFIRMED）のみチェック可能にする。通過・コース外はマーク不要のため対象外。
+ */
 @Composable
-private fun MissingStopRowView(stop: MissingStop) {
+private fun MissingStopRowView(
+    stop: MissingStop,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
     val (label, color) = when (stop.classification) {
         StopCoverageClassification.STOP_CONFIRMED -> "割り込み候補" to MaterialTheme.colorScheme.error
         StopCoverageClassification.PASS_THROUGH -> "通過（マーク不要）" to MaterialTheme.colorScheme.onSurface
@@ -374,10 +524,69 @@ private fun MissingStopRowView(stop: MissingStop) {
     } else {
         ""
     }
-    Text(
-        "${stop.name}  $label$detail",
-        style = MaterialTheme.typography.bodyMedium,
-        color = color,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (stop.classification == StopCoverageClassification.STOP_CONFIRMED) {
+            Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        } else {
+            Spacer(Modifier.width(48.dp))
+        }
+        Text(
+            "${stop.name}  $label$detail",
+            style = MaterialTheme.typography.bodyMedium,
+            color = color,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+// ------------------------------------------------------------------
+// セクション「find-or-create候補」（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加）
+// ------------------------------------------------------------------
+
+@Composable
+private fun FindOrCreateSection(
+    candidates: List<FindOrCreateCandidate>,
+    selected: Set<Long>,
+    onToggle: (Long, Boolean) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        if (candidates.isEmpty()) {
+            EmptyHint("誤吸着の疑いがあるマーカーはありません。")
+            return@Column
+        }
+        candidates.forEach { candidate ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (candidate.nearbyExistingCardName == null) {
+                    Checkbox(
+                        checked = candidate.frameId in selected,
+                        onCheckedChange = { checked -> onToggle(candidate.frameId, checked) },
+                    )
+                } else {
+                    Spacer(Modifier.width(48.dp))
+                }
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "${formatTimeOfDay(candidate.capturedAt)}  現在: ${candidate.currentStopName}" +
+                            "  距離${"%.0f".format(candidate.distanceM)}m",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    if (candidate.nearbyExistingCardName != null) {
+                        Text(
+                            "候補選択が必要（近くに既存カード『${candidate.nearbyExistingCardName}』あり、自動作成しません）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            HorizontalDivider()
+        }
+    }
 }

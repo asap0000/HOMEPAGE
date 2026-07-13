@@ -24,6 +24,7 @@ import com.istech.buscourse.core.gpx.GpxCourseSegmentExport
 import com.istech.buscourse.core.gpx.GpxParseException
 import com.istech.buscourse.core.gpx.GpxPoint
 import com.istech.buscourse.core.gpx.GpxWaypoint
+import com.istech.buscourse.recording.FrameKind
 import com.istech.buscourse.recording.RecordingSessionStatus
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.StopMaster
@@ -78,16 +79,61 @@ data class MarkerTimelineRow(
 )
 
 /**
+ * ダブりグループ内の1コマ（フェーズA-1/B(a)）。[distanceM] はカード座標との距離（Haversine、
+ * 取得できない場合はnull）。[CourseRepository.applyDuplicateMerges] にそのまま渡し、距離最小の
+ * 1枚を代表として残す判定に使う。
+ */
+data class DuplicateFrameCandidate(
+    val frameId: Long,
+    val capturedAt: Long,
+    val distanceM: Double?,
+)
+
+/**
  * ダブり検出（統合候補）の1グループ（フェーズA-1、読み取り専用）。seq順で同一stop_card_idが
  * 連続し、かつ captured_at 間隔が [CourseRepository.DUPLICATE_GROUP_INTERVAL_MS] 未満の
- * マーカーコマ列をまとめたもの。
+ * マーカーコマ列をまとめたもの。[frameCandidates] は[timestamps]と同じ並び順（2026-07-14、
+ * フェーズB(a)承認キュー対応で追加）。
  */
 data class MarkerDuplicateGroup(
     val stopCardId: Long,
     val stopName: String,
     val count: Int,
     val timestamps: List<Long>,
+    val frameCandidates: List<DuplicateFrameCandidate>,
 )
+
+/**
+ * find-or-create候補の1件（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加、読み取り専用。
+ * [CourseRepository.analyzeFindOrCreateCandidates] の返り値）。マーカーコマの撮影位置と
+ * 現在割り当てられている停留所カード座標との距離が [CourseRepository.FIND_OR_CREATE_RADIUS_M]
+ * を超える＝誤吸着の疑いがある候補。[nearbyExistingCardName] が非nullの場合、コマ位置の半径内に
+ * 別の既存カードがあるため自動作成の対象にせず「候補選択が必要」としてUIでスキップする
+ * （Phase Bでは自動選択しない）。
+ */
+data class FindOrCreateCandidate(
+    val frameId: Long,
+    val capturedAt: Long,
+    val currentStopCardId: Long,
+    val currentStopName: String,
+    val distanceM: Double,
+    val frameLatitude: Double,
+    val frameLongitude: Double,
+    /** そのコマの実ファイル相対パス（`BusCourseStorage.resolve` で解決）。新規カード作成の写真元。 */
+    val fileRelPath: String,
+    /** 70m以内に別の既存カードがあればその名前。非nullなら「候補選択が必要」でチェック不可。 */
+    val nearbyExistingCardName: String?,
+)
+
+/** 承認キュー適用結果の集計（フェーズB、[CourseRepository.applyApprovedCandidates] の返り値）。 */
+data class ApplyApprovedResult(
+    val duplicatesMerged: Int,
+    val interruptionsApplied: Int,
+    val findOrCreateApplied: Int,
+    val hubFlagsApplied: Int,
+) {
+    val total: Int get() = duplicatesMerged + interruptionsApplied + findOrCreateApplied + hubFlagsApplied
+}
 
 /** セッション解析レポート全体（フェーズA-1、[CourseRepository.analyzeSessionMarkers] の返り値）。 */
 data class SessionMarkerAnalysis(
@@ -594,6 +640,14 @@ class CourseRepository(
                     stopName = card?.name ?: "停留所#$stopCardId",
                     count = j - i,
                     timestamps = (i until j).map { markedFrames[it].capturedAt },
+                    // timelineはmarkedFramesと同じ順序・同じ要素数で構築されているため、同じインデックスで対応する
+                    frameCandidates = (i until j).map { idx ->
+                        DuplicateFrameCandidate(
+                            frameId = markedFrames[idx].id,
+                            capturedAt = markedFrames[idx].capturedAt,
+                            distanceM = timeline[idx].distanceM,
+                        )
+                    },
                 )
             }
             i = j
@@ -695,6 +749,221 @@ class CourseRepository(
                 bestAnySpeedKmh,
             )
         }
+    }
+
+    // ------------------------------------------------------------------
+    // find-or-create候補の解析（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加、読み取り専用）
+    // ------------------------------------------------------------------
+
+    /**
+     * find-or-create候補の解析（フェーズB(c)、読み取り専用）。マーク済みフレームのうち、撮影位置と
+     * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M] を超えるもの
+     * （誤吸着の疑い）を候補として列挙する。各候補について、コマ位置の半径内に別の既存カードが
+     * あるかも判定し（[FindOrCreateCandidate.nearbyExistingCardName]）、あれば自動作成を避けて
+     * UI側で「候補選択が必要」として表示する。
+     */
+    suspend fun analyzeFindOrCreateCandidates(sessionId: Long): List<FindOrCreateCandidate> = withContext(Dispatchers.IO) {
+        val markedFrames = timelapseFrameDao.getMarkedFrames(sessionId)
+        if (markedFrames.isEmpty()) return@withContext emptyList()
+        val activeCards = busStopCardDao.getAllActive()
+
+        markedFrames.mapNotNull { frame ->
+            val stopCardId = frame.stopCardId ?: return@mapNotNull null
+            val lat = frame.latitude ?: return@mapNotNull null
+            val lon = frame.longitude ?: return@mapNotNull null
+            val assignedCard = activeCards.find { it.id == stopCardId } ?: busStopCardDao.getById(stopCardId) ?: return@mapNotNull null
+            val distanceM = GeoMath.haversineM(lat, lon, assignedCard.latitude, assignedCard.longitude)
+            if (distanceM <= FIND_OR_CREATE_RADIUS_M) return@mapNotNull null
+
+            val nearest = activeCards
+                .filter { it.id != stopCardId }
+                .map { it to GeoMath.haversineM(lat, lon, it.latitude, it.longitude) }
+                .filter { (_, d) -> d <= FIND_OR_CREATE_RADIUS_M }
+                .minByOrNull { (_, d) -> d }
+
+            FindOrCreateCandidate(
+                frameId = frame.id,
+                capturedAt = frame.capturedAt,
+                currentStopCardId = stopCardId,
+                currentStopName = assignedCard.name,
+                distanceM = distanceM,
+                frameLatitude = lat,
+                frameLongitude = lon,
+                fileRelPath = frame.fileRelPath,
+                nearbyExistingCardName = nearest?.first?.name,
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 承認キュー適用（②「コース編成(抽出)」フェーズB、2026-07-14追加）
+    //
+    // フェーズA/フェーズB(c)の読み取り専用解析が出した候補のうち、人が選んで承認したものだけを
+    // 実際にDBへ反映する。すべて suspend・冪等（同じ候補で再度呼んでも状態が壊れない）。
+    // 実データ実機での初の書き込み＋マイグレーションのため、既存機能・既存データへの影響を
+    // 最小化する設計にしている（詳細は各メソッドのKDoc参照）。
+    // ------------------------------------------------------------------
+
+    /**
+     * (a) ダブり統合の適用。[groups] は [analyzeSessionMarkers] が返す
+     * [MarkerDuplicateGroup.frameCandidates] のうち、承認（チェック）されたグループをそのまま渡す。
+     * 各グループについて、カード座標との距離が最小の1枚（距離不明なコマは代表に選ばれにくいよう
+     * 最大値扱いで比較）を代表として残し、他のコマの `stop_card_id` を NULL に戻す
+     * （[TimelapseFrameDao.clearStopCardOnFrame]）。
+     *
+     * 冪等性: 既に NULL のフレームへ再度 NULL を書いても結果は変わらない。1枚しかないグループ
+     * （既に統合済み）は何もしない。DB書き込みは単純な UPDATE のみのため1トランザクションに束ねる。
+     */
+    suspend fun applyDuplicateMerges(groups: List<List<DuplicateFrameCandidate>>): Int = withContext(Dispatchers.IO) {
+        var cleared = 0
+        database.withTransaction {
+            for (group in groups) {
+                if (group.size <= 1) continue
+                val keep = group.minByOrNull { it.distanceM ?: Double.MAX_VALUE } ?: continue
+                for (candidate in group) {
+                    if (candidate.frameId == keep.frameId) continue
+                    timelapseFrameDao.clearStopCardOnFrame(candidate.frameId)
+                    cleared++
+                }
+            }
+        }
+        cleared
+    }
+
+    /**
+     * (b) 割り込みの適用。[stopIds] は欠損×停車確定(STOP_CONFIRMED)と判定された停留所カードID
+     * （[analyzeCourseCoverage] の [MissingStop.classification]、承認されたもの）。
+     * 各停留所について、当該セッションのLORESフレームからカード座標に最も近いものへ
+     * `stop_card_id` を設定する（[TimelapseFrameDao.markStopCardOnLoresFrame]）。
+     *
+     * 安全策（要件外の追加）: 最近傍フレームが既に**別の**停留所のマーカーとして使われている場合は
+     * 上書きしない（他停留所の既存マーカーを壊さないため）。その場合はそのフレームを除外して
+     * 次に近いフレームを探す。候補がすべて他停留所に使用済みならその停留所はスキップする。
+     *
+     * 冪等性: 一度割り当てたフレームに同じstopIdを再度設定しても値は変わらない（no-op UPDATE）。
+     * 再実行時は該当停留所が既にマーク済みとなり [analyzeCourseCoverage] の欠損から外れるため、
+     * 通常はそもそも候補として再度渡されない。
+     */
+    suspend fun applyInterruptions(sessionId: Long, stopIds: List<Long>): Int = withContext(Dispatchers.IO) {
+        if (stopIds.isEmpty()) return@withContext 0
+        val loresFrames = timelapseFrameDao.getBySession(sessionId)
+            .filter { it.kind == FrameKind.LORES.name && it.latitude != null && it.longitude != null }
+        var applied = 0
+        database.withTransaction {
+            for (stopId in stopIds) {
+                val card = busStopCardDao.getById(stopId) ?: continue
+                val candidateFrame = loresFrames
+                    .filter { it.stopCardId == null || it.stopCardId == stopId }
+                    .minByOrNull { GeoMath.haversineM(it.latitude!!, it.longitude!!, card.latitude, card.longitude) }
+                    ?: continue
+                if (candidateFrame.stopCardId == stopId) continue // 既に割り当て済み（冪等・no-op）
+                timelapseFrameDao.markStopCardOnLoresFrame(candidateFrame.id, stopId)
+                applied++
+            }
+        }
+        applied
+    }
+
+    /**
+     * (c) find-or-create の適用。[candidates] は [analyzeFindOrCreateCandidates] の返り値のうち、
+     * `nearbyExistingCardName == null`（＝70m以内に別の既存カードが無い）かつ承認（チェック）された
+     * ものだけを渡すこと（70m以内に既存カードがある候補はUI側で選択不可にする、Phase Bでは
+     * 自動選択しない）。各候補について、そのLORESフレームから新規カードを作成し
+     * （`name = "候補%03d"` の連番、`needsMaturation = true`）、フレームの `stop_card_id` を
+     * 新カードidへ付替える。
+     *
+     * 実ファイルの扱いに注意: [CourseRepository.createStopCard] が受け取る `photoTempFile` は
+     * 内部で `renameTo`（失敗時は copy+delete）により**消費**される前提の一時ファイルである。
+     * そのままセッションのLORESフレーム実ファイル（`sessions/{id}/frames/...`）を渡すと、
+     * 元のセッション記録が消えてしまう（他の解析・再表示が壊れる）。そのため、まず一時コピーを
+     * 作ってからそれを渡す（既存データを壊さないための対応）。
+     *
+     * 冪等性: 適用直前に対象フレームの現在の `stop_card_id` を読み直し、[FindOrCreateCandidate]
+     * 取得時点の `currentStopCardId` と異なっていれば（＝取得後に既に処理済み・別途変更された）
+     * そのフレームはスキップする（新規カードの二重作成を防ぐ、[TimelapseFrameDao.getById]使用）。
+     */
+    suspend fun applyFindOrCreate(candidates: List<FindOrCreateCandidate>): Int = withContext(Dispatchers.IO) {
+        if (candidates.isEmpty()) return@withContext 0
+        var seq = nextCandidateNameSeq()
+        var applied = 0
+        for (candidate in candidates) {
+            val currentFrame = timelapseFrameDao.getById(candidate.frameId) ?: continue
+            if (currentFrame.stopCardId != candidate.currentStopCardId) continue // 冪等ガード
+
+            val sourceFile = BusCourseStorage.resolve(context, candidate.fileRelPath)
+            if (!sourceFile.exists()) continue
+
+            val tempCopy = newCaptureTempFile()
+            try {
+                sourceFile.copyTo(tempCopy, overwrite = true)
+            } catch (e: IOException) {
+                Log.e(TAG, "find-or-create: LORESフレームの一時コピーに失敗しました frameId=${candidate.frameId}", e)
+                continue
+            }
+
+            val newCardId = createStopCard(
+                name = "候補%03d".format(seq),
+                latitude = candidate.frameLatitude,
+                longitude = candidate.frameLongitude,
+                altitudeM = null,
+                notes = null,
+                riderCount = 0,
+                photoTempFile = tempCopy,
+                needsMaturation = true,
+            )
+            timelapseFrameDao.markStopCardOnLoresFrame(candidate.frameId, newCardId)
+            seq++
+            applied++
+        }
+        applied
+    }
+
+    /** [applyFindOrCreate] の連番の開始値。既存の「候補NNN」カード名の最大値+1から始める（衝突回避）。 */
+    private suspend fun nextCandidateNameSeq(): Int {
+        val maxExisting = busStopCardDao.getAllActive()
+            .mapNotNull { CANDIDATE_NAME_REGEX.matchEntire(it.name)?.groupValues?.get(1)?.toIntOrNull() }
+            .maxOrNull() ?: 0
+        return maxExisting + 1
+    }
+
+    /**
+     * (d) 拠点フラグの適用。[stopIds] はセッション解析の「拠点で分割」（承認されたもの）。
+     * `bus_stop_card.is_hub` を [hub] に設定する（[BusStopCardDao.setHub]）。
+     *
+     * 冪等性: 同じ値を再設定しても結果は変わらない（no-op UPDATE）。
+     */
+    suspend fun applyHubFlags(stopIds: List<Long>, hub: Boolean = true): Int = withContext(Dispatchers.IO) {
+        if (stopIds.isEmpty()) return@withContext 0
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            stopIds.forEach { id -> busStopCardDao.setHub(id, hub, now) }
+        }
+        stopIds.size
+    }
+
+    /**
+     * 承認キューの一括適用（フェーズBのUI「承認して適用」ボタンから呼ばれるオーケストレーション）。
+     * (a)〜(d) を順に呼ぶだけで、これ自体は追加のトランザクションを持たない
+     * （(c)は写真ファイルI/Oを伴うため、DBトランザクションと長時間のファイルI/Oを混在させない
+     * 既存方針＝[extractSegmentsFromSession]等の踏襲。各メソッドは個々に冪等・トランザクション済み）。
+     */
+    suspend fun applyApprovedCandidates(
+        sessionId: Long,
+        duplicateGroups: List<List<DuplicateFrameCandidate>>,
+        interruptionStopIds: List<Long>,
+        findOrCreateCandidates: List<FindOrCreateCandidate>,
+        hubStopIds: List<Long>,
+    ): ApplyApprovedResult = withContext(Dispatchers.IO) {
+        val merged = applyDuplicateMerges(duplicateGroups)
+        val interrupted = applyInterruptions(sessionId, interruptionStopIds)
+        val created = applyFindOrCreate(findOrCreateCandidates)
+        val hubApplied = applyHubFlags(hubStopIds)
+        ApplyApprovedResult(
+            duplicatesMerged = merged,
+            interruptionsApplied = interrupted,
+            findOrCreateApplied = created,
+            hubFlagsApplied = hubApplied,
+        )
     }
 
     /**
@@ -1101,6 +1370,17 @@ class CourseRepository(
 
         /** 欠損/割り込みレポート（フェーズA-2）: 停車確定とみなす最大速度（m/s、≒3.6km/h）。 */
         private const val COVERAGE_MIN_SPEED_MPS = 1.0
+
+        /**
+         * find-or-create候補（フェーズB(c)）: マーカーコマの撮影位置と現在割り当てられている
+         * 停留所カード座標との距離がこれを超えると誤吸着の疑いとみなす。**暫定値・実データ由来
+         * （session8実測での誤吸着距離を参考に [COVERAGE_RADIUS_M] と同じ値を採用）・後で調整可**。
+         * 同じ値をコマ位置近傍の「別の既存カードが無いか」の判定半径にも流用する。
+         */
+        private const val FIND_OR_CREATE_RADIUS_M = 70.0
+
+        /** find-or-create適用（フェーズB(c)）で作成する新規カード名 "候補NNN" のパース用。 */
+        private val CANDIDATE_NAME_REGEX = Regex("^候補(\\d{3})$")
 
         /**
          * 区間抽出対象のセッション種別（§3.9）。設計書は PARTIAL_RUN を主対象に記述しているが、
