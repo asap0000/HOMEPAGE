@@ -15,6 +15,8 @@ import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 
 /**
  * 区間軌跡（GPX由来のポリライン）の描画（設計書§5.7.1 `RouteTrackOverlay`）。
@@ -48,6 +50,36 @@ class RouteTrackOverlay(
             showSection(segmentId, feature, colorHex)
         }
         return true
+    }
+
+    /**
+     * コースの`route_point`（C-1で確定した連続ポリライン、起点→終点でchainage順に並んだ`(lat, lon)`列）を
+     * 1本の連続線として描画する（フェーズC-2）。区間ごとの`showSegment`（`segment_track`個別描画）とは
+     * 別の専用source/layer（[ROUTE_LINE_SOURCE_ID] / [ROUTE_LINE_LAYER_ID]）を使うため、両者は競合しない。
+     *
+     * [points]が2点未満（`LineString`を構成できない）の場合は何もしない
+     * （呼び出し側は`route_point`未確定コースとして`showSegment`へフォールバックする）。
+     * 既にsource/layerがあれば`setGeoJson`のみで更新し、レイヤの重複追加はしない。
+     */
+    suspend fun showRouteLine(points: List<Pair<Double, Double>>, colorHex: String) {
+        if (points.size < 2) return
+        val lngLats = points.map { (lat, lon) -> Point.fromLngLat(lon, lat) }
+        val feature = Feature.fromGeometry(LineString.fromLngLats(lngLats))
+        withContext(Dispatchers.Main) {
+            (style.getSourceAs<GeoJsonSource>(ROUTE_LINE_SOURCE_ID)
+                ?: GeoJsonSource(ROUTE_LINE_SOURCE_ID).also { style.addSource(it) })
+                .setGeoJson(feature)
+            if (style.getLayer(ROUTE_LINE_LAYER_ID) == null) {
+                style.addLayer(
+                    LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
+                        PropertyFactory.lineColor(Color.parseColor(colorHex)),
+                        PropertyFactory.lineWidth(4f),
+                        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+                    )
+                )
+            }
+        }
     }
 
     private suspend fun loadFeature(fromStopCardId: Long, toStopCardId: Long): Pair<Long, Feature>? =
@@ -88,5 +120,9 @@ class RouteTrackOverlay(
 
     companion object {
         private const val TAG = "RouteTrackOverlay"
+
+        /** [showRouteLine]専用のsource/layer ID（`showSegment`の`route-track-src-<id>`系とは別枠）。 */
+        private const val ROUTE_LINE_SOURCE_ID = "route-line-source"
+        private const val ROUTE_LINE_LAYER_ID = "route-line-layer"
     }
 }

@@ -237,13 +237,25 @@ private fun RouteMapContent(
                 val details = database.courseDao().getWithDetails(courseId)
                 val stops = details?.stops?.sortedBy { it.courseStop.sequenceIndex }.orEmpty()
 
+                // フェーズC-2: route_point（C-1で確定した連続ポリライン）があれば1本の連続線で描く。
+                // 未確定コース（route_pointが空/1点）では、従来どおりsegment_trackの区間再組立に
+                // フォールバックする（互換維持）。
                 val routeOverlay = RouteTrackOverlay(context, database, style)
-                stops.zipWithNext().forEach { (from, to) ->
-                    routeOverlay.showSegment(
-                        from.courseStop.stopCardId, to.courseStop.stopCardId, ROUTE_LINE_COLOR_HEX
+                val routePoints = database.routePointDao().getOrdered(courseId)
+                if (routePoints.size >= 2) {
+                    routeOverlay.showRouteLine(
+                        routePoints.map { it.lat to it.lon }, ROUTE_LINE_COLOR_HEX
                     )
+                } else {
+                    stops.zipWithNext().forEach { (from, to) ->
+                        routeOverlay.showSegment(
+                            from.courseStop.stopCardId, to.courseStop.stopCardId, ROUTE_LINE_COLOR_HEX
+                        )
+                    }
                 }
 
+                // ピンは旧・全アクティブカード表示ではなく、このコースの停留所だけに絞る。
+                val courseCards = stops.map { it.card }.distinctBy { it.id }
                 val sequenceIndexByCardId =
                     stops.associate { it.courseStop.stopCardId to it.courseStop.sequenceIndex }
                 stopSymbolOverlay?.onDestroy()
@@ -255,7 +267,7 @@ private fun RouteMapContent(
                     style = style,
                     onSymbolClick = { info -> tappedStop = info },
                 )
-                overlay.showAllActiveStops(sequenceIndexByCardId)
+                overlay.showStops(courseCards, sequenceIndexByCardId)
                 stopSymbolOverlay = overlay
 
                 // (A) 初期カメラ＝開いたコースの停留所範囲へauto-fit（設計書§9次工程の仕上げ）。

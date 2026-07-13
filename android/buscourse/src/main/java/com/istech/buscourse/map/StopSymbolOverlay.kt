@@ -97,6 +97,21 @@ class StopSymbolOverlay(
         }
     }
 
+    /**
+     * 指定した[cards]（呼び出し側が絞り込んだ停留所カード集合、例：特定コースの停留所のみ）を
+     * 地図上のピンとして再描画する（フェーズC-2、[showAllActiveStops]の絞り込み版）。
+     * 既存ピンは全削除してから作り直す点は[showAllActiveStops]と同じ。
+     *
+     * @param sequenceIndexByCardId `stopCardId → sequence_index`。無指定のカードは`data.sequenceIndex`が`null`になる。
+     */
+    suspend fun showStops(cards: List<BusStopCardEntity>, sequenceIndexByCardId: Map<Long, Int> = emptyMap()) {
+        withContext(Dispatchers.Main) {
+            symbolManager.deleteAll()
+            val options = cards.map { card -> buildSymbolOptions(card, sequenceIndexByCardId[card.id]) }
+            if (options.isNotEmpty()) symbolManager.create(options)
+        }
+    }
+
     private fun buildSymbolOptions(card: BusStopCardEntity, sequenceIndex: Int?): SymbolOptions {
         val data = JsonObject().apply {
             addProperty("stopCardId", card.id)
