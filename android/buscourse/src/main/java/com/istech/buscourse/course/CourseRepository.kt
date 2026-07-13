@@ -104,6 +104,39 @@ data class SessionMarkerAnalysis(
 )
 
 /**
+ * 欠損/割り込みレポート（②「コース編成(抽出)」フェーズA-2、2026-07-13追加、読み取り専用）の
+ * 停留所ごとの分類。[CourseRepository.analyzeCourseCoverage] のdwell判定結果。
+ */
+enum class StopCoverageClassification {
+    /** 半径内のいずれかの通過（パス）でdwell条件を満たした＝停車確定。マーク漏れ＝割り込み候補。 */
+    STOP_CONFIRMED,
+    /** 半径内に点はあるがdwell条件を満たさない＝停車せず通過しただけ。マーク不要。 */
+    PASS_THROUGH,
+    /** カード座標の半径内にGPS点が一つも無い＝コース外/未走行。 */
+    OUT_OF_COURSE,
+}
+
+/**
+ * 欠損/割り込みレポートの1停留所分（フェーズA-2）。[dwellSec]・[minSpeedKmh] は判定根拠になった
+ * パス（STOP_CONFIRMEDなら条件を満たした最長dwellのパス、PASS_THROUGHなら最長dwellのパス）の値。
+ * OUT_OF_COURSEでは両方null。
+ */
+data class MissingStop(
+    val stopId: Long,
+    val name: String,
+    val classification: StopCoverageClassification,
+    val dwellSec: Double?,
+    val minSpeedKmh: Double?,
+)
+
+/** 欠損/割り込みレポート全体（フェーズA-2、[CourseRepository.analyzeCourseCoverage] の返り値）。 */
+data class CourseCoverageReport(
+    val sessionId: Long,
+    val courseId: Long,
+    val missing: List<MissingStop>,
+)
+
+/**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
  *
  * - 停留所カードCRUD（写真の `stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 の
@@ -580,6 +613,91 @@ class CourseRepository(
     }
 
     /**
+     * 欠損/割り込みレポート（②「コース編成(抽出)」フェーズA-2、2026-07-13追加、読み取り専用）。
+     * [courseId] の停留所（`course_stop`）と、[sessionId] のマーク済み停留所
+     * （`timelapse_frame.stop_card_id`）を突き合わせ、未マーク停留所（欠損）を列挙する。
+     * 各欠損停留所は、カード座標近傍のGPS点列（[COVERAGE_RADIUS_M] 以内）から停車確定(dwell)判定
+     * （[classifyMissingStop]）して分類する。**読み取り専用**：DB書き込み・スキーマ変更は行わない。
+     */
+    suspend fun analyzeCourseCoverage(sessionId: Long, courseId: Long): CourseCoverageReport = withContext(Dispatchers.IO) {
+        val details = courseDao.getWithDetails(courseId)
+            ?: throw IllegalArgumentException("コースが見つかりません: id=$courseId")
+        val markedStopIds = timelapseFrameDao.getMarkedFrames(sessionId).mapNotNull { it.stopCardId }.toSet()
+        val points = gpsPointDao.getBySession(sessionId) // seq順
+
+        val missing = details.stops
+            .sortedBy { it.courseStop.sequenceIndex }
+            .map { it.card }
+            .distinctBy { it.id }
+            .filter { it.id !in markedStopIds }
+            .map { card -> classifyMissingStop(card, points) }
+
+        CourseCoverageReport(sessionId = sessionId, courseId = courseId, missing = missing)
+    }
+
+    /**
+     * 1停留所分の停車確定(dwell)判定（実データ校正済み、[analyzeCourseCoverage] 参照）。
+     * カード座標から半径 [COVERAGE_RADIUS_M] 以内のGPS点を集め、seq連続で時間間隔が
+     * [COVERAGE_PASS_GAP_MS] を超えたら別パスとして分割する（通過ごとに分割）。各パスの
+     * dwell＝そのパスの最終ts−先頭ts、minSpeed＝そのパスの最小speed。いずれかのパスで
+     * dwell≥[COVERAGE_DWELL_MIN_SEC] かつ minSpeed<[COVERAGE_MIN_SPEED_MPS] なら停車確定。
+     * 半径内に点が無ければ圏外、点はあるが停車条件を満たさなければ通過。
+     */
+    private fun classifyMissingStop(card: BusStopCardEntity, points: List<GpsPointEntity>): MissingStop {
+        val nearby = points.filter {
+            GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= COVERAGE_RADIUS_M
+        }
+        if (nearby.isEmpty()) {
+            return MissingStop(card.id, card.name, StopCoverageClassification.OUT_OF_COURSE, null, null)
+        }
+
+        // seq連続で時間間隔が閾値を超えたら別パスに分割（半径内の点だけを対象にした間隔判定）
+        val passes = mutableListOf<MutableList<GpsPointEntity>>()
+        for (p in nearby) {
+            val currentPass = passes.lastOrNull()
+            if (currentPass == null || p.tsEpochMs - currentPass.last().tsEpochMs > COVERAGE_PASS_GAP_MS) {
+                passes += mutableListOf(p)
+            } else {
+                currentPass += p
+            }
+        }
+
+        var confirmed = false
+        var bestConfirmedDwellSec = -1.0
+        var bestConfirmedSpeedKmh: Double? = null
+        var bestAnyDwellSec = -1.0
+        var bestAnySpeedKmh: Double? = null
+        for (pass in passes) {
+            val dwellSec = (pass.last().tsEpochMs - pass.first().tsEpochMs) / 1000.0
+            val minSpeedMps = pass.mapNotNull { it.speedMps }.minOrNull()
+            val minSpeedKmh = minSpeedMps?.let { it * 3.6 }
+            if (dwellSec > bestAnyDwellSec) {
+                bestAnyDwellSec = dwellSec
+                bestAnySpeedKmh = minSpeedKmh
+            }
+            if (dwellSec >= COVERAGE_DWELL_MIN_SEC && minSpeedMps != null && minSpeedMps < COVERAGE_MIN_SPEED_MPS) {
+                confirmed = true
+                if (dwellSec > bestConfirmedDwellSec) {
+                    bestConfirmedDwellSec = dwellSec
+                    bestConfirmedSpeedKmh = minSpeedKmh
+                }
+            }
+        }
+
+        return if (confirmed) {
+            MissingStop(card.id, card.name, StopCoverageClassification.STOP_CONFIRMED, bestConfirmedDwellSec, bestConfirmedSpeedKmh)
+        } else {
+            MissingStop(
+                card.id,
+                card.name,
+                StopCoverageClassification.PASS_THROUGH,
+                bestAnyDwellSec.takeIf { it >= 0 },
+                bestAnySpeedKmh,
+            )
+        }
+    }
+
+    /**
      * 完了済みセッションから停留所間の区間を切り出して `segment_track` へUPSERTする（設計書§3.9）。
      *
      * 訪問停留所列は §3.9 疑似コードの引数 `visitedStopsInOrder` を、そのセッションの
@@ -971,6 +1089,18 @@ class CourseRepository(
          * captured_at 間隔がこれ未満なら「誤って連打・多重マークした」統合候補とみなす。
          */
         private const val DUPLICATE_GROUP_INTERVAL_MS = 120_000L
+
+        /** 欠損/割り込みレポート（フェーズA-2）: カード座標からのdwell判定半径（実データ校正済み）。 */
+        private const val COVERAGE_RADIUS_M = 70.0
+
+        /** 欠損/割り込みレポート（フェーズA-2）: 半径内の点列を別パスに分割する時間間隔しきい値。 */
+        private const val COVERAGE_PASS_GAP_MS = 60_000L
+
+        /** 欠損/割り込みレポート（フェーズA-2）: 停車確定とみなす最小dwell秒数。 */
+        private const val COVERAGE_DWELL_MIN_SEC = 15.0
+
+        /** 欠損/割り込みレポート（フェーズA-2）: 停車確定とみなす最大速度（m/s、≒3.6km/h）。 */
+        private const val COVERAGE_MIN_SPEED_MPS = 1.0
 
         /**
          * 区間抽出対象のセッション種別（§3.9）。設計書は PARTIAL_RUN を主対象に記述しているが、

@@ -304,7 +304,12 @@ fun ExtractionScreen(
     }
 
     analysisResult?.let { result ->
-        SessionAnalysisDialog(analysis = result, onDismiss = { analysisResult = null })
+        SessionAnalysisDialog(
+            analysis = result,
+            courses = courses,
+            repository = repository,
+            onDismiss = { analysisResult = null },
+        )
     }
 
     editingMemoSessionId?.let { sessionId ->
