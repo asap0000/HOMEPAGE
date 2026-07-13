@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -59,6 +60,7 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.recording.BusRecordingService
+import com.istech.buscourse.recording.RecordingNotificationManager
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.RecordingStateStore
 import kotlinx.coroutines.delay
@@ -347,6 +349,17 @@ private fun RecordingActiveContent(
         ContextCompat.startForegroundService(context, intent)
     }
 
+    // 実車データ(session8, 2026-07-13)で通知バーの「停留所マーク」ボタンの押し損ね・
+    // 「効いていないと思っての再押し」が確認されたため、記録中画面にもオンスクリーンの
+    // マークボタンを追加する。通知ボタンと同じ経路（ACTION_MARK_STOP ブロードキャスト）を使うことで、
+    // 受信先（StopMarkReceiver → BusRecordingService.onManualStopMark）・デバウンス・
+    // フィードバック（Toast・振動）を通知ボタンと完全に共通化する（UI側で独自ロジックは持たない）。
+    fun markStop() {
+        context.sendBroadcast(
+            Intent(RecordingNotificationManager.ACTION_MARK_STOP).setPackage(context.packageName)
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -370,11 +383,28 @@ private fun RecordingActiveContent(
         val s = elapsedSec % 60
         Text("経過時間: %02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.bodyLarge)
         Text(
-            "停留所マークは通知バーの「停留所マーク」ボタンから行えます。",
+            "停留所に着いたら下のボタンを押してください。通知バーの「停留所マーク」ボタンからも同じ操作ができます。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
+        // 押しやすさ優先で大きめサイズ・ブランド基調色（istech/CLAUDE.md #3366FF = colorScheme.primary）。
+        // 二度押し対策はBusRecordingService側の既存デバウンス(2秒)に委ねる（UI側では追加ロックしない）。
+        Button(
+            onClick = { markStop() },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+        ) {
+            Icon(Icons.Filled.PinDrop, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("停留所マーク", style = MaterialTheme.typography.titleMedium)
+        }
+        Spacer(Modifier.height(8.dp))
         Button(
             onClick = { showConfirm = true },
             enabled = !stopRequested,

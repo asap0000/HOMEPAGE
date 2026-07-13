@@ -15,6 +15,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
@@ -70,6 +71,9 @@ class BusRecordingService : LifecycleService() {
     @Volatile private var currentSpeedKmh: Double = 0.0
     @Volatile private var thermalDegraded: Boolean = false
     @Volatile private var lastStopMarkElapsedMs: Long = 0L
+
+    /** 手動停留所マークのセッション内成功回数（Toastフィードバック用、2026-07-13追加）。 */
+    @Volatile private var stopMarkCount: Int = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -237,10 +241,8 @@ class BusRecordingService : LifecycleService() {
     private fun onManualStopMark() {
         if (isDebounced(lastStopMarkElapsedMs)) return
         lastStopMarkElapsedMs = SystemClock.elapsedRealtime()
-        vibrateShort()
 
-        val controller = cameraCaptureController ?: return
-        val location = controller.lastKnownLocation
+        val location = cameraCaptureController?.lastKnownLocation
         val nearest = location?.let { loc ->
             stopMasters.minByOrNull { GeoMath.haversineM(loc.latitude, loc.longitude, it.latitude, it.longitude) }
         }
@@ -252,9 +254,18 @@ class BusRecordingService : LifecycleService() {
             // 挙げているが、フェーズ0で凍結済みのスキーマ上は表現できない。
             // HIRES撮影をやめた新方式では stop_card_id 参照が無くマーカーもイベントも作れないため、
             // 写真保存はせず警告ログのみに留める。
+            // 実車データ(session8, 2026-07-13)で「押下しても効いていないように見えて数十秒後に
+            // 再押しする」誤操作が確認されたため、無反応にせずToastで明示する（振動はしない＝
+            // 成功時の振動パターンと区別できるようにする）。
             Log.w(TAG, "手動停留所マーク: 対象停留所を特定できないため記録できません")
+            Toast.makeText(this, "近くに停留所カードがありません", Toast.LENGTH_SHORT).show()
             return
         }
+
+        vibrateMarkSuccess()
+        stopMarkCount++
+        val stopLabel = nearest.name?.takeIf { it.isNotBlank() } ?: "停留所#${nearest.id}"
+        Toast.makeText(this, "停留所マーク: ${stopLabel}（${stopMarkCount}件目）", Toast.LENGTH_SHORT).show()
 
         val markTs = System.currentTimeMillis()
         val distance = location?.let {
@@ -283,9 +294,14 @@ class BusRecordingService : LifecycleService() {
     private fun isDebounced(previousElapsedMs: Long, intervalMs: Long = NOTIFICATION_BUTTON_DEBOUNCE_MS): Boolean =
         SystemClock.elapsedRealtime() - previousElapsedMs < intervalMs
 
-    /** 通知アクションボタン押下の触覚フィードバック。 */
-    private fun vibrateShort() {
-        val effect = VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE)
+    /**
+     * 停留所マーク成功時の触覚フィードバック（短-強の2連、2026-07-13強化）。
+     * 実車データ(session8)で「押した実感が無く再押ししてしまう」誤操作が確認されたため、
+     * 単発50msの[VibrationEffect.createOneShot]から、はっきり分かる波形パターンへ変更した。
+     * 失敗時（最寄り停留所なし）は振動しない（Toastのみ）ことで成功/失敗を区別できるようにする。
+     */
+    private fun vibrateMarkSuccess() {
+        val effect = VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vibratorManager.defaultVibrator.vibrate(effect)
