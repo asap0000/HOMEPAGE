@@ -7,6 +7,11 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -42,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,8 +58,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
@@ -64,6 +74,7 @@ import com.istech.buscourse.recording.RecordingNotificationManager
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.RecordingStateStore
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 
 /**
@@ -127,6 +138,7 @@ fun RecordingScreen(
 @Composable
 private fun RecordingSetupContent(repository: CourseRepository) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
     var courses by remember { mutableStateOf<List<CourseEntity>>(emptyList()) }
@@ -166,6 +178,26 @@ private fun RecordingSetupContent(repository: CourseRepository) {
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
 
+    // --- 画角調整用カメラプレビュー（バックログ「思いつき1」）---
+    // 記録開始前のこの画面だけがPreviewをbindする。記録開始後はBusRecordingService側の
+    // CameraCaptureControllerがImageAnalysis/ImageCaptureを同じ背面カメラにbindするため、
+    // フォアグラウンドサービス起動直前とonDispose（画面離脱）の両方でunbindAll()して確実に譲る。
+    val previewView = remember { PreviewView(context) }
+    var previewCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    LaunchedEffect(cameraGranted) {
+        if (!cameraGranted) return@LaunchedEffect
+        try {
+            val provider = ProcessCameraProvider.getInstance(context).await()
+            previewCameraProvider = provider
+            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            provider.unbindAll()
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+        } catch (e: Exception) {
+            Toast.makeText(context, "カメラプレビューを開始できませんでした: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+    DisposableEffect(Unit) { onDispose { previewCameraProvider?.unbindAll() } }
+
     fun startRecording() {
         if (!cameraGranted || !locationGranted) {
             Toast.makeText(context, "カメラと位置情報の権限を許可してください", Toast.LENGTH_LONG).show()
@@ -181,6 +213,9 @@ private fun RecordingSetupContent(repository: CourseRepository) {
             if (driverId.isNotBlank()) putExtra(BusRecordingService.EXTRA_DRIVER_ID, driverId.trim())
             if (vehicleId.isNotBlank()) putExtra(BusRecordingService.EXTRA_VEHICLE_ID, vehicleId.trim())
         }
+        // BusRecordingService（CameraCaptureController）が同じ背面カメラをbindし直すため、
+        // サービス起動前にプレビュー側のbindを解いて競合を避ける。
+        previewCameraProvider?.unbindAll()
         ContextCompat.startForegroundService(context, intent)
         // isRecordingFlowがtrueになり次第、RecordingScreen側で自動的にACTIVE表示へ切り替わる。
         // ここではボタンの二重タップ防止のためだけにstartingを使う。
@@ -197,6 +232,31 @@ private fun RecordingSetupContent(repository: CourseRepository) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // 画角調整用カメラプレビュー（記録開始前のみ表示。記録中画面(RecordingActiveContent)には出さない）
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .clip(RoundedCornerShape(12.dp)),
+        ) {
+            if (cameraGranted) {
+                AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "カメラを許可すると画角を調整できます",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         Text("記録の種類", style = MaterialTheme.typography.titleMedium)
         SessionTypeOption(
             selected = sessionType == RecordingSessionType.FULL_RUN,
