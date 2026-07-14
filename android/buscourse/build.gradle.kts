@@ -66,6 +66,13 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric がアプリのリソース/マニフェストを読めるようにする（:app と同じ設定、§後述テスト基盤新設）
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -133,4 +140,13 @@ dependencies {
 
     // 位置情報は android.location.LocationManager / GPS_PROVIDER のみ（D1）。
     // play-services-location は追加しないこと。
+
+    // ---- 単体テスト (JVM実行。APKには一切入らない。②「コース編成(抽出)」解析ロジックの
+    //      単体テスト基盤新設、2026-07-14。バージョンは:appのテスト依存・Version Catalogに合わせる) ----
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core.ktx)
+    testImplementation(libs.truth)
+    testImplementation(libs.androidx.room.testing)
 }
