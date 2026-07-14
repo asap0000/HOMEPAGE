@@ -377,15 +377,19 @@ private fun DuplicateGroupRowView(
 // セクション4「拠点で分割」（②「コース編成(抽出)」フェーズA-2、2026-07-13追加）
 // ------------------------------------------------------------------
 
-/** [splitByHubs] が返す1断片（拠点マーク間の非拠点マーク列）。 */
-private data class CourseFragment(
+/**
+ * [splitByHubs] が返す1断片（拠点マーク間の非拠点マーク列）。
+ * S4「コース創設」（[CourseCreateScreen]）でも断片プレビュー・コース仕様生成に使うため internal 化
+ * （2026-07-14、出典: 元は本ファイルのセクション4用 private ヘルパー）。
+ */
+internal data class CourseFragment(
     val startAt: Long,
     val endAt: Long,
     val stops: List<MarkerTimelineRow>,
 )
 
 /** [splitByHubs] の返り値。 */
-private data class HubSplitResult(
+internal data class HubSplitResult(
     val fragments: List<CourseFragment>,
     /** 境界となった拠点イベント（連続する拠点マークをまとめたグループ）ごとの表示ラベル。 */
     val hubEventLabels: List<String>,
@@ -396,8 +400,9 @@ private data class HubSplitResult(
  * 先頭から走査し、`stopCardId` が [hubStopCardIds] に含まれるマークを境界とする。連続する境界
  * （＝拠点イベント）はまとめて1境界とし、境界間の非拠点マーク列を1断片とする
  * （session8実測＝拠点2点選択で3断片になる挙動）。
+ * S4「コース創設」（[CourseCreateScreen]）と共用するため internal 化（2026-07-14）。
  */
-private fun splitByHubs(timeline: List<MarkerTimelineRow>, hubStopCardIds: Set<Long>): HubSplitResult {
+internal fun splitByHubs(timeline: List<MarkerTimelineRow>, hubStopCardIds: Set<Long>): HubSplitResult {
     if (hubStopCardIds.isEmpty()) return HubSplitResult(emptyList(), emptyList())
 
     val fragments = mutableListOf<CourseFragment>()

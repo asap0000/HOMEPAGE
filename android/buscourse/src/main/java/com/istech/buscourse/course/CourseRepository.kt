@@ -185,6 +185,38 @@ data class CourseCoverageReport(
 )
 
 /**
+ * 全体レポート（トップダウン創設フェーズ、course非依存の停車確認、
+ * [CourseRepository.analyzeSessionCoverage] の返り値）。
+ */
+data class SessionCoverageReport(
+    val sessionId: Long,
+    /** OUT_OF_COURSE を除外した、軌跡コリドー内カード（STOP_CONFIRMED / PASS_THROUGH）。 */
+    val candidates: List<MissingStop>,
+)
+
+/**
+ * コース創設（トップダウン、S3）の1停留所の由来（[CourseRepository.createCoursesFromSession] の入力）。
+ * [Existing]=既存カード（[A]吸着/[C]停車確認）、[NewFromFrame]=LORESマーカーフレームから新規カード
+ * 作成（[B]find-or-create）。
+ */
+sealed interface CourseStopSource {
+    data class Existing(val cardId: Long) : CourseStopSource
+    data class NewFromFrame(val frameId: Long) : CourseStopSource
+}
+
+/** 創設する1コースの仕様（停留所は course_stop の順序どおり）。 */
+data class CourseCreationSpec(
+    val name: String,
+    val stops: List<CourseStopSource>,
+)
+
+/** 創設結果（[CourseRepository.createCoursesFromSession] の返り値）。createdCourseIds は specs と同じ並び。 */
+data class CourseCreationResult(
+    val createdCourseIds: List<Long>,
+    val newCardCount: Int,
+)
+
+/**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
  *
  * - 停留所カードCRUD（写真の `stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 の
@@ -567,6 +599,18 @@ class CourseRepository(
     suspend fun getAllStopCardUsage(): Map<Long, Pair<String, Int>> =
         courseStopDao.getAllUsage().associate { it.cardId to (it.courseName to it.sequenceIndex) }
 
+    /**
+     * コースを削除する（コース＝参照リストのため物理削除）。course_stop / route_point / course_segment は
+     * FK ON DELETE CASCADE で連動削除される。停留所カード・記録セッションには触れない（源泉として残す）。
+     * base_course_id で本コースを基底参照している他コースがあれば、その参照は SET NULL される。
+     * 冪等: 存在しないIDを渡しても何も起きない。
+     */
+    suspend fun deleteCourse(courseId: Long) = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            courseDao.deleteById(courseId)
+        }
+    }
+
     // ------------------------------------------------------------------
     // 試走ログからの区間自動抽出（§3.9）
     // ------------------------------------------------------------------
@@ -693,16 +737,39 @@ class CourseRepository(
     }
 
     /**
+     * 全体レポート（トップダウン創設フェーズ、course非依存の停車確認、読み取り専用）。
+     * まだコースが無い状態から、セッション軌跡の近傍（軌跡コリドー半径 [COVERAGE_CORRIDOR_R_M]）に
+     * ある登録カードのうち、マーク未済のものを [classifyMissingStop] で分類する。[analyzeCourseCoverage]
+     * と異なりコース（`course_stop`）を前提にせず、登録済み全カード（[BusStopCardDao.getAllActive]）を
+     * 走査対象にする。OUT_OF_COURSE（コリドー外）は候補から除外し、STOP_CONFIRMED / PASS_THROUGH を
+     * 割り込み候補として返す（UI側はSTOP_CONFIRMEDのみ確定可にする想定）。**読み取り専用**：
+     * DB書き込み・スキーマ変更は行わない。
+     */
+    suspend fun analyzeSessionCoverage(sessionId: Long): SessionCoverageReport = withContext(Dispatchers.IO) {
+        val points = gpsPointDao.getBySession(sessionId) // seq順
+        val markedIds = timelapseFrameDao.getMarkedFrames(sessionId).mapNotNull { it.stopCardId }.toSet()
+
+        val candidates = busStopCardDao.getAllActive()
+            .filter { it.id !in markedIds }
+            .map { card -> classifyMissingStop(card, points, COVERAGE_CORRIDOR_R_M) }
+            .filter { it.classification != StopCoverageClassification.OUT_OF_COURSE }
+
+        SessionCoverageReport(sessionId = sessionId, candidates = candidates)
+    }
+
+    /**
      * 1停留所分の停車確定(dwell)判定（実データ校正済み、[analyzeCourseCoverage] 参照）。
-     * カード座標から半径 [COVERAGE_RADIUS_M] 以内のGPS点を集め、seq連続で時間間隔が
-     * [COVERAGE_PASS_GAP_MS] を超えたら別パスとして分割する（通過ごとに分割）。各パスの
+     * カード座標から半径 [radiusM]（デフォルト [COVERAGE_RADIUS_M]）以内のGPS点を集め、seq連続で
+     * 時間間隔が [COVERAGE_PASS_GAP_MS] を超えたら別パスとして分割する（通過ごとに分割）。各パスの
      * dwell＝そのパスの最終ts−先頭ts、minSpeed＝そのパスの最小speed。いずれかのパスで
      * dwell≥[COVERAGE_DWELL_MIN_SEC] かつ minSpeed<[COVERAGE_MIN_SPEED_MPS] なら停車確定。
      * 半径内に点が無ければ圏外、点はあるが停車条件を満たさなければ通過。
+     * [radiusM] は [analyzeSessionCoverage]（トップダウン創設、コリドー半径 [COVERAGE_CORRIDOR_R_M]）
+     * からも共用するための引数化（2026-07-14追加、デフォルト値により既存呼び出しの挙動は不変）。
      */
-    private fun classifyMissingStop(card: BusStopCardEntity, points: List<GpsPointEntity>): MissingStop {
+    private fun classifyMissingStop(card: BusStopCardEntity, points: List<GpsPointEntity>, radiusM: Double = COVERAGE_RADIUS_M): MissingStop {
         val nearby = points.filter {
-            GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= COVERAGE_RADIUS_M
+            GeoMath.haversineM(it.lat, it.lon, card.latitude, card.longitude) <= radiusM
         }
         if (nearby.isEmpty()) {
             return MissingStop(card.id, card.name, StopCoverageClassification.OUT_OF_COURSE, null, null)
@@ -760,7 +827,8 @@ class CourseRepository(
 
     /**
      * find-or-create候補の解析（フェーズB(c)、読み取り専用）。マーク済みフレームのうち、撮影位置と
-     * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M] を超えるもの
+     * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M]
+     * （拠点カードは [FIND_OR_CREATE_HUB_RADIUS_M]、[findOrCreateRadiusFor] 参照）を超えるもの
      * （誤吸着の疑い）を候補として列挙する。各候補について、コマ位置の半径内に別の既存カードが
      * あるかも判定し（[FindOrCreateCandidate.nearbyExistingCardName]）、あれば自動作成を避けて
      * UI側で「候補選択が必要」として表示する。
@@ -776,12 +844,13 @@ class CourseRepository(
             val lon = frame.longitude ?: return@mapNotNull null
             val assignedCard = activeCards.find { it.id == stopCardId } ?: busStopCardDao.getById(stopCardId) ?: return@mapNotNull null
             val distanceM = GeoMath.haversineM(lat, lon, assignedCard.latitude, assignedCard.longitude)
-            if (distanceM <= FIND_OR_CREATE_RADIUS_M) return@mapNotNull null
+            val assignRadius = findOrCreateRadiusFor(assignedCard)
+            if (distanceM <= assignRadius) return@mapNotNull null
 
             val nearest = activeCards
                 .filter { it.id != stopCardId }
                 .map { it to GeoMath.haversineM(lat, lon, it.latitude, it.longitude) }
-                .filter { (_, d) -> d <= FIND_OR_CREATE_RADIUS_M }
+                .filter { (card, d) -> d <= findOrCreateRadiusFor(card) }
                 .minByOrNull { (_, d) -> d }
 
             FindOrCreateCandidate(
@@ -797,6 +866,13 @@ class CourseRepository(
             )
         }
     }
+
+    /**
+     * find-or-create候補判定用の半径選択（[FIND_OR_CREATE_RADIUS_M] / [FIND_OR_CREATE_HUB_RADIUS_M]）。
+     * 拠点（[BusStopCardEntity.isHub]）カードは敷地が広いため、半径を広げて候補から外す。
+     */
+    private fun findOrCreateRadiusFor(card: BusStopCardEntity): Double =
+        if (card.isHub) FIND_OR_CREATE_HUB_RADIUS_M else FIND_OR_CREATE_RADIUS_M
 
     // ------------------------------------------------------------------
     // 承認キュー適用（②「コース編成(抽出)」フェーズB、2026-07-14追加）
@@ -1157,6 +1233,143 @@ class CourseRepository(
             routePointDao.insertAll(routePoints)
             routePoints.size
         }
+    }
+
+    // ------------------------------------------------------------------
+    // コース創設（トップダウン、S3オーケストレーション、2026-07-14追加）
+    //
+    // フェーズS1（拠点/停車確認、[analyzeSessionCoverage]）・S2（コース仕様決定、UI側）を経て、
+    // 複数コースを一括で「創設」する。既存の抽出系（applyFindOrCreate等）とは別系統で、
+    // 既存コース・既存カードは一切変更しない（新規追加のみ）。
+    // ------------------------------------------------------------------
+
+    /**
+     * コース創設（トップダウン、S3）。[specs] は作成する各コースの仕様（停留所は course_stop の
+     * 順序どおり）。各停留所は既存カード（[CourseStopSource.Existing]）か、LORESマーカーフレームからの
+     * 新規カード作成（[CourseStopSource.NewFromFrame]、find-or-create相当）のいずれか。
+     *
+     * 処理手順:
+     * 1. 全 [specs] 横断で [CourseStopSource.NewFromFrame] の frameId を distinct 収集し、
+     *    frameIdごとに1回だけ新規カードを作成する（[applyFindOrCreate] と同じ「実ファイルは
+     *    一時コピーしてから渡す」方式。フレーム実ファイルは [createStopCard] 内部で
+     *    renameTo/copy+delete により消費されるため、コピーを渡さないとセッション記録の実ファイルが
+     *    消えてしまう）。命名は `"S{sessionId}-NNN"`（[nextSessionCardNameSeq] 参照、
+     *    [nextCandidateNameSeq] に倣った衝突回避）。作成後は [TimelapseFrameDao.markStopCardOnLoresFrame]
+     *    でフレームを新カードへ付替える。
+     * 2. 各 spec ごとに、stopsをcardId列へ解決する（`Existing`→そのID、`NewFromFrame`→手順1で
+     *    作ったID。手順1で作成に失敗した frameId はその停留所をスキップしてログに残す）。
+     *    重複cardIdは順序を保ったまま最初の1つだけ残す（`distinct`）。続けて [createCourse] →
+     *    [setCourseStops]（stopsが空ならコースだけ作る）→ [confirmCourseRouteFromSession] で
+     *    route_point を生成する。
+     *
+     * **冪等ではない**：呼ぶたびに新しいコース（と、NewFromFrame分の新しいカード）を作成する
+     * （創設＝新規作成という操作の意味論上、意図的に非冪等）。同一 frameId を同一呼び出し内で
+     * 二重作成しないことは手順1の distinct 収集で担保するが、既に別セッション処理等で付替え済みの
+     * frameId が渡された場合でも、本関数は「そのフレームから新カードを作って付替える」という
+     * 意味なのでそのまま作成する。
+     *
+     * 既存コース・既存カードは一切変更しない（新規追加のみ）。カード作成はファイルI/Oを伴うため、
+     * 既存の[applyFindOrCreate]/[applyApprovedCandidates]と同じ方針で巨大な単一トランザクションに
+     * せず、個々のDAO操作は既存のものを使う。
+     */
+    suspend fun createCoursesFromSession(
+        sessionId: Long,
+        specs: List<CourseCreationSpec>,
+        kind: CourseKind = CourseKind.STANDARD,
+    ): CourseCreationResult = withContext(Dispatchers.IO) {
+        // 手順1: NewFromFrameのframeIdをspecs横断でdistinct収集し、1回だけ新規カード作成
+        val frameIds = specs.flatMap { it.stops }
+            .filterIsInstance<CourseStopSource.NewFromFrame>()
+            .map { it.frameId }
+            .distinct()
+
+        var seq = nextSessionCardNameSeq(sessionId)
+        val newCardIdByFrameId = mutableMapOf<Long, Long>()
+        for (frameId in frameIds) {
+            val frame = timelapseFrameDao.getById(frameId)
+            if (frame == null) {
+                Log.w(TAG, "コース創設: フレームが見つからないためスキップします frameId=$frameId")
+                continue
+            }
+            val lat = frame.latitude
+            val lon = frame.longitude
+            if (lat == null || lon == null) {
+                Log.w(TAG, "コース創設: フレームに座標が無いためスキップします frameId=$frameId")
+                continue
+            }
+            val sourceFile = BusCourseStorage.resolve(context, frame.fileRelPath)
+            if (!sourceFile.exists()) {
+                Log.w(TAG, "コース創設: フレーム実ファイルが見つからないためスキップします frameId=$frameId")
+                continue
+            }
+            val tempCopy = newCaptureTempFile()
+            try {
+                sourceFile.copyTo(tempCopy, overwrite = true)
+            } catch (e: IOException) {
+                Log.e(TAG, "コース創設: フレームの一時コピーに失敗しました frameId=$frameId", e)
+                continue
+            }
+            val newCardId = createStopCard(
+                name = "S%d-%03d".format(sessionId, seq),
+                latitude = lat,
+                longitude = lon,
+                altitudeM = null,
+                notes = null,
+                riderCount = 0,
+                photoTempFile = tempCopy,
+                needsMaturation = true,
+            )
+            timelapseFrameDao.markStopCardOnLoresFrame(frameId, newCardId)
+            newCardIdByFrameId[frameId] = newCardId
+            seq++
+        }
+
+        // 手順2: specごとにコース生成
+        val createdCourseIds = mutableListOf<Long>()
+        for (spec in specs) {
+            val resolvedCardIds = spec.stops.mapNotNull { source ->
+                when (source) {
+                    is CourseStopSource.Existing -> source.cardId
+                    is CourseStopSource.NewFromFrame -> {
+                        val newCardId = newCardIdByFrameId[source.frameId]
+                        if (newCardId == null) {
+                            Log.w(
+                                TAG,
+                                "コース創設: frameId=${source.frameId} の新規カード作成に失敗したため、" +
+                                    "コース「${spec.name}」のこの停留所をスキップします",
+                            )
+                        }
+                        newCardId
+                    }
+                }
+            }.distinct()
+
+            val courseId = createCourse(spec.name, kind)
+            setCourseStops(courseId, resolvedCardIds)
+            confirmCourseRouteFromSession(courseId, sessionId)
+            createdCourseIds += courseId
+        }
+
+        CourseCreationResult(
+            createdCourseIds = createdCourseIds,
+            newCardCount = newCardIdByFrameId.size,
+        )
+    }
+
+    /**
+     * [createCoursesFromSession] の連番の開始値。既存の `"S{sessionId}-NNN"` カード名の最大値+1から
+     * 始める（[nextCandidateNameSeq] に倣った衝突回避）。セッションIDが異なれば別の連番空間になる。
+     */
+    private suspend fun nextSessionCardNameSeq(sessionId: Long): Int {
+        val maxExisting = busStopCardDao.getAllActive()
+            .mapNotNull { card ->
+                val match = SESSION_CARD_NAME_REGEX.matchEntire(card.name) ?: return@mapNotNull null
+                val (sid, seqStr) = match.destructured
+                if (sid.toLongOrNull() != sessionId) return@mapNotNull null
+                seqStr.toIntOrNull()
+            }
+            .maxOrNull() ?: 0
+        return maxExisting + 1
     }
 
     /**
@@ -1555,6 +1768,13 @@ class CourseRepository(
         /** 欠損/割り込みレポート（フェーズA-2）: カード座標からのdwell判定半径（実データ校正済み）。 */
         private const val COVERAGE_RADIUS_M = 70.0
 
+        /**
+         * セッション全体レポート（トップダウン創設フェーズ、[analyzeSessionCoverage]）: 軌跡コリドー
+         * （ポリライン最短距離での近傍判定）半径。当面 [COVERAGE_RADIUS_M] と同値だが、トップダウン
+         * 走査は用途が異なるため将来別調整できるよう独立定数化しておく。**暫定値・後で調整可**。
+         */
+        private const val COVERAGE_CORRIDOR_R_M = 70.0
+
         /** 欠損/割り込みレポート（フェーズA-2）: 半径内の点列を別パスに分割する時間間隔しきい値。 */
         private const val COVERAGE_PASS_GAP_MS = 60_000L
 
@@ -1572,8 +1792,22 @@ class CourseRepository(
          */
         private const val FIND_OR_CREATE_RADIUS_M = 70.0
 
+        /**
+         * find-or-create候補（フェーズB(c)）: 拠点（[BusStopCardEntity.isHub]）カード用の判定半径。
+         * 拠点（園）は敷地が広く、マーカーが登録カードから[FIND_OR_CREATE_RADIUS_M]を超えても同じ拠点
+         * のことがあるため、拠点カードだけ半径を広げて誤って新規カード化候補に出さないようにする。
+         * **暫定値・後で調整可**。
+         */
+        private const val FIND_OR_CREATE_HUB_RADIUS_M = 180.0
+
         /** find-or-create適用（フェーズB(c)）で作成する新規カード名 "候補NNN" のパース用。 */
         private val CANDIDATE_NAME_REGEX = Regex("^候補(\\d{3})$")
+
+        /**
+         * コース創設（トップダウン、S3、[createCoursesFromSession]）で作成する新規カード名
+         * `"S{sessionId}-NNN"` のパース用（グループ1=sessionId、グループ2=連番）。
+         */
+        private val SESSION_CARD_NAME_REGEX = Regex("^S(\\d+)-(\\d{3})$")
 
         /**
          * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定の一次経路

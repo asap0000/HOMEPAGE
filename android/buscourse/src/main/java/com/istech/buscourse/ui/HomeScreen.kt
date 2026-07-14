@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
@@ -43,6 +44,10 @@ import androidx.compose.ui.unit.dp
  * 【2026-07-12追加】フェーズ3「地図データ管理」（`.iscmap`インポート・使用パッケージ切替、
  * 設計書§5.6）への導線を追加。コース単位の地図表示（§5.7）はコース詳細画面（[CourseDetailScreen]）
  * の「地図表示」ボタンから遷移する（地図パッケージの管理と、コースの地図閲覧は別画面のため）。
+ *
+ * 【2026-07-14追加】S4「コース創設」（トップダウン、記録セッションから2軸マトリクス評価→承認→
+ * 拠点分割→新規コース群を生成、[CourseCreateScreen]）への導線を追加。既存「コース編成」は
+ * 「コース編集」に改称（ラベルのみ。既存の順列編成機能自体は変更しない）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,6 +56,7 @@ fun HomeScreen(
     onOpenRecording: () -> Unit,
     onOpenStopCards: () -> Unit,
     onOpenCourses: () -> Unit,
+    onOpenCourseCreate: () -> Unit,
     onOpenExtraction: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
@@ -88,9 +94,15 @@ fun HomeScreen(
             )
             HomeMenuCard(
                 icon = Icons.Filled.Route,
-                title = "コース編成",
+                title = "コース編集",
                 description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX入出力）",
                 onClick = onOpenCourses,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.AddCircle,
+                title = "コース創設",
+                description = "記録セッションから2軸評価でコースを新規に創ります",
+                onClick = onOpenCourseCreate,
             )
             HomeMenuCard(
                 icon = Icons.Filled.Timeline,

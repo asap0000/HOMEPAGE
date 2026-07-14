@@ -71,6 +71,16 @@ interface CourseDao {
      */
     @Query("UPDATE course SET source_session_id = :sourceSessionId, updated_at = :updatedAt WHERE id = :courseId")
     suspend fun updateSourceSession(courseId: Long, sourceSessionId: Long, updatedAt: Long)
+
+    /**
+     * コース削除（コース削除機能、2026-07-14追加、
+     * [com.istech.buscourse.course.CourseRepository.deleteCourse]が使用）。
+     * `course` は参照リストのため物理削除。`course_stop`/`route_point`/`course_segment` は
+     * ON DELETE CASCADE で連動削除される。停留所カード・記録セッションには一切触れない。
+     * 存在しないIDを渡しても0件更新で終わるだけで例外にならない（冪等）。
+     */
+    @Query("DELETE FROM course WHERE id = :courseId")
+    suspend fun deleteById(courseId: Long)
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */

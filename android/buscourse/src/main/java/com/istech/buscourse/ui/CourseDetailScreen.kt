@@ -22,12 +22,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -101,6 +103,7 @@ fun CourseDetailScreen(
     var busy by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
     var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var unusedOnlyFilter by remember { mutableStateOf(false) }
@@ -229,6 +232,22 @@ fun CourseDetailScreen(
         }
     }
 
+    fun deleteCourse() {
+        busy = true
+        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）。二度押しは
+        // 他の書き込み系操作と同じ共有busyフラグで防ぐ。
+        viewModel.deleteCourse(courseId) { result ->
+            busy = false
+            result.onSuccess {
+                viewModel.clearCourseStopDraft(courseId)
+                Toast.makeText(context, "コースを削除しました", Toast.LENGTH_SHORT).show()
+                onBack()
+            }.onFailure { e ->
+                Toast.makeText(context, "削除に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     val cardNameById = remember(details) {
         details?.stops?.associate { it.card.id to it.card.name }.orEmpty()
     }
@@ -257,6 +276,9 @@ fun CourseDetailScreen(
                     }
                     IconButton(onClick = { exportCourse() }, enabled = !busy && details != null) {
                         Icon(Icons.Filled.FileUpload, contentDescription = "GPXエクスポート")
+                    }
+                    IconButton(onClick = { showDeleteConfirm = true }, enabled = !busy && details != null) {
+                        Icon(Icons.Filled.Delete, contentDescription = "コースを削除")
                     }
                 },
             )
@@ -544,6 +566,35 @@ fun CourseDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showLeaveConfirm = false }) { Text("編成画面に留まる") }
+            },
+        )
+    }
+
+    if (showDeleteConfirm) {
+        val courseName = details?.course?.name ?: "このコース"
+        val sourceSessionId = details?.course?.sourceSessionId
+        val sessionText = if (sourceSessionId != null) "記録セッション（#$sourceSessionId）" else "記録セッション"
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("${courseName}を削除しますか？") },
+            text = {
+                Text(
+                    "・この操作で course_stop・route_point・区間も一緒に削除されます。\n" +
+                        "・停留所カードと${sessionText}は残ります。元データがある限り、いつでも再創設できます。\n" +
+                        "⚠ このコースがナビの案内情報として採用・登録されている場合、その案内情報は失われます。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        deleteCourse()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("キャンセル") }
             },
         )
     }

@@ -10,6 +10,8 @@ import com.istech.buscourse.core.data.MapDataPackageEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
+import com.istech.buscourse.course.CourseCreationResult
+import com.istech.buscourse.course.CourseCreationSpec
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.DuplicateFrameCandidate
@@ -322,6 +324,26 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * コース創設（トップダウン、S4「コース創設」画面 [CourseCreateScreen] 「創設」ボタン、
+     * 2026-07-14追加）。[specs] は断片ごとのコース名・停留所列（既存カード or 新規フレーム由来）。
+     * カード作成（ファイルI/O）を伴う書き込みのため、他の書き込み系関数と同様に[viewModelScope]
+     * 管理下で実行する（画面遷移によるスコープキャンセルで中途半端な創設状態を残さないため）。
+     */
+    fun createCoursesFromSession(
+        sessionId: Long,
+        specs: List<CourseCreationSpec>,
+        onResult: (Result<CourseCreationResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { repository.createCoursesFromSession(sessionId, specs) }
+            logOutcome(result, WorkLogCategory.COURSE, "コース創設") { r ->
+                "セッション#${sessionId}からコース創設（作成${r.createdCourseIds.size}件・新規カード${r.newCardCount}件）"
+            }
+            onResult(result)
+        }
+    }
+
     /** セッションメモの更新（ExtractionScreen、2026-07-11追加）。 */
     fun updateSessionMemo(sessionId: Long, memo: String?, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
@@ -355,6 +377,22 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.createCourse(name, kind, baseCourseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの作成") {
                 "コース『$name』を作成" + if (kind == CourseKind.TEMPORARY) "（臨時）" else ""
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * コース削除（CourseDetailScreen「削除」、コース削除機能、2026-07-14追加）。コースは参照リストの
+     * ため物理削除。course_stop / route_point / course_segment はFK ON DELETE CASCADEで連動削除
+     * されるが、停留所カード・記録セッションには一切触れない（[CourseRepository.deleteCourse]参照）。
+     */
+    fun deleteCourse(courseId: Long, onResult: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch {
+            val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
+            val result = runCatching { repository.deleteCourse(courseId) }
+            logOutcome(result, WorkLogCategory.COURSE, "コースの削除") {
+                "コース『${courseName ?: "ID:$courseId"}』を削除"
             }
             onResult(result)
         }
