@@ -16,7 +16,6 @@ import com.istech.buscourse.ui.BusCourseViewModel
 import com.istech.buscourse.ui.CourseCreateScreen
 import com.istech.buscourse.ui.CourseDetailScreen
 import com.istech.buscourse.ui.CourseListScreen
-import com.istech.buscourse.ui.ExtractionScreen
 import com.istech.buscourse.ui.HomeScreen
 import com.istech.buscourse.ui.MapImportScreen
 import com.istech.buscourse.ui.RecordingScreen
@@ -68,7 +67,6 @@ private object Routes {
     const val COURSE_MAP = "courses/{id}/map"
     // コース創設（トップダウン、S4、2026-07-14追加。設計書は docs/00_ファクトブック_バス運行実態.md 参照）
     const val COURSE_CREATE = "course_create"
-    const val EXTRACTION = "extraction"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
     const val MAP_IMPORT = "map_import"
     fun stopCardEdit(id: Long) = "stopcards/$id"
@@ -96,7 +94,6 @@ private fun AppNavHost() {
                 onOpenStopCards = { navController.navigate(Routes.STOP_CARDS) },
                 onOpenCourses = { navController.navigate(Routes.COURSES) },
                 onOpenCourseCreate = { navController.navigate(Routes.COURSE_CREATE) },
-                onOpenExtraction = { navController.navigate(Routes.EXTRACTION) },
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
             )
@@ -181,12 +178,6 @@ private fun AppNavHost() {
         }
         composable(Routes.COURSE_CREATE) {
             CourseCreateScreen(
-                viewModel = viewModel,
-                onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.EXTRACTION) {
-            ExtractionScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
             )

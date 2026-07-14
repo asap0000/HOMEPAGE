@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -158,13 +159,19 @@ fun CourseCreateScreen(
  *  a. [BusCourseViewModel.applyApprovedCandidates] で採用ダブり・採用[C]（停車確認候補）・
  *     選択拠点だけを先行適用する。**findOrCreateCandidatesは常に空リストで渡す**（[B]の命名を
  *     S3の `"S{sessionId}-NNN"` に委ねるため、ここでは適用しない）。
+ *  a2. [BusCourseViewModel.reassignMarkerFrames] で、[B]候補選択UI（思いつき2、
+ *     [FindOrCreateCandidateRow] 参照）で「付替え」を選んだフレームを既存カードへ再吸着する。
+ *     付替え後の `stop_card_id` を後続のb（再解析）・d（既存/新規判定）に反映させるため、
+ *     必ず再解析より前に完了させる。
  *  b. 適用成功後、`repository.analyzeSessionMarkers(sessionId)` を再取得する（浄化済みtimeline。
- *     ダブり統合・割り込み適用済みの状態）。
+ *     ダブり統合・割り込み・付替え適用済みの状態）。
  *  c. `splitByHubs`（[SessionAnalysisScreen.kt]から internal 化して共用、出典を明記）で
  *     浄化済みtimelineを選択拠点で断片化する。
- *  d. 断片ごとに [CourseCreationSpec] を組み立てる。行のframeIdが採用[B]のframeId集合に
- *     含まれれば [CourseStopSource.NewFromFrame]、それ以外は [CourseStopSource.Existing]。
- *     重複cardId/frameは順序維持で除去する。
+ *  d. 断片ごとに [CourseCreationSpec] を組み立てる。行のframeIdが採用[B]（新規作成を選んだ）の
+ *     frameId集合に含まれれば [CourseStopSource.NewFromFrame]、それ以外は
+ *     [CourseStopSource.Existing]（付替え済みフレームはbの再解析後、`stop_card_id` が付替え先
+ *     カードになっているためここで自然に `Existing(付替え先)` になる）。重複cardId/frameは
+ *     順序維持で除去する。
  *  e. [BusCourseViewModel.createCoursesFromSession] を実行する。
  *  f. 結果（作成コース数・新規カード数）をダイアログ表示する。完了後は一覧へ戻る。
  *
@@ -190,6 +197,8 @@ private fun CourseCreateEvaluationDialog(
     // 採否チェックボックスの選択状態
     var selectedDuplicateGroups by remember(sessionId) { mutableStateOf<Set<Int>>(emptySet()) }
     var selectedFindOrCreateFrameIds by remember(sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
+    // [B]候補選択UI（思いつき2）の「付替え」選択: frameId -> 付替え先stop_card_id
+    var selectedReassignments by remember(sessionId) { mutableStateOf<Map<Long, Long>>(emptyMap()) }
     var selectedCoverageStopIds by remember(sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
     var hubSelection by remember(sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
     var hubSelectionInitialized by remember(sessionId) { mutableStateOf(false) }
@@ -252,49 +261,60 @@ private fun CourseCreateEvaluationDialog(
                 Toast.makeText(context, "候補の先行適用に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
             applyOutcome.onSuccess {
-                composeScope.launch {
-                    // b. 浄化済みtimelineを再取得
-                    val refreshed = runCatching { repository.analyzeSessionMarkers(sessionId) }
-                    refreshed.onFailure { e ->
+                // a2. [B]候補選択UI（思いつき2）で「付替え」を選んだフレームを既存カードへ再吸着してから
+                //     再解析する（付替え後のstop_card_idが再解析結果・断片・d)の判定に反映されるように、
+                //     必ず再解析より前に完了させる）。
+                viewModel.reassignMarkerFrames(selectedReassignments) { reassignOutcome ->
+                    reassignOutcome.onFailure { e ->
                         creating = false
-                        Toast.makeText(context, "再解析に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "付替えの適用に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
                     }
-                    refreshed.onSuccess { freshAnalysis ->
-                        // c. 拠点で分割
-                        val freshFragments = buildFragments(freshAnalysis.timeline, hubSelection)
-                        if (freshFragments.isEmpty()) {
-                            creating = false
-                            Toast.makeText(context, "創設できる断片がありません。", Toast.LENGTH_LONG).show()
-                            return@onSuccess
-                        }
-                        // d. 断片ごとにCourseCreationSpecを組み立てる
-                        val specs = freshFragments.mapIndexed { index, fragment ->
-                            val name = courseNameOverrides[index]?.takeIf { it.isNotBlank() } ?: "S$sessionId-${index + 1}"
-                            val stops = mutableListOf<CourseStopSource>()
-                            val seenCardIds = mutableSetOf<Long>()
-                            val seenFrameIds = mutableSetOf<Long>()
-                            for (row in fragment.stops) {
-                                if (row.frameId in approvedFindOrCreateFrameIds) {
-                                    if (seenFrameIds.add(row.frameId)) {
-                                        stops += CourseStopSource.NewFromFrame(row.frameId)
+                    reassignOutcome.onSuccess {
+                        composeScope.launch {
+                            // b. 浄化済みtimelineを再取得
+                            val refreshed = runCatching { repository.analyzeSessionMarkers(sessionId) }
+                            refreshed.onFailure { e ->
+                                creating = false
+                                Toast.makeText(context, "再解析に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                            refreshed.onSuccess { freshAnalysis ->
+                                // c. 拠点で分割
+                                val freshFragments = buildFragments(freshAnalysis.timeline, hubSelection)
+                                if (freshFragments.isEmpty()) {
+                                    creating = false
+                                    Toast.makeText(context, "創設できる断片がありません。", Toast.LENGTH_LONG).show()
+                                    return@onSuccess
+                                }
+                                // d. 断片ごとにCourseCreationSpecを組み立てる
+                                val specs = freshFragments.mapIndexed { index, fragment ->
+                                    val name = courseNameOverrides[index]?.takeIf { it.isNotBlank() } ?: "S$sessionId-${index + 1}"
+                                    val stops = mutableListOf<CourseStopSource>()
+                                    val seenCardIds = mutableSetOf<Long>()
+                                    val seenFrameIds = mutableSetOf<Long>()
+                                    for (row in fragment.stops) {
+                                        if (row.frameId in approvedFindOrCreateFrameIds) {
+                                            if (seenFrameIds.add(row.frameId)) {
+                                                stops += CourseStopSource.NewFromFrame(row.frameId)
+                                            }
+                                        } else {
+                                            if (seenCardIds.add(row.stopCardId)) {
+                                                stops += CourseStopSource.Existing(row.stopCardId)
+                                            }
+                                        }
                                     }
-                                } else {
-                                    if (seenCardIds.add(row.stopCardId)) {
-                                        stops += CourseStopSource.Existing(row.stopCardId)
+                                    CourseCreationSpec(name = name, stops = stops)
+                                }
+                                // e. 創設実行
+                                viewModel.createCoursesFromSession(sessionId, specs) { createOutcome ->
+                                    creating = false
+                                    createOutcome.onSuccess { result: CourseCreationResult ->
+                                        // f. 結果表示
+                                        resultMessage = "コースを${result.createdCourseIds.size}件作成しました" +
+                                            "（新規カード${result.newCardCount}件）。"
+                                    }.onFailure { e ->
+                                        Toast.makeText(context, "コース創設に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
                                     }
                                 }
-                            }
-                            CourseCreationSpec(name = name, stops = stops)
-                        }
-                        // e. 創設実行
-                        viewModel.createCoursesFromSession(sessionId, specs) { createOutcome ->
-                            creating = false
-                            createOutcome.onSuccess { result: CourseCreationResult ->
-                                // f. 結果表示
-                                resultMessage = "コースを${result.createdCourseIds.size}件作成しました" +
-                                    "（新規カード${result.newCardCount}件）。"
-                            }.onFailure { e ->
-                                Toast.makeText(context, "コース創設に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
                             }
                         }
                     }
@@ -361,15 +381,25 @@ private fun CourseCreateEvaluationDialog(
                         item { EmptyHint("誤吸着の疑いがあるマーカーはありません。") }
                     } else {
                         items(findOrCreateCandidates, key = { it.frameId }) { candidate ->
-                            FindOrCreateCheckRow(
+                            FindOrCreateCandidateRow(
                                 candidate = candidate,
-                                checked = candidate.frameId in selectedFindOrCreateFrameIds,
-                                onCheckedChange = { checked ->
+                                createNewSelected = candidate.frameId in selectedFindOrCreateFrameIds,
+                                reassignedCardId = selectedReassignments[candidate.frameId],
+                                onSelectCreateNew = { checked ->
                                     selectedFindOrCreateFrameIds = if (checked) {
                                         selectedFindOrCreateFrameIds + candidate.frameId
                                     } else {
                                         selectedFindOrCreateFrameIds - candidate.frameId
                                     }
+                                    selectedReassignments = selectedReassignments - candidate.frameId
+                                },
+                                onSelectReassign = { cardId ->
+                                    selectedReassignments = selectedReassignments + (candidate.frameId to cardId)
+                                    selectedFindOrCreateFrameIds = selectedFindOrCreateFrameIds - candidate.frameId
+                                },
+                                onSelectNone = {
+                                    selectedFindOrCreateFrameIds = selectedFindOrCreateFrameIds - candidate.frameId
+                                    selectedReassignments = selectedReassignments - candidate.frameId
                                 },
                             )
                             HorizontalDivider()
@@ -535,38 +565,69 @@ private fun DuplicateGroupCheckRow(
 }
 
 /**
- * find-or-create候補の1行。`nearbyExistingCardName != null`（半径内に別の既存カードあり）の場合は
- * 自動作成の対象にせず「候補選択が必要」の注記のみを表示し、チェックボックスを出さない
- * （[SessionAnalysisScreen]のFindOrCreateSectionと同じ扱い）。
+ * find-or-create候補の1行（思いつき2、2026-07-14改）。`candidate.nearbyCards` が空
+ * （＝半径内に別の既存カードが無い）場合は従来どおりチェックボックス（「新規作成」の採否）のみ。
+ * 非空の場合は「付替え（近接既存カードへ、複数あれば距離順）／新規作成／選択しない（既定）」の
+ * 排他選択UIを表示する（[SessionAnalysisScreen]のFindOrCreateSectionは旧UIのまま据え置き）。
+ *
+ * [reassignedCardId] は現在選択中の付替え先カードID（未選択ならnull）。[createNewSelected] は
+ * 「新規作成」が選択中かどうか（`nearbyCards` が空の場合はこれがそのままチェック状態になる）。
+ * どちらも選択されていなければ「選択しない」＝既定。
  */
 @Composable
-private fun FindOrCreateCheckRow(
+private fun FindOrCreateCandidateRow(
     candidate: FindOrCreateCandidate,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+    createNewSelected: Boolean,
+    reassignedCardId: Long?,
+    onSelectCreateNew: (Boolean) -> Unit,
+    onSelectReassign: (Long) -> Unit,
+    onSelectNone: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (candidate.nearbyExistingCardName == null) {
-            Checkbox(checked = checked, onCheckedChange = onCheckedChange)
-        } else {
-            Spacer(Modifier.width(48.dp))
-        }
-        Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (candidate.nearbyCards.isEmpty()) {
+                Checkbox(checked = createNewSelected, onCheckedChange = onSelectCreateNew)
+            } else {
+                Spacer(Modifier.width(48.dp))
+            }
             Text(
                 "${formatTimeOfDay(candidate.capturedAt)}  現在: ${candidate.currentStopName}" +
                     "  距離${"%.0f".format(candidate.distanceM)}m",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.fillMaxWidth(),
             )
-            if (candidate.nearbyExistingCardName != null) {
+        }
+        if (candidate.nearbyCards.isNotEmpty()) {
+            Column(modifier = Modifier.fillMaxWidth().padding(start = 48.dp)) {
                 Text(
-                    "候補選択が必要（近くに既存カード『${candidate.nearbyExistingCardName}』あり、自動作成しません）",
+                    "近くに既存カードがあります。付替え・新規作成・選択しないから選んでください。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                candidate.nearbyCards.forEach { nearby ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = reassignedCardId == nearby.cardId,
+                            onClick = { onSelectReassign(nearby.cardId) },
+                        )
+                        Text(
+                            "「${nearby.name}」へ付替え（${"%.0f".format(nearby.distanceM)}m）",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = createNewSelected, onClick = { onSelectCreateNew(true) })
+                    Text("新規作成", style = MaterialTheme.typography.bodyMedium)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = !createNewSelected && reassignedCardId == null,
+                        onClick = onSelectNone,
+                    )
+                    Text("選択しない", style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
     }

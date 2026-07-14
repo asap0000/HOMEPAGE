@@ -106,12 +106,18 @@ data class MarkerDuplicateGroup(
 )
 
 /**
+ * find-or-create候補の近接既存カード（候補選択UI用、思いつき2、2026-07-14追加）。
+ * [CourseRepository.findOrCreateRadiusFor] の半径以内にある別の既存カードを距離順に列挙したもの。
+ */
+data class NearbyCard(val cardId: Long, val name: String, val distanceM: Double)
+
+/**
  * find-or-create候補の1件（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加、読み取り専用。
  * [CourseRepository.analyzeFindOrCreateCandidates] の返り値）。マーカーコマの撮影位置と
  * 現在割り当てられている停留所カード座標との距離が [CourseRepository.FIND_OR_CREATE_RADIUS_M]
- * を超える＝誤吸着の疑いがある候補。[nearbyExistingCardName] が非nullの場合、コマ位置の半径内に
- * 別の既存カードがあるため自動作成の対象にせず「候補選択が必要」としてUIでスキップする
- * （Phase Bでは自動選択しない）。
+ * を超える＝誤吸着の疑いがある候補。[nearbyCards] が非空の場合、コマ位置の半径内に別の既存カードが
+ * あるため自動作成の対象にせず、UIで「付替え／新規作成／選択しない」の候補選択を提示する
+ * （思いつき2、2026-07-14）。
  */
 data class FindOrCreateCandidate(
     val frameId: Long,
@@ -123,9 +129,12 @@ data class FindOrCreateCandidate(
     val frameLongitude: Double,
     /** そのコマの実ファイル相対パス（`BusCourseStorage.resolve` で解決）。新規カード作成の写真元。 */
     val fileRelPath: String,
-    /** 70m以内に別の既存カードがあればその名前。非nullなら「候補選択が必要」でチェック不可。 */
-    val nearbyExistingCardName: String?,
-)
+    /** コマ位置の半径内にある別の既存カード（距離順、思いつき2で候補選択UIに使う）。 */
+    val nearbyCards: List<NearbyCard> = emptyList(),
+) {
+    /** 後方互換: 最も近い既存カードの名前（非nullなら旧UIでは「候補選択が必要」扱い）。 */
+    val nearbyExistingCardName: String? get() = nearbyCards.firstOrNull()?.name
+}
 
 /** 承認キュー適用結果の集計（フェーズB、[CourseRepository.applyApprovedCandidates] の返り値）。 */
 data class ApplyApprovedResult(
@@ -829,9 +838,9 @@ class CourseRepository(
      * find-or-create候補の解析（フェーズB(c)、読み取り専用）。マーク済みフレームのうち、撮影位置と
      * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M]
      * （拠点カードは [FIND_OR_CREATE_HUB_RADIUS_M]、[findOrCreateRadiusFor] 参照）を超えるもの
-     * （誤吸着の疑い）を候補として列挙する。各候補について、コマ位置の半径内に別の既存カードが
-     * あるかも判定し（[FindOrCreateCandidate.nearbyExistingCardName]）、あれば自動作成を避けて
-     * UI側で「候補選択が必要」として表示する。
+     * （誤吸着の疑い）を候補として列挙する。各候補について、コマ位置の半径内にある別の既存カードを
+     * 全件・距離順に集め（[FindOrCreateCandidate.nearbyCards]）、UI側で「付替え／新規作成／
+     * 選択しない」の候補選択を提示できるようにする（思いつき2、2026-07-14）。
      */
     suspend fun analyzeFindOrCreateCandidates(sessionId: Long): List<FindOrCreateCandidate> = withContext(Dispatchers.IO) {
         val markedFrames = timelapseFrameDao.getMarkedFrames(sessionId)
@@ -847,11 +856,12 @@ class CourseRepository(
             val assignRadius = findOrCreateRadiusFor(assignedCard)
             if (distanceM <= assignRadius) return@mapNotNull null
 
-            val nearest = activeCards
+            val nearbyCards = activeCards
                 .filter { it.id != stopCardId }
                 .map { it to GeoMath.haversineM(lat, lon, it.latitude, it.longitude) }
                 .filter { (card, d) -> d <= findOrCreateRadiusFor(card) }
-                .minByOrNull { (_, d) -> d }
+                .sortedBy { (_, d) -> d }
+                .map { (card, d) -> NearbyCard(cardId = card.id, name = card.name, distanceM = d) }
 
             FindOrCreateCandidate(
                 frameId = frame.id,
@@ -862,7 +872,7 @@ class CourseRepository(
                 frameLatitude = lat,
                 frameLongitude = lon,
                 fileRelPath = frame.fileRelPath,
-                nearbyExistingCardName = nearest?.first?.name,
+                nearbyCards = nearbyCards,
             )
         }
     }
@@ -945,9 +955,11 @@ class CourseRepository(
 
     /**
      * (c) find-or-create の適用。[candidates] は [analyzeFindOrCreateCandidates] の返り値のうち、
-     * `nearbyExistingCardName == null`（＝70m以内に別の既存カードが無い）かつ承認（チェック）された
-     * ものだけを渡すこと（70m以内に既存カードがある候補はUI側で選択不可にする、Phase Bでは
-     * 自動選択しない）。各候補について、そのLORESフレームから新規カードを作成し
+     * 「新規作成」として承認（チェック）されたものだけを渡すこと。`nearbyCards` が空
+     * （＝半径内に別の既存カードが無い）候補はチェックボックスで、非空の候補は候補選択UI
+     * （付替え／新規作成／選択しない、思いつき2）で「新規作成」を選んだ場合にここへ渡る
+     * （近くに既存カードがあっても、ユーザーが明示的に新規作成を選べば作成する）。各候補について、
+     * そのLORESフレームから新規カードを作成し
      * （`name = "候補%03d"` の連番、`needsMaturation = true`）、フレームの `stop_card_id` を
      * 新カードidへ付替える。
      *
@@ -995,6 +1007,24 @@ class CourseRepository(
             applied++
         }
         applied
+    }
+
+    /**
+     * (c') find-or-create候補選択UI（思いつき2、2026-07-14追加）で「付替え」を選んだフレームを、
+     * 指定の既存カードへ再吸着する。[reassignments] は frameId → 付替え先 stop_card_id。
+     * 単純な `stop_card_id` の UPDATE のみ（[TimelapseFrameDao.markStopCardOnLoresFrame] を再利用）
+     * のため、新規カード作成を伴う [applyFindOrCreate] とは別の独立した適用関数にしている。
+     *
+     * 冪等性: 同じ値を再設定しても結果は変わらない（no-op UPDATE）。空のマップを渡せば何もしない。
+     *
+     * @return 適用したフレーム件数（[reassignments] のサイズと同じ）。
+     */
+    suspend fun reassignMarkerFrames(reassignments: Map<Long, Long>): Int = withContext(Dispatchers.IO) {
+        if (reassignments.isEmpty()) return@withContext 0
+        database.withTransaction {
+            reassignments.forEach { (frameId, cardId) -> timelapseFrameDao.markStopCardOnLoresFrame(frameId, cardId) }
+        }
+        reassignments.size
     }
 
     /** [applyFindOrCreate] の連番の開始値。既存の「候補NNN」カード名の最大値+1から始める（衝突回避）。 */

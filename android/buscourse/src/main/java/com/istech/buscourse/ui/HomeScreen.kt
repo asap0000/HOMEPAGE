@@ -16,7 +16,6 @@ import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,7 +56,6 @@ fun HomeScreen(
     onOpenStopCards: () -> Unit,
     onOpenCourses: () -> Unit,
     onOpenCourseCreate: () -> Unit,
-    onOpenExtraction: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
 ) {
@@ -103,12 +101,6 @@ fun HomeScreen(
                 title = "コース創設",
                 description = "記録セッションから2軸評価でコースを新規に創ります",
                 onClick = onOpenCourseCreate,
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.Timeline,
-                title = "コース編成（抽出）",
-                description = "記録セッションを解析してコースを編成します",
-                onClick = onOpenExtraction,
             )
             HomeMenuCard(
                 icon = Icons.AutoMirrored.Filled.ListAlt,

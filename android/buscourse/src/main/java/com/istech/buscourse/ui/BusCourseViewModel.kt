@@ -344,6 +344,21 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * find-or-create候補選択UI（思いつき2、[CourseCreateScreen] 「創設」処理のa2段、2026-07-14追加）で
+     * 「付替え」を選んだフレームを、既存カードへ再吸着する。[reassignments] は frameId → 付替え先
+     * stop_card_id。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
+     */
+    fun reassignMarkerFrames(reassignments: Map<Long, Long>, onResult: (Result<Int>) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { repository.reassignMarkerFrames(reassignments) }
+            logOutcome(result, WorkLogCategory.EXTRACTION, "find-or-create候補の付替え") { count ->
+                "find-or-create候補選択で${count}件のマーカーを付替え"
+            }
+            onResult(result)
+        }
+    }
+
     /** セッションメモの更新（ExtractionScreen、2026-07-11追加）。 */
     fun updateSessionMemo(sessionId: Long, memo: String?, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
