@@ -33,6 +33,7 @@ import com.istech.buscourse.recording.RecordingSessionStatus
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.StopMaster
 import com.istech.buscourse.recording.StopVisitEventType
+import com.istech.buscourse.recording.StopVisitTriggerType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -206,26 +207,122 @@ data class SessionCoverageReport(
 )
 
 /**
- * コース創設（トップダウン、S3）の1停留所の由来（[CourseRepository.createCoursesFromSession] の入力）。
- * [Existing]=既存カード（[A]吸着/[C]停車確認）、[NewFromFrame]=LORESマーカーフレームから新規カード
- * 作成（[B]find-or-create）。
+ * コース創設（トップダウン、3パス成熟モデルのパス1＋パス2、設計ドラフトv2 §2〜§3、2026-07-16改）の
+ * 1点のプレビュー（[CourseRepository.previewCourseCreation] の要素、[CourseRepository.createCoursesFromSession]
+ * の内部でも同じ形で組み立てて使う）。
+ *
+ * v1の「2軸マトリクスで評価して採否」（旧 `CourseStopSource.Existing`/`CourseStopSource.NewFromFrame`、
+ * 廃止）から、「マーカーがあれば停留所は確実にできる」を実装する3パス成熟モデルへ全面転換した
+ * （設計ドラフト§0・§1）。[frameId]・[cardId]・[eventId] は `course_stop` の同名列にそのまま対応し、
+ * いずれも任意・少なくとも一つが非null（[requireCoordinateSource]）。
+ *
+ * - パス1（悉皆生成）: マーカー付きLORESフレームからは `frameId` のみの点（`cardId=null`,
+ *   `eventId=null`）、対応するLORESが無い `stop_visit_event`（MANUAL）からは `eventId` のみの点
+ *   （`frameId=null`, `cardId=null`）を作る（[CourseRepository.generatePass1RawStops] 参照）。
+ *   **どちらも記録時の（誤）吸着先は引き継がない**：frame由来点が `timelapse_frame.stop_card_id` を
+ *   無視するのと同じく、event由来点も `stop_visit_event.stop_card_id`（実機セッション#17では
+ *   24件中21件が300m〜3.3kmの誤吸着）を無視する。カードの判定は一律パス2に委ねる
+ *   （2026-07-16改：以前はevent由来点だけ誤吸着を引き継ぐ非対称な実装だった）。
+ *   **ローレゾはこの時点でカード化しない**（v1の仮カード `S{n}-NNN` 作成は廃止。パス1が
+ *   bus_stop_cardを一切作らないのが設計ドラフトv2の核心）。
+ * - パス2（吸着・昇格）: `cardId` が未確定の点について、**その点の真の位置**（frame座標があれば
+ *   それ、無ければevent座標。位置解決は[CourseStopEntity]のKDoc「位置解決の順序」参照）から
+ *   軌跡コリドー内の既存カードを探して `cardId` を埋める（[CourseRepository.attachPass2Cards] 参照）。
+ *   記録時の吸着結果に一切依存しないため誤吸着は自己修正される。見つからなければ `cardId` は
+ *   null のまま（＝映像／イベントはあるがカードが無い点）。
+ *
+ * [displayName] はDBに保存しない、その場で導出した表示名（カードがあればカード名、
+ * 無ければ `"S{sessionId}-{通番}"`。設計ドラフト§2.3）。
  */
-sealed interface CourseStopSource {
-    data class Existing(val cardId: Long) : CourseStopSource
-    data class NewFromFrame(val frameId: Long) : CourseStopSource
-}
-
-/** 創設する1コースの仕様（停留所は course_stop の順序どおり）。 */
-data class CourseCreationSpec(
-    val name: String,
-    val stops: List<CourseStopSource>,
+data class CourseCreationStopPreview(
+    val frameId: Long?,
+    val cardId: Long?,
+    /** `stop_visit_event.id` への参照（2026-07-16追加）。[CourseStopEntity.eventId]のKDoc参照。 */
+    val eventId: Long?,
+    val displayName: String,
+    val capturedAt: Long,
+    val latitude: Double,
+    val longitude: Double,
+    /** [cardId] のカードが拠点（[BusStopCardEntity.isHub]）かどうか。拠点分割UIの初期選択に使う。 */
+    val isHubCandidate: Boolean,
 )
 
-/** 創設結果（[CourseRepository.createCoursesFromSession] の返り値）。createdCourseIds は specs と同じ並び。 */
+/** [splitCourseCreationStops] が返す1断片（拠点マーク間の非拠点点列）。 */
+data class CourseCreationFragment(
+    val startAt: Long,
+    val endAt: Long,
+    val stops: List<CourseCreationStopPreview>,
+)
+
+/**
+ * 創設結果（[CourseRepository.createCoursesFromSession] の返り値）。createdCourseIds は拠点分割後の
+ * 断片と同じ並び。パス1はbus_stop_cardを一切作らない設計（v2の核心、クラスKDoc参照）のため、
+ * 旧 `newCardCount`（新規カード数）は意味を失い廃止した。代わりに生成した点の内訳を返す
+ * （UI結果表示・work_log記録用）。
+ */
 data class CourseCreationResult(
     val createdCourseIds: List<Long>,
-    val newCardCount: Int,
+    /** 生成した停留所点の総数（断片横断の合計。拠点分割の境界点自体はどの断片にも属さないため含まない）。 */
+    val totalStopCount: Int,
+    /**
+     * うちカードが付いている点数（パス2で軌跡コリドー内のカードを吸着できた点。2026-07-16改：
+     * MANUALイベント由来の点はパス1では `cardId=null` で起こされ、記録時の誤吸着先を引き継がない
+     * ため、この件数に入るのはすべてパス2での吸着結果）。
+     */
+    val cardAttachedStopCount: Int,
+    /**
+     * うちカードが付かなかった（`cardId` が null のまま）点数の名称は歴史的に「frameOnly」だが、
+     * 実際にはframe由来点・event由来点の両方がここに入りうる（変数名は現状維持。フィールド名変更は
+     * UI側の参照更新を伴うため本タスクのスコープ外）。
+     */
+    val frameOnlyStopCount: Int,
 )
+
+/**
+ * [stops] を拠点（[hubStopCardIds]、`cardId` がこの集合に含まれる点）で断片化する（設計ドラフトv2
+ * §4「拠点判定と分割」）。[com.istech.buscourse.ui.splitByHubs]（旧「コース編成(抽出)」フェーズA-2、
+ * 2026-07-13追加）と**同じアルゴリズム**（連続する拠点点を1つの境界イベントにまとめ、境界間の
+ * 非拠点点列を1断片とする。境界となった拠点点自体はどの断片にも含めない＝従来どおりの挙動を踏襲）
+ * だが、型として直接は流用できないため独自実装している：`splitByHubs` が受け取る
+ * `MarkerTimelineRow` は `frameId`/`stopCardId` がどちらも非null前提（v1のカード起点モデル）のため、
+ * パス1が生む「映像のみでカード未吸着の点」（`cardId=null`）を表現できない。[hubStopCardIds] は
+ * 実在するカードIDの集合のため、`cardId=null` の点は判定上「拠点ではない」に自然に落ちる
+ * （拠点フラグ自体がカードに立つものであり、カードの無い点が拠点になり得ないのは設計上当然）。
+ *
+ * [hubStopCardIds] が空なら拠点分割を行わず [stops] 全体を1断片として返す（拠点を選ばなくても
+ * セッション全体から1コースだけ創れるようにするフォールバック、設計ドラフト§4.2「拠点なしで創設」）。
+ * UI（[com.istech.buscourse.ui.CourseCreateScreen]、拠点チップのトグルのたびに呼ぶ）と
+ * リポジトリ（[CourseRepository.createCoursesFromSession]、実際の創設直前に呼ぶ）の両方から
+ * 同じ関数を呼ぶことで、プレビューと実際の創設が必ず同じ分割結果になるようにしている
+ * （internal＝モジュール内公開、[com.istech.buscourse.ui] からもインポートして呼べる）。
+ */
+internal fun splitCourseCreationStops(
+    stops: List<CourseCreationStopPreview>,
+    hubStopCardIds: Set<Long>,
+): List<CourseCreationFragment> {
+    if (stops.isEmpty()) return emptyList()
+    if (hubStopCardIds.isEmpty()) {
+        return listOf(CourseCreationFragment(stops.first().capturedAt, stops.last().capturedAt, stops))
+    }
+
+    val fragments = mutableListOf<CourseCreationFragment>()
+    var current = mutableListOf<CourseCreationStopPreview>()
+    for (stop in stops) {
+        val isHub = stop.cardId != null && stop.cardId in hubStopCardIds
+        if (isHub) {
+            if (current.isNotEmpty()) {
+                fragments += CourseCreationFragment(current.first().capturedAt, current.last().capturedAt, current.toList())
+                current = mutableListOf()
+            }
+        } else {
+            current += stop
+        }
+    }
+    if (current.isNotEmpty()) {
+        fragments += CourseCreationFragment(current.first().capturedAt, current.last().capturedAt, current.toList())
+    }
+    return fragments
+}
 
 /**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
@@ -561,11 +658,12 @@ class CourseRepository(
             if (stopCardIds.isNotEmpty()) {
                 courseStopDao.insertAll(
                     stopCardIds.mapIndexed { index, cardId ->
-                        requireCoordinateSource(stopCardId = cardId, frameId = null, context = "courseId=$courseId, index=$index")
+                        requireCoordinateSource(stopCardId = cardId, frameId = null, eventId = null, context = "courseId=$courseId, index=$index")
                         CourseStopEntity(
                             courseId = courseId,
                             stopCardId = cardId,
                             frameId = null, // 3パス化の座標解決ロジックは未実装のため、現状は常にカードのみの点として作る
+                            eventId = null, // 同上
                             sequenceIndex = index,
                             expectedChainageM = null, // regenerate 後に RoutePreprocessor が再計算
                         )
@@ -580,16 +678,20 @@ class CourseRepository(
     }
 
     /**
-     * `course_stop` の不変条件チェック（[CourseStopEntity]のKDoc「不変条件」参照）: [frameId] と
-     * [stopCardId] の少なくとも一方が非nullであることを担保する。RoomはCHECK制約と相性が悪いため、
+     * `course_stop` の不変条件チェック（[CourseStopEntity]のKDoc「不変条件」参照）: [frameId]・
+     * [eventId]・[stopCardId] の少なくとも一つが非nullであることを担保する（2026-07-16改、
+     * event_id追加でstop_card_id/frame_idの2択から3択に拡張）。RoomはCHECK制約と相性が悪いため、
      * DBのCHECK制約ではなくコード層（この関数）で担保する方針（2026-07-15オーナー確定）。
-     * `course_stop` への書き込み経路（現状は [setCourseStops] のみ）は必ずこの関数を通すこと。
-     * 違反時は [IllegalArgumentException] を送出する（既存の `require`/`check` を使ったバリデーション
-     * 流儀に合わせる）。
+     * `course_stop` への書き込み経路（[setCourseStops]・[insertCourseStopsFromPreview]）は
+     * 必ずこの関数を通すこと。違反時は [IllegalArgumentException] を送出する（既存の
+     * `require`/`check` を使ったバリデーション流儀に合わせる）。
+     *
+     * テストから直接呼べるよう `internal` にしている（[splitCourseCreationStops] と同じ理由。
+     * DB非依存の純粋なバリデーションであり、公開APIとして外部モジュールに広める意図はない）。
      */
-    private fun requireCoordinateSource(stopCardId: Long?, frameId: Long?, context: String) {
-        require(stopCardId != null || frameId != null) {
-            "course_stop には stop_card_id / frame_id の少なくとも一方が必要です（$context）"
+    internal fun requireCoordinateSource(stopCardId: Long?, frameId: Long?, eventId: Long? = null, context: String) {
+        require(stopCardId != null || frameId != null || eventId != null) {
+            "course_stop には stop_card_id / frame_id / event_id の少なくとも一つが必要です（$context）"
         }
     }
 
@@ -597,6 +699,15 @@ class CourseRepository(
      * コース区間の再構築（設計書§3.8の疑似コードどおり）。順列の隣接ペアごとに既存 `segment_track`
      * （有向エッジ）を引き当て、実測ありは CONFIRMED・未走行は PENDING で `course_segment` を作り直し、
      * 続けて `RoutePreprocessor.rebuildRoutePoints` で route_point / expected_chainage_m を再生成する。
+     *
+     * 2026-07-15改（3パス化パス1/パス2対応）: `course_stop.stop_card_id` はNULL許容化されており
+     * （[CourseStopEntity]参照）、パス1が作る「映像のみの点」（`frameId`はあるが吸着先カードが
+     * 見つからず`stopCardId`がnullのまま、[CourseCreationStopPreview]参照）が実在するようになった。
+     * `course_segment` の `from/to_stop_card_id` はNOT NULL（`bus_stop_card` FK）のためカードが無い
+     * 点は区間の端点にできない。以前は `requireStopCardId`（非null前提の例外化）で押し通していたが、
+     * それだとパス1で映像のみの点を1つでも含むコースの創設が丸ごと落ちてしまう（3パス化の意義を
+     * 損なう）ため、隣接ペアのどちらかがカード無しなら**例外にせず、その区間だけ静かにスキップする**
+     * よう改めた（カードの確定・区間の補完は編集画面の仕事、設計ドラフトv2 §1）。
      */
     suspend fun regenerateCourseSegments(courseId: Long) {
         database.withTransaction {
@@ -604,13 +715,9 @@ class CourseRepository(
 
             courseSegmentDao.deleteAllForCourse(courseId)
 
-            // course_segment.from/to_stop_card_id は本タスクのスコープ外（カード列のみ）のため、
-            // setCourseStopsが常にカードのみの点として作る現状の前提どおり、requireStopCardId
-            // （非null実質保証、[CourseStopWithCard]のクラスKDoc参照）で明示する
-            // （frame座標のみの点からの区間生成は3パス化スコープで別途実装）。
-            val newSegments = stops.zipWithNext().mapIndexed { i, (from, to) ->
-                val fromCardId = from.requireStopCardId
-                val toCardId = to.requireStopCardId
+            val newSegments = stops.zipWithNext().mapIndexedNotNull { i, (from, to) ->
+                val fromCardId = from.stopCardId ?: return@mapIndexedNotNull null
+                val toCardId = to.stopCardId ?: return@mapIndexedNotNull null
                 val track = segmentTrackDao.findByDirectedEdge(fromCardId, toCardId)
                 CourseSegmentEntity(
                     courseId = courseId,
@@ -863,6 +970,14 @@ class CourseRepository(
 
     // ------------------------------------------------------------------
     // find-or-create候補の解析（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加、読み取り専用）
+    //
+    // 2026-07-15注記: このセクションはS4「コース創設」（トップダウン、[createCoursesFromSession]）とは
+    // 別導線の、既存の「コース編成(抽出)」（[com.istech.buscourse.ui.SessionAnalysisScreen]）が使う
+    // フェーズB(c)専用の解析・適用ロジックのまま残している（[applyFindOrCreate]参照）。設計ドラフト
+    // v2 §11の「analyzeFindOrCreateCandidates撤去」はコース創設フロー（S4）内での話であり、
+    // 本セクション自体（フェーズB(c)、[com.istech.buscourse.ui.SessionAnalysisScreen]から実働で
+    // 呼ばれている）を廃止する指示ではないと判断し、[findOrCreateRadiusFor] を含め温存した
+    // （半径選択ロジックは新パス2 [attachPass2Cards]・[findNearbyCardsForCorridor] とも共用する）。
     // ------------------------------------------------------------------
 
     /**
@@ -914,6 +1029,33 @@ class CourseRepository(
      */
     private fun findOrCreateRadiusFor(card: BusStopCardEntity): Double =
         if (card.isHub) FIND_OR_CREATE_HUB_RADIUS_M else FIND_OR_CREATE_RADIUS_M
+
+    /**
+     * 指定座標の軌跡コリドー内（[findOrCreateRadiusFor]の半径。拠点は広く判定）にある既存カードを
+     * 距離順に列挙する（コース創設パス2 [attachPass2Cards] の核。2026-07-15追加）。
+     *
+     * 公開関数にしている理由: パス2は複数候補があっても最も近い1枚だけを吸着し、1:N候補の一覧は
+     * `course_stop` に保存しない（設計ドラフトv2 §3パス2「1:Nの候補はDBに保存しない」。
+     * [CourseCreationStopPreview] は `cardId` を1つしか持てない構造で、そもそも複数候補を表現できない）。
+     * 編集画面が将来「吸着候補から1つ選び直す」UIを作る際、`frame_id`/`stop_visit_event` の座標さえ
+     * わかればこの関数でその場から再計算できるため、候補一覧を先回りしてDBに保存する必要がない
+     * （[analyzeFindOrCreateCandidates] と同種のロジックだが、あちらは「フレームに既に割り当て済みの
+     * カードとの距離が半径を超えたら誤吸着候補」という別の入力・別の用途のため、素朴に統合はしない）。
+     */
+    suspend fun findNearbyCardsForCorridor(latitude: Double, longitude: Double): List<NearbyCard> =
+        withContext(Dispatchers.IO) { nearbyCardsWithinCorridor(latitude, longitude, busStopCardDao.getAllActive()) }
+
+    /**
+     * [findNearbyCardsForCorridor] の中身（DB非依存の純関数）。[com.istech.buscourse.course.CourseRepository.attachPass2Cards]
+     * がセッション内の全点についてループする際、点ごとに `getAllActive()` を呼び直さずに済むよう
+     * [cards] を呼び出し側で1回だけ取得して渡せるようにしている（2026-07-15追加）。
+     */
+    private fun nearbyCardsWithinCorridor(latitude: Double, longitude: Double, cards: List<BusStopCardEntity>): List<NearbyCard> =
+        cards
+            .map { it to GeoMath.haversineM(latitude, longitude, it.latitude, it.longitude) }
+            .filter { (card, d) -> d <= findOrCreateRadiusFor(card) }
+            .sortedBy { (_, d) -> d }
+            .map { (card, d) -> NearbyCard(cardId = card.id, name = card.name, distanceM = d) }
 
     // ------------------------------------------------------------------
     // 承認キュー適用（②「コース編成(抽出)」フェーズB、2026-07-14追加）
@@ -1166,7 +1308,12 @@ class CourseRepository(
             courseDao.updateSourceSession(courseId, sessionId, now)
 
             val details = courseDao.getWithDetails(courseId) ?: return@withTransaction 0
-            val courseStopIds = details.stops.map { it.requireCard.id }.toSet()
+            // 2026-07-15改（3パス化対応）: パス1が作る「映像のみの点」はカードを持たない
+            // （[CourseCreationStopPreview]参照）ため、以前の `requireCard`（非null前提の例外化）だと
+            // そういう点を1つでも含むコースでこの関数自体が例外落ちしていた。クリップ窓の算出は
+            // 「カードを持つ停留所がこのセッションでマークされているか」の突き合わせが目的であり、
+            // カード無しの点はそもそも突き合わせ対象になり得ないため、素直に読み飛ばす（mapNotNull）。
+            val courseStopIds = details.stops.mapNotNull { it.card?.id }.toSet()
             if (courseStopIds.isEmpty()) return@withTransaction 0
 
             // セッション内の全マーカー（seq順＝時系列順）。拠点分割／拠点延伸の探索にはコース外のマーカーも要る。
@@ -1297,140 +1444,290 @@ class CourseRepository(
     }
 
     // ------------------------------------------------------------------
-    // コース創設（トップダウン、S3オーケストレーション、2026-07-14追加）
+    // コース創設（トップダウン、3パス成熟モデルのパス1＋パス2、2026-07-14追加・2026-07-15全面改訂・
+    // 2026-07-16誤吸着是正）
     //
-    // フェーズS1（拠点/停車確認、[analyzeSessionCoverage]）・S2（コース仕様決定、UI側）を経て、
-    // 複数コースを一括で「創設」する。既存の抽出系（applyFindOrCreate等）とは別系統で、
-    // 既存コース・既存カードは一切変更しない（新規追加のみ）。
+    // v1「2軸マトリクスで評価して採否」（[CourseStopSource]、廃止）から、「マーカーがあれば停留所は
+    // 確実にできる」を実装する3パス成熟モデルへ全面転換（設計ドラフトv2 §0・§1・§3）。
+    // パス1: セッションから course_stop の点を悉皆生成（[generatePass1RawStops]）。誤吸着判定・採否は
+    //        一切しない。ローレゾ（映像）はこの時点でカード化しない（v1の仮カード作成は廃止）。
+    //        2026-07-16改: MANUALイベント由来の点も記録時の誤吸着先（event.stop_card_id）を
+    //        引き継がず、frame由来点と同じく `cardId=null` で起こす（実機セッション#17で判明した
+    //        非対称な実装を是正）。
+    // パス2: パス1の各点の**真の位置**（frame座標優先、無ければevent座標）からコリドー内のハイレゾ
+    //        （カード）を吸着（[attachPass2Cards]）。記録時の吸着結果に一切依存しない。
+    // 拠点分割は既存の [com.istech.buscourse.ui.splitByHubs] と同じアルゴリズムを
+    // [splitCourseCreationStops] に流用（型がcard-onlyの点を扱えないため、この関数自体は新規実装。
+    // クラスKDoc参照）。既存コース・既存カードは一切変更しない（新規追加のみ）。
     // ------------------------------------------------------------------
 
-    /**
-     * コース創設（トップダウン、S3）。[specs] は作成する各コースの仕様（停留所は course_stop の
-     * 順序どおり）。各停留所は既存カード（[CourseStopSource.Existing]）か、LORESマーカーフレームからの
-     * 新規カード作成（[CourseStopSource.NewFromFrame]、find-or-create相当）のいずれか。
-     *
-     * 処理手順:
-     * 1. 全 [specs] 横断で [CourseStopSource.NewFromFrame] の frameId を distinct 収集し、
-     *    frameIdごとに1回だけ新規カードを作成する（[applyFindOrCreate] と同じ「実ファイルは
-     *    一時コピーしてから渡す」方式。フレーム実ファイルは [createStopCard] 内部で
-     *    renameTo/copy+delete により消費されるため、コピーを渡さないとセッション記録の実ファイルが
-     *    消えてしまう）。命名は `"S{sessionId}-NNN"`（[nextSessionCardNameSeq] 参照、
-     *    [nextCandidateNameSeq] に倣った衝突回避）。作成後は [TimelapseFrameDao.markStopCardOnLoresFrame]
-     *    でフレームを新カードへ付替える。
-     * 2. 各 spec ごとに、stopsをcardId列へ解決する（`Existing`→そのID、`NewFromFrame`→手順1で
-     *    作ったID。手順1で作成に失敗した frameId はその停留所をスキップしてログに残す）。
-     *    重複cardIdは順序を保ったまま最初の1つだけ残す（`distinct`）。続けて [createCourse] →
-     *    [setCourseStops]（stopsが空ならコースだけ作る）→ [confirmCourseRouteFromSession] で
-     *    route_point を生成する。
-     *
-     * **冪等ではない**：呼ぶたびに新しいコース（と、NewFromFrame分の新しいカード）を作成する
-     * （創設＝新規作成という操作の意味論上、意図的に非冪等）。同一 frameId を同一呼び出し内で
-     * 二重作成しないことは手順1の distinct 収集で担保するが、既に別セッション処理等で付替え済みの
-     * frameId が渡された場合でも、本関数は「そのフレームから新カードを作って付替える」という
-     * 意味なのでそのまま作成する。
-     *
-     * 既存コース・既存カードは一切変更しない（新規追加のみ）。カード作成はファイルI/Oを伴うため、
-     * 既存の[applyFindOrCreate]/[applyApprovedCandidates]と同じ方針で巨大な単一トランザクションに
-     * せず、個々のDAO操作は既存のものを使う。
-     */
-    suspend fun createCoursesFromSession(
-        sessionId: Long,
-        specs: List<CourseCreationSpec>,
-        kind: CourseKind = CourseKind.STANDARD,
-    ): CourseCreationResult = withContext(Dispatchers.IO) {
-        // 手順1: NewFromFrameのframeIdをspecs横断でdistinct収集し、1回だけ新規カード作成
-        val frameIds = specs.flatMap { it.stops }
-            .filterIsInstance<CourseStopSource.NewFromFrame>()
-            .map { it.frameId }
-            .distinct()
+    /** パス1〜パス2の中間表現（DBには未書き込みの1点）。[CourseCreationStopPreview]のクラスKDoc参照。 */
+    private data class DraftCourseStop(
+        val capturedAt: Long,
+        val frameId: Long?,
+        val cardId: Long?,
+        val eventId: Long?,
+        val latitude: Double,
+        val longitude: Double,
+    )
 
-        var seq = nextSessionCardNameSeq(sessionId)
-        val newCardIdByFrameId = mutableMapOf<Long, Long>()
-        for (frameId in frameIds) {
-            val frame = timelapseFrameDao.getById(frameId)
-            if (frame == null) {
-                Log.w(TAG, "コース創設: フレームが見つからないためスキップします frameId=$frameId")
-                continue
+    /**
+     * `course_stop` の位置解決（[CourseStopEntity]のKDoc「位置解決の順序」参照、2026-07-16実装）。
+     * 位置 = **coalesce(frame座標, event座標, card座標)**。3引数とも省略可能で、非nullの座標ペアを
+     * 優先順位どおりに先頭から採用する（片方だけ非nullの座標ペアは無視する。呼び出し側は必ず
+     * lat/lonをセットで渡すこと）。全て未指定/不完全なら null。
+     *
+     * 優先順位の理由:
+     * - **frame座標が最優先**: 実際に撮影した静止画に紐づく実測値そのもの。手動マーク操作が
+     *   成功した証跡でもある。
+     * - **event座標が次点**: `stop_visit_event.lat/lon` はボタン押下瞬間の実測GPS fixで、frameが
+     *   無い（カメラ故障等、セッション#17実例）場合でも押下時の正確な位置が残っている。
+     * - **card座標は最後の砦**: `bus_stop_card` の座標は「記録時に（誤って）割り当てられたカードの
+     *   位置」に過ぎず誤吸着の影響を直接受ける（セッション#17は24件中21件・300m〜3.3kmのズレ）ため、
+     *   実測座標（frame/event）が無い場合に限り使う。
+     *
+     * [generatePass1RawStops] が生成する点は必ずframe座標かevent座標のどちらかを持つ（両方とも
+     * 無い素材はそもそも一次素材に採用しない、同メソッドの絞り込み条件参照）ため、このパイプライン
+     * 内でcard座標へフォールバックすることは実質無い。それでも将来カードのみの点（パス3「＋停留所を
+     * 追加」、設計ドラフト§5）を本関数に通す可能性に備え、3段のcoalesceとして実装しておく。
+     *
+     * テストから直接呼べるよう `internal` にしている（[splitCourseCreationStops] と同じ理由）。
+     */
+    internal fun resolveStopPosition(
+        frameLatitude: Double? = null, frameLongitude: Double? = null,
+        eventLatitude: Double? = null, eventLongitude: Double? = null,
+        cardLatitude: Double? = null, cardLongitude: Double? = null,
+    ): Pair<Double, Double>? = when {
+        frameLatitude != null && frameLongitude != null -> frameLatitude to frameLongitude
+        eventLatitude != null && eventLongitude != null -> eventLatitude to eventLongitude
+        cardLatitude != null && cardLongitude != null -> cardLatitude to cardLongitude
+        else -> null
+    }
+
+    /**
+     * パス1（悉皆生成、設計ドラフトv2 §3）。一次素材は次の2つの**和集合**（§3パス1「重要」、
+     * 2026-07-15セッション#17の実例から確定）：
+     * 1. マーカー付きLORESフレーム（`timelapse_frame.kind='LORES'` かつ `stop_card_id IS NOT NULL`）
+     *    → `frameId` のみの点（`cardId=null`, `eventId=null`。パス1はローレゾをカード化しない）。
+     * 2. `stop_visit_event`（`trigger_type='MANUAL'`）→ 対応するLORESフレームが無い場合（カメラが
+     *    動かなかったセッション）でも `eventId` のみの点（`frameId=null`, `cardId=null`）として起こす。
+     *    セッション#17（77分・20.6km、映像0枚・MANUALイベント24件）はこの経路が無いと丸ごと
+     *    失われる（設計ドラフト§10.1）。
+     *
+     * **2026-07-16改（誤吸着の是正）**: `stop_visit_event.stop_card_id` は記録時に `onManualStopMark`
+     * が距離を問わず最近傍カードへ仮吸着した結果であり、実機セッション#17では24件中21件が
+     * 300m〜3.3kmの誤吸着だった。以前は `cardId = event.stopCardId` としてこれをそのまま
+     * `course_stop.stop_card_id` に引き継いでいたが、frame由来点（`timelapse_frame.stop_card_id`も
+     * 無視して `cardId=null` で起こす）と扱いが逆転していた不整合だった。本改訂で
+     * event由来点も `cardId=null, eventId=event.id` として起こし、**記録時の誤吸着を無視**する
+     * よう frame由来点と揃える。カードの判定は一律パス2に委ねる。位置は `stop_visit_event.lat/lon`
+     * （押下瞬間の正しい実測GPS fix）をそのまま使う（[resolveStopPosition]参照）。
+     *
+     * 重複防止: 2つの素材が同じ停留所を指す場合（`onManualStopMark` は同一ハンドラ内で
+     * `stop_visit_event` 記録→直後に `findClosestLoresFrameId(before=true)` でLORESへのマーカー
+     * 付与を試みるため、対応する場合は両者の時刻がほぼ同時刻・同一 `stop_card_id` になる）は、
+     * マーカー付きLORESフレームを優先し、対応するMANUALイベントからは重ねて起こさない。
+     * 「同一card_id・時刻が[MANUAL_EVENT_FRAME_MATCH_WINDOW_MS]以内」を対応判定に使う（時刻での
+     * 対応付け。厳密な1:1ペアリングではなく簡易ヒューリスティックだが、通知ボタンのデバウンス
+     * （連打防止）もあり実運用では十分に妥当、設計ドラフト§3パス1参照）。この重複判定自体は
+     * 「同じ停留所を指しているか」の照合であり、`event.stop_card_id` を `course_stop` に書き込む
+     * わけではないため、上記の「誤吸着を引き継がない」方針とは独立している。
+     *
+     * 順序はセッションの時系列（撮影時刻／イベント時刻）＝一筆書き。
+     */
+    private suspend fun generatePass1RawStops(sessionId: Long): List<DraftCourseStop> {
+        val markedLoresFrames = timelapseFrameDao.getMarkedFrames(sessionId)
+            .filter { it.kind == FrameKind.LORES.name && it.latitude != null && it.longitude != null }
+
+        val manualEvents = stopVisitEventDao.getBySession(sessionId)
+            .filter { it.triggerType == StopVisitTriggerType.MANUAL.name && it.lat != null && it.lon != null }
+
+        // 対応するマーカー付きLORESフレームが既にあるMANUALイベントは重複として除外する
+        val orphanEvents = manualEvents.filter { event ->
+            markedLoresFrames.none { frame ->
+                frame.stopCardId == event.stopCardId &&
+                    kotlin.math.abs(frame.capturedAt - event.eventTs) <= MANUAL_EVENT_FRAME_MATCH_WINDOW_MS
             }
-            val lat = frame.latitude
-            val lon = frame.longitude
-            if (lat == null || lon == null) {
-                Log.w(TAG, "コース創設: フレームに座標が無いためスキップします frameId=$frameId")
-                continue
-            }
-            val sourceFile = BusCourseStorage.resolve(context, frame.fileRelPath)
-            if (!sourceFile.exists()) {
-                Log.w(TAG, "コース創設: フレーム実ファイルが見つからないためスキップします frameId=$frameId")
-                continue
-            }
-            val tempCopy = newCaptureTempFile()
-            try {
-                sourceFile.copyTo(tempCopy, overwrite = true)
-            } catch (e: IOException) {
-                Log.e(TAG, "コース創設: フレームの一時コピーに失敗しました frameId=$frameId", e)
-                continue
-            }
-            val newCardId = createStopCard(
-                name = "S%d-%03d".format(sessionId, seq),
+        }
+
+        val framePoints = markedLoresFrames.map { frame ->
+            val (lat, lon) = requireNotNull(
+                resolveStopPosition(frameLatitude = frame.latitude, frameLongitude = frame.longitude)
+            ) { "getMarkedFramesはlatitude!=null/longitude!=nullで絞っているはず" }
+            DraftCourseStop(
+                capturedAt = frame.capturedAt,
+                frameId = frame.id,
+                cardId = null, // 記録時のframe自身のstop_card_idは無視する。カードの判定はパス2に委ねる
+                eventId = null,
                 latitude = lat,
                 longitude = lon,
-                altitudeM = null,
-                notes = null,
-                riderCount = 0,
-                photoTempFile = tempCopy,
-                needsMaturation = true,
             )
-            timelapseFrameDao.markStopCardOnLoresFrame(frameId, newCardId)
-            newCardIdByFrameId[frameId] = newCardId
-            seq++
+        }
+        val eventPoints = orphanEvents.map { event ->
+            val (lat, lon) = requireNotNull(
+                resolveStopPosition(eventLatitude = event.lat, eventLongitude = event.lon)
+            ) { "manualEventsはlat!=null/lon!=nullで絞っているはず" }
+            DraftCourseStop(
+                capturedAt = event.eventTs,
+                frameId = null,
+                cardId = null, // 記録時の誤吸着（event.stopCardId）は無視する。frame由来点と扱いを揃える
+                eventId = event.id,
+                latitude = lat,
+                longitude = lon,
+            )
         }
 
-        // 手順2: specごとにコース生成
-        val createdCourseIds = mutableListOf<Long>()
-        for (spec in specs) {
-            val resolvedCardIds = spec.stops.mapNotNull { source ->
-                when (source) {
-                    is CourseStopSource.Existing -> source.cardId
-                    is CourseStopSource.NewFromFrame -> {
-                        val newCardId = newCardIdByFrameId[source.frameId]
-                        if (newCardId == null) {
-                            Log.w(
-                                TAG,
-                                "コース創設: frameId=${source.frameId} の新規カード作成に失敗したため、" +
-                                    "コース「${spec.name}」のこの停留所をスキップします",
-                            )
-                        }
-                        newCardId
-                    }
-                }
-            }.distinct()
+        return (framePoints + eventPoints).sortedBy { it.capturedAt }
+    }
 
-            val courseId = createCourse(spec.name, kind)
-            setCourseStops(courseId, resolvedCardIds)
-            confirmCourseRouteFromSession(courseId, sessionId)
-            createdCourseIds += courseId
+    /**
+     * パス2（吸着・昇格、設計ドラフトv2 §3）。パス1の各点について、**その点の真の位置**
+     * （[DraftCourseStop.latitude]/[DraftCourseStop.longitude]。frame座標があればそれ、無ければ
+     * event座標。[resolveStopPosition]参照）から軌跡コリドー内（[findNearbyCardsForCorridor]、
+     * 半径は通常/拠点で変数。拠点は広く判定）にある既存カードを探して `cardId` を埋める。
+     *
+     * **2026-07-16改**: パス1が誤吸着（記録時の `stop_card_id`）を一切引き継がなくなったため
+     * （[generatePass1RawStops]参照）、パス2に渡る全点は常に `cardId=null` で入ってくる。
+     * よって「既にcardIdがある点は素通りする」特別扱いは不要になった（旧実装にあった
+     * `if (point.cardId != null) return point` は削除）。パス2は常に**真の位置から**コリドー内の
+     * カードを探し直すため、記録時の吸着結果に一切依存しない＝誤吸着は自己修正される
+     * （実機セッション#17は24件中21件が誤吸着だったが、真の位置から探し直せば正しいカードが
+     * 既に登録されていれば正しく吸着できる）。
+     *
+     * 候補が1枚だけなら自動で吸着（昇格）。複数ある場合も**最も近い1枚を吸着**する
+     * （[nearbyCardsWithinCorridor] が距離順に返す先頭を採用）。1:N候補の一覧そのものはDBに保存しない
+     * （[findNearbyCardsForCorridor]のKDoc「公開関数にしている理由」参照。編集画面がフレーム/イベント
+     * 座標から都度再計算できるため、先回りして保存する必要が無い）。コリドー内に候補が無ければ
+     * `cardId` はnullのまま（＝映像／イベントはあるがカードが無い点。表示名は `previewCourseCreation`
+     * が `S{sessionId}-{通番}` をその場で導出する）。
+     */
+    private suspend fun attachPass2Cards(points: List<DraftCourseStop>): List<DraftCourseStop> {
+        // セッション内の全点で使い回すため、アクティブカード一覧はここで1回だけ取得する
+        // （[nearbyCardsWithinCorridor]参照。点数ぶんクエリを繰り返さない）。
+        val activeCards = busStopCardDao.getAllActive()
+        return points.map { point ->
+            val nearest = nearbyCardsWithinCorridor(point.latitude, point.longitude, activeCards).firstOrNull()
+            if (nearest == null) point else point.copy(cardId = nearest.cardId)
         }
+    }
 
-        CourseCreationResult(
-            createdCourseIds = createdCourseIds,
-            newCardCount = newCardIdByFrameId.size,
+    /** パス1＋パス2をまとめて実行する（[previewCourseCreation]・[createCoursesFromSession]で共用）。 */
+    private suspend fun buildPass1Pass2Stops(sessionId: Long): List<DraftCourseStop> =
+        attachPass2Cards(generatePass1RawStops(sessionId))
+
+    /** [DraftCourseStop] のリストを表示用の [CourseCreationStopPreview] へ変換する（カード名解決込み）。 */
+    private suspend fun resolvePreviewStops(sessionId: Long, draftStops: List<DraftCourseStop>): List<CourseCreationStopPreview> {
+        val cardCache = mutableMapOf<Long, BusStopCardEntity?>()
+        suspend fun cardFor(id: Long) = cardCache.getOrPut(id) { busStopCardDao.getById(id) }
+        // パス2でカードが吸着しなかった点（映像のみ／イベントのみ）の仮表示名の通番。
+        // 2026-07-16改: event由来点もパス1ではcardId=nullのため、この通番の対象はもはや
+        // 「frameのみ」に限らない（変数名を実態に合わせて改名）。
+        var cardlessSeq = 1
+        return draftStops.map { p ->
+            val card = p.cardId?.let { cardFor(it) }
+            val displayName = when {
+                card != null -> card.name
+                p.cardId != null -> "停留所#${p.cardId}" // カード取得失敗（アーカイブ済み等）の保険
+                else -> "S$sessionId-${"%03d".format(cardlessSeq++)}" // カード未吸着の点。DBには保存しない仮の表示名
+            }
+            CourseCreationStopPreview(
+                frameId = p.frameId,
+                cardId = p.cardId,
+                eventId = p.eventId,
+                displayName = displayName,
+                capturedAt = p.capturedAt,
+                latitude = p.latitude,
+                longitude = p.longitude,
+                isHubCandidate = card?.isHub == true,
+            )
+        }
+    }
+
+    /**
+     * コース創設プレビュー（パス1＋パス2、読み取り専用）。UI（[com.istech.buscourse.ui.CourseCreateScreen]）
+     * が拠点選択・断片プレビュー・コース名入力を表示するための、時系列順・拠点分割前の全点。
+     * 拠点分割は [splitCourseCreationStops] にこの返り値と選択拠点集合を渡してUI側（純Kotlin、
+     * DBアクセス無し）で行う想定（拠点選択のたびに読み取り専用の重い解析をやり直さないため）。
+     */
+    suspend fun previewCourseCreation(sessionId: Long): List<CourseCreationStopPreview> = withContext(Dispatchers.IO) {
+        resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId))
+    }
+
+    /**
+     * パス1＋パス2で確定した点列を `course_stop` へ直接書き込む。[setCourseStops] は「必ずカードのみの
+     * 点として作る」契約（同メソッドのKDoc参照）のため frame_id・event_id を書けず使えない。
+     * [requireCoordinateSource] で frame_id/event_id/stop_card_id の少なくとも一つが非nullである
+     * 不変条件をここでも担保する（2026-07-16、event_id追加で2択から3択に拡張）。
+     */
+    private suspend fun insertCourseStopsFromPreview(courseId: Long, stops: List<CourseCreationStopPreview>) {
+        if (stops.isEmpty()) return
+        courseStopDao.insertAll(
+            stops.mapIndexed { index, stop ->
+                requireCoordinateSource(
+                    stopCardId = stop.cardId,
+                    frameId = stop.frameId,
+                    eventId = stop.eventId,
+                    context = "courseId=$courseId, index=$index（コース創設）",
+                )
+                CourseStopEntity(
+                    courseId = courseId,
+                    stopCardId = stop.cardId,
+                    frameId = stop.frameId,
+                    eventId = stop.eventId,
+                    sequenceIndex = index,
+                    expectedChainageM = null, // 成熟（regenerateCourseSegments）後にRoutePreprocessorが再計算
+                )
+            }
         )
     }
 
     /**
-     * [createCoursesFromSession] の連番の開始値。既存の `"S{sessionId}-NNN"` カード名の最大値+1から
-     * 始める（[nextCandidateNameSeq] に倣った衝突回避）。セッションIDが異なれば別の連番空間になる。
+     * コース創設（トップダウン、パス1＋パス2、2026-07-15全面改訂）。[sessionId] からパス1（悉皆生成）
+     * →パス2（吸着・昇格）で点列を作り、[hubStopCardIds] で拠点分割（[splitCourseCreationStops]）して
+     * 断片ごとに1コースを作る。[courseNames] は断片indexに対応するコース名（[courseNames]が短い・
+     * 空文字の断片は既定名 `"S{sessionId}-{断片番号}"`）。
+     *
+     * 断片ごとに: [createCourse] → [insertCourseStopsFromPreview]（course_stop直挿し）→
+     * [regenerateCourseSegments]（カードを持つ隣接ペアだけ区間を作る。同メソッドのKDoc参照）→
+     * [confirmCourseRouteFromSession]（route_point生成。同メソッドのKDoc参照、カード無し点も安全）。
+     *
+     * **冪等ではない**：呼ぶたびに新しいコースを作成する（創設＝新規作成という操作の意味論上、
+     * 意図的に非冪等。二重生成ガードは設計ドラフトv2 §9のスコープで別途実装）。
+     * パス1はbus_stop_cardを一切作らない（[CourseCreationStopPreview]のクラスKDoc参照）ため、
+     * 既存コース・既存カードは一切変更しない（新規追加のみ）。
      */
-    private suspend fun nextSessionCardNameSeq(sessionId: Long): Int {
-        val maxExisting = busStopCardDao.getAllActive()
-            .mapNotNull { card ->
-                val match = SESSION_CARD_NAME_REGEX.matchEntire(card.name) ?: return@mapNotNull null
-                val (sid, seqStr) = match.destructured
-                if (sid.toLongOrNull() != sessionId) return@mapNotNull null
-                seqStr.toIntOrNull()
-            }
-            .maxOrNull() ?: 0
-        return maxExisting + 1
+    suspend fun createCoursesFromSession(
+        sessionId: Long,
+        hubStopCardIds: Set<Long>,
+        courseNames: List<String> = emptyList(),
+        kind: CourseKind = CourseKind.STANDARD,
+    ): CourseCreationResult = withContext(Dispatchers.IO) {
+        val previewStops = resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId))
+        val fragments = splitCourseCreationStops(previewStops, hubStopCardIds)
+
+        val createdCourseIds = mutableListOf<Long>()
+        var totalStopCount = 0
+        var cardAttachedStopCount = 0
+        var frameOnlyStopCount = 0
+        for ((index, fragment) in fragments.withIndex()) {
+            if (fragment.stops.isEmpty()) continue
+            val name = courseNames.getOrNull(index)?.takeIf { it.isNotBlank() } ?: "S$sessionId-${index + 1}"
+            val courseId = createCourse(name, kind)
+            insertCourseStopsFromPreview(courseId, fragment.stops)
+            regenerateCourseSegments(courseId)
+            confirmCourseRouteFromSession(courseId, sessionId)
+            createdCourseIds += courseId
+            totalStopCount += fragment.stops.size
+            cardAttachedStopCount += fragment.stops.count { it.cardId != null }
+            frameOnlyStopCount += fragment.stops.count { it.cardId == null }
+        }
+
+        CourseCreationResult(
+            createdCourseIds = createdCourseIds,
+            totalStopCount = totalStopCount,
+            cardAttachedStopCount = cardAttachedStopCount,
+            frameOnlyStopCount = frameOnlyStopCount,
+        )
     }
 
     /**
@@ -1867,10 +2164,13 @@ class CourseRepository(
         private val CANDIDATE_NAME_REGEX = Regex("^候補(\\d{3})$")
 
         /**
-         * コース創設（トップダウン、S3、[createCoursesFromSession]）で作成する新規カード名
-         * `"S{sessionId}-NNN"` のパース用（グループ1=sessionId、グループ2=連番）。
+         * コース創設パス1（[generatePass1RawStops]）: MANUALイベントを、対応するマーカー付きLORES
+         * フレームと同一停留所の重複として除外するかどうかの時刻近接判定しきい値。`onManualStopMark`
+         * は同一ハンドラ内で `stop_visit_event` 記録→直後に `findClosestLoresFrameId(before=true)` で
+         * LORESへマーカー付与を試みるため、対応する場合は両者の時刻がほぼ同時刻になる。
+         * **暫定値・後で調整可**。
          */
-        private val SESSION_CARD_NAME_REGEX = Regex("^S(\\d+)-(\\d{3})$")
+        private const val MANUAL_EVENT_FRAME_MATCH_WINDOW_MS = 15_000L
 
         /**
          * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定の一次経路

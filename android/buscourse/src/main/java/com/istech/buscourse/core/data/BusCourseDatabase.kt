@@ -62,6 +62,21 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 121行を1行も失わない）。「frame_id と stop_card_id の少なくとも一方は非null」という不変条件は
  * DBのCHECK制約ではなくコード層（[com.istech.buscourse.course.CourseRepository.setCourseStops]）で
  * 担保する（RoomはCHECK制約と相性が悪いため）。
+ *
+ * version 12（2026-07-16、実機セッション#17が暴いた誤吸着の是正）: course_stop に `event_id`
+ * （`stop_visit_event` 参照、NULL可、ON DELETE RESTRICT）を新設する（[CourseStopEntity]）。
+ * 実機セッション#17はカメラ不動でLORESが0枚だったため、パス1が `stop_visit_event`（MANUAL）から
+ * 点を起こすしかなかった。従来は起こす際に記録時の（誤った）吸着先 `event.stop_card_id` を
+ * そのまま `course_stop.stop_card_id` に引き継いでいたため、実データでは24件中21件が
+ * 300m〜3.3kmの誤吸着になっていた。v12はこれを是正する土台として、イベント自身を指す
+ * `event_id` 列を追加し、位置解決を `coalesce(frame座標, event座標, card座標)` の3段にする
+ * （frame_id追加時（version 11）と同じテーブル再作成の流儀を踏襲する。単純な
+ * ALTER TABLE ADD COLUMN では列は増やせてもFK制約が `PRAGMA foreign_key_list` に反映されず
+ * Roomのスキーマ検証に通らないおそれがあるため）。既存データは全行 event_id = NULL のまま移行する
+ * （実機7コース・121行を1行も失わない、`BusCourseDatabaseMigrationTest`で検証）。
+ * 「frame_id・event_id・stop_card_idの少なくとも一つは非null」という拡張後の不変条件も、
+ * 引き続きDBのCHECK制約ではなくコード層
+ * （[com.istech.buscourse.course.CourseRepository.requireCoordinateSource]）で担保する。
  */
 @Database(
     entities = [
@@ -79,7 +94,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WorkLogEntity::class,
         MapDataPackageEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -115,6 +130,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_8_9,
                 MIGRATION_9_10,
                 MIGRATION_10_11,
+                MIGRATION_11_12,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -275,6 +291,59 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX index_course_stop_course_id_sequence_index ON course_stop (course_id, sequence_index)")
                 db.execSQL("CREATE INDEX index_course_stop_course_id ON course_stop (course_id)")
                 db.execSQL("CREATE INDEX index_course_stop_frame_id ON course_stop (frame_id)")
+            }
+        }
+
+        /**
+         * course_stop テーブル再作成（実機セッション#17が暴いた誤吸着の是正、2026-07-16）。
+         *
+         * 変更点: `event_id`（`stop_visit_event.id` への参照、NULL可）を新設する。version 11の
+         * frame_id新設と同じ理由でテーブル再作成（新テーブル作成→データコピー→旧テーブル削除→
+         * リネーム）を用いる。単純な ALTER TABLE ADD COLUMN でも列自体は追加できるが、SQLiteは
+         * ALTER TABLE ADD COLUMN で追加したFOREIGN KEY制約を `PRAGMA foreign_key_list` に正しく
+         * 反映しない場合があり、Roomのスキーマ検証（`ForeignKeyInfo`比較）に通らないおそれがある
+         * ため、確実にCREATE TABLE文でFKを定義できるテーブル再作成を選ぶ（[MIGRATION_10_11]の
+         * frame_id追加と同じ判断）。セッション削除機能は作らない方針のため、frame_id・stop_card_id
+         * と同様に意図的に ON DELETE RESTRICT で安全側に倒す。
+         *
+         * 既存データは全行「stop_card_id・frame_id はそのまま保持・event_id は NULL」で移行する
+         * （実機7コース・121行、1行も失わない前提。`BusCourseDatabaseMigrationTest`で検証）。
+         *
+         * 「frame_id・event_id・stop_card_idの少なくとも一つは非null」という拡張後の不変条件は、
+         * 引き続きRoomと相性の悪いDBのCHECK制約ではなくコード層
+         * （[com.istech.buscourse.course.CourseRepository.requireCoordinateSource]）で担保する
+         * （[CourseStopEntity]のKDoc参照）。
+         */
+        val MIGRATION_11_12 = object : androidx.room.migration.Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 新スキーマのテーブルを別名で作成（event_id を新設）
+                db.execSQL(
+                    "CREATE TABLE course_stop_new (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "course_id INTEGER NOT NULL, " +
+                        "stop_card_id INTEGER, " +
+                        "frame_id INTEGER, " +
+                        "event_id INTEGER, " +
+                        "sequence_index INTEGER NOT NULL, " +
+                        "expected_chainage_m REAL, " +
+                        "FOREIGN KEY(course_id) REFERENCES course(id) ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(stop_card_id) REFERENCES bus_stop_card(id) ON UPDATE NO ACTION ON DELETE RESTRICT, " +
+                        "FOREIGN KEY(frame_id) REFERENCES timelapse_frame(id) ON UPDATE NO ACTION ON DELETE RESTRICT, " +
+                        "FOREIGN KEY(event_id) REFERENCES stop_visit_event(id) ON UPDATE NO ACTION ON DELETE RESTRICT)"
+                )
+                // 2. 既存データをコピー。stop_card_id・frame_id は保持、event_id は常に NULL
+                db.execSQL(
+                    "INSERT INTO course_stop_new (id, course_id, stop_card_id, frame_id, event_id, sequence_index, expected_chainage_m) " +
+                        "SELECT id, course_id, stop_card_id, frame_id, NULL, sequence_index, expected_chainage_m FROM course_stop"
+                )
+                // 3. 旧テーブルを削除して新テーブルへリネーム
+                db.execSQL("DROP TABLE course_stop")
+                db.execSQL("ALTER TABLE course_stop_new RENAME TO course_stop")
+                // 4. 既存インデックスを再作成（旧テーブルのものを踏襲）し、event_id 用のインデックスを追加
+                db.execSQL("CREATE UNIQUE INDEX index_course_stop_course_id_sequence_index ON course_stop (course_id, sequence_index)")
+                db.execSQL("CREATE INDEX index_course_stop_course_id ON course_stop (course_id)")
+                db.execSQL("CREATE INDEX index_course_stop_frame_id ON course_stop (frame_id)")
+                db.execSQL("CREATE INDEX index_course_stop_event_id ON course_stop (event_id)")
             }
         }
     }

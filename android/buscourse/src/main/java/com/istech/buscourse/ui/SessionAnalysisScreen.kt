@@ -379,8 +379,13 @@ private fun DuplicateGroupRowView(
 
 /**
  * [splitByHubs] が返す1断片（拠点マーク間の非拠点マーク列）。
- * S4「コース創設」（[CourseCreateScreen]）でも断片プレビュー・コース仕様生成に使うため internal 化
- * （2026-07-14、出典: 元は本ファイルのセクション4用 private ヘルパー）。
+ *
+ * 2026-07-15注記: S4「コース創設」は3パス成熟モデルへの全面改訂（設計ドラフトv2）に伴い、
+ * パス1の点が `cardId=null`（映像のみ）を取りうるようになったため、`stopCardId` 非null前提の
+ * [MarkerTimelineRow] を使う本関数は流用できなくなった。[CourseCreateScreen] は同じ分割アルゴリズムを
+ * [com.istech.buscourse.course.splitCourseCreationStops] として独自に持つ
+ * （出典はこちら、[com.istech.buscourse.course.splitCourseCreationStops]のKDoc参照）。
+ * 本関数自体は「コース編成(抽出)」フェーズA-2（[SessionAnalysisDialog]）専用として引き続き使う。
  */
 internal data class CourseFragment(
     val startAt: Long,
@@ -399,8 +404,8 @@ internal data class HubSplitResult(
  * 拠点(HUB)マークで [timeline] を断片に分割する（セクション4、純Kotlinヘルパー、repo呼び出し不要）。
  * 先頭から走査し、`stopCardId` が [hubStopCardIds] に含まれるマークを境界とする。連続する境界
  * （＝拠点イベント）はまとめて1境界とし、境界間の非拠点マーク列を1断片とする
- * （session8実測＝拠点2点選択で3断片になる挙動）。
- * S4「コース創設」（[CourseCreateScreen]）と共用するため internal 化（2026-07-14）。
+ * （session8実測＝拠点2点選択で3断片になる挙動）。「コース編成(抽出)」フェーズA-2
+ * （[SessionAnalysisDialog]）専用（[CourseFragment]のクラスKDoc「2026-07-15注記」参照）。
  */
 internal fun splitByHubs(timeline: List<MarkerTimelineRow>, hubStopCardIds: Set<Long>): HubSplitResult {
     if (hubStopCardIds.isEmpty()) return HubSplitResult(emptyList(), emptyList())

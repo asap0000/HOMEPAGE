@@ -11,7 +11,6 @@ import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
 import com.istech.buscourse.course.CourseCreationResult
-import com.istech.buscourse.course.CourseCreationSpec
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.DuplicateFrameCandidate
@@ -325,20 +324,24 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * コース創設（トップダウン、S4「コース創設」画面 [CourseCreateScreen] 「創設」ボタン、
-     * 2026-07-14追加）。[specs] は断片ごとのコース名・停留所列（既存カード or 新規フレーム由来）。
-     * カード作成（ファイルI/O）を伴う書き込みのため、他の書き込み系関数と同様に[viewModelScope]
-     * 管理下で実行する（画面遷移によるスコープキャンセルで中途半端な創設状態を残さないため）。
+     * コース創設（トップダウン、3パス成熟モデルのパス1＋パス2、S4「コース創設」画面
+     * [CourseCreateScreen] 「創設」ボタン、2026-07-14追加・2026-07-15全面改訂）。
+     * [hubStopCardIds] は拠点分割の選択拠点、[courseNames] は断片indexに対応するコース名（空なら
+     * 既定名）。書き込み（course_stop等の複数DAO操作）を伴うため、他の書き込み系関数と同様に
+     * [viewModelScope] 管理下で実行する（画面遷移によるスコープキャンセルで中途半端な創設状態を
+     * 残さないため）。
      */
     fun createCoursesFromSession(
         sessionId: Long,
-        specs: List<CourseCreationSpec>,
+        hubStopCardIds: Set<Long>,
+        courseNames: List<String> = emptyList(),
         onResult: (Result<CourseCreationResult>) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val result = runCatching { repository.createCoursesFromSession(sessionId, specs) }
+            val result = runCatching { repository.createCoursesFromSession(sessionId, hubStopCardIds, courseNames) }
             logOutcome(result, WorkLogCategory.COURSE, "コース創設") { r ->
-                "セッション#${sessionId}からコース創設（作成${r.createdCourseIds.size}件・新規カード${r.newCardCount}件）"
+                "セッション#${sessionId}からコース創設（作成${r.createdCourseIds.size}件・停留所${r.totalStopCount}件・" +
+                    "カード吸着${r.cardAttachedStopCount}件・映像のみ${r.frameOnlyStopCount}件）"
             }
             onResult(result)
         }

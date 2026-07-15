@@ -44,16 +44,32 @@ data class CourseEntity(
  * version 11（2026-07-15、「座標を持つ点」への転換の土台）: `course_stop` を「座標を持つ点」として
  * 扱えるよう再定義した。映像（ローレゾ点＝[frameId]、`timelapse_frame` 参照）と戸籍（カード＝
  * [stopCardId]、`bus_stop_card` 参照）はどちらも任意の肉付けで、少なくとも一方があればよい。
- * 位置は「frame座標 → card座標」の順にcoalesceして解決する想定（この解決ロジック自体は
- * [com.istech.buscourse.course.CourseRepository] 側で今回未実装。データモデルの用意のみ）。
  * SQLiteはALTERでNOT NULL制約を外せないため、[stopCardId] のNULL許容化はテーブル再作成で行った
  * （[BusCourseDatabase.MIGRATION_10_11]）。既存データはすべて stop_card_id を保持・frame_id は NULL
  * ＝card-onlyの点として移行済み。
  *
- * **不変条件（コード層で担保。DBのCHECK制約は使わない）**: [frameId] と [stopCardId] の
- * 少なくとも一方は非nullでなければならない（RoomはCHECK制約と相性が悪いため）。この制約は
+ * version 12（2026-07-16、実機セッション#17が暴いた誤吸着の是正）: [eventId]
+ * （`stop_visit_event` 参照）を新設した。カメラが動かなかったセッションでは [frameId] を持てる点が
+ * 1つも作れないため、`stop_visit_event`（MANUAL）を一次素材にする必要があるが（設計ドラフトv2
+ * §3パス1）、押下時の正しい座標は `stop_visit_event.lat/lon` 自身にしかない。従来は
+ * `event.stop_card_id`（記録時の誤吸着先）をそのまま [stopCardId] に引き継いでいたため、実機
+ * セッション#17では24件中21件が300m〜3.3kmの誤吸着になっていた。[eventId] の新設により、
+ * 「イベント自身を指す点」を [stopCardId] を経由せず正確な座標のまま表現できる。
+ *
+ * **位置解決の順序（coalesce）**: 位置 = `coalesce(frame座標, event座標, card座標)`。
+ * - frame座標が最優先: 実際に撮影した静止画に紐づく実測値そのもの（手動マーク操作が成功した証跡）。
+ * - event座標が次点: `stop_visit_event.lat/lon` は押下瞬間の実測GPS fixで、frameが無い
+ *   （カメラ故障等）場合でも正確な位置が残っている。
+ * - card座標は最後の砦: `bus_stop_card` の座標は「記録時に（誤って）割り当てられたカードの位置」に
+ *   過ぎず誤吸着の影響を直接受けるため、frame/event座標が無い場合に限り使う。
+ * 実装は [com.istech.buscourse.course.CourseRepository] の `resolveStopPosition`（コース創設
+ * パス1、[com.istech.buscourse.course.CourseRepository.generatePass1RawStops] が呼ぶ）を参照。
+ *
+ * **不変条件（コード層で担保。DBのCHECK制約は使わない）**: [frameId]・[eventId]・[stopCardId] の
+ * 少なくとも一つは非nullでなければならない（RoomはCHECK制約と相性が悪いため）。この制約は
  * `course_stop` への書き込み経路である
- * [com.istech.buscourse.course.CourseRepository.setCourseStops] の
+ * [com.istech.buscourse.course.CourseRepository.setCourseStops]・
+ * [com.istech.buscourse.course.CourseRepository.insertCourseStopsFromPreview] の
  * `requireCoordinateSource` で担保する（同メソッドのKDoc参照）。
  */
 @Entity(
@@ -62,6 +78,7 @@ data class CourseEntity(
         Index(value = ["course_id", "sequence_index"], unique = true),
         Index(value = ["course_id"]),
         Index(value = ["frame_id"]),
+        Index(value = ["event_id"]),
     ],
     foreignKeys = [
         ForeignKey(
@@ -76,6 +93,10 @@ data class CourseEntity(
             entity = TimelapseFrameEntity::class, parentColumns = ["id"],
             childColumns = ["frame_id"], onDelete = ForeignKey.RESTRICT
         ),
+        ForeignKey(
+            entity = StopVisitEventEntity::class, parentColumns = ["id"],
+            childColumns = ["event_id"], onDelete = ForeignKey.RESTRICT
+        ),
     ]
 )
 data class CourseStopEntity(
@@ -89,10 +110,17 @@ data class CourseStopEntity(
     @ColumnInfo(name = "stop_card_id") val stopCardId: Long? = null,
     /**
      * 映像（ローレゾ点）側の座標参照。`timelapse_frame.id` を指す（version 11で新設）。
-     * NULL許容。[stopCardId] とあわせて「少なくとも一方は非null」という不変条件がある
+     * NULL許容。[stopCardId]・[eventId] とあわせて「少なくとも一つは非null」という不変条件がある
      * （本クラスのKDoc参照）。
      */
     @ColumnInfo(name = "frame_id") val frameId: Long? = null,
+    /**
+     * イベント（`stop_visit_event.id`）側の座標参照。NULL可（version 12で新設）。カメラが動かず
+     * [frameId] を持てないセッションで、押下時の正しい座標（`stop_visit_event.lat/lon`）を経由する
+     * ための参照。[frameId]・[stopCardId] とあわせて「少なくとも一つは非null」という不変条件がある
+     * （本クラスのKDoc参照）。
+     */
+    @ColumnInfo(name = "event_id") val eventId: Long? = null,
     /** 0-based順序 */
     @ColumnInfo(name = "sequence_index") val sequenceIndex: Int,
     /** コース起点からの累積距離キャッシュ。RoutePreprocessor が route_point 生成時に算出（§3.9・§7.3） */
