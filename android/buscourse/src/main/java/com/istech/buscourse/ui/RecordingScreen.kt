@@ -31,10 +31,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -61,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -122,7 +125,7 @@ fun RecordingScreen(
             if (isRecording) {
                 val sessionId = activeSessionId
                 if (sessionId != null) {
-                    RecordingActiveContent(sessionId = sessionId, database = database)
+                    RecordingActiveContent(sessionId = sessionId, database = database, stateStore = stateStore)
                 } else {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
@@ -384,6 +387,7 @@ private fun SessionTypeOption(
 private fun RecordingActiveContent(
     sessionId: Long,
     database: BusCourseDatabase,
+    stateStore: RecordingStateStore,
 ) {
     val context = LocalContext.current
 
@@ -398,6 +402,21 @@ private fun RecordingActiveContent(
             delay(1_000L)
         }
     }
+
+    // S0-c 撮影状況の常時表示（2026-07-15追加）。実車事故（セッション#17、2026-07-15）で
+    // カメラが1枚も撮影しないまま77分間気づけなかった反省を受け、frame_countのライブ表示を追加する。
+    // 既存のelapsedSecと同様、DAOにFlowクエリが無いため一定間隔のポーリングで代替する
+    // （BusRecordingService側のカメラ健全性チェック周期20秒より短く、増加が体感できる2秒間隔にする）。
+    var frameCount by remember { mutableStateOf(0) }
+    LaunchedEffect(sessionId) {
+        while (true) {
+            frameCount = database.recordingSessionDao().getById(sessionId)?.frameCount ?: frameCount
+            delay(2_000L)
+        }
+    }
+
+    // S0-b カメラ健全性チェックの結果（BusRecordingService → RecordingStateStore経由で公開）。
+    val cameraWarning by stateStore.cameraWarningFlow.collectAsState(initial = false)
 
     var stopRequested by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
@@ -442,6 +461,49 @@ private fun RecordingActiveContent(
         val m = (elapsedSec % 3600) / 60
         val s = elapsedSec % 60
         Text("経過時間: %02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.bodyLarge)
+
+        // S0-c 撮影状況の常時表示（2026-07-15追加）。実車事故（セッション#17、2026-07-15）で
+        // カメラが1枚も撮影しないまま77分間気づけなかった反省を踏まえたオーナー指示：
+        // 「通知画面よりも記録画面のボタンの方が視覚的にはるかに分かりやすい。振動は走行中だと
+        // 感じ取りにくい」。よって振動に頼らず、走行中の運転手が一目で分かるサイズで撮影枚数を
+        // 常時表示し、異常時は赤い警告表示を目立たせる（S0-bの[cameraWarning]を反映）。
+        Text(
+            "撮影枚数: ${frameCount}枚",
+            style = MaterialTheme.typography.titleLarge,
+            color = if (cameraWarning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        if (cameraWarning) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(32.dp),
+                    )
+                    Text(
+                        "映像が撮れていません",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        "停留所マークの位置情報は記録できますが、映像は保存されません。カメラの状態を確認してください。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+
         Text(
             "停留所に着いたら下のボタンを押してください。通知バーの「停留所マーク」ボタンからも同じ操作ができます。",
             style = MaterialTheme.typography.bodySmall,

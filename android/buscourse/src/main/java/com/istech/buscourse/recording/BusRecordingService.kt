@@ -28,6 +28,7 @@ import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.course.CourseRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -68,12 +69,19 @@ class BusRecordingService : LifecycleService() {
     private var thermalGuard: ThermalGuard? = null
     private var stopMasters: List<StopMaster> = emptyList()
 
+    /** カメラ健全性チェック（S0-b、2026-07-15追加）の判定ロジック本体と定期実行ジョブ。 */
+    private val cameraHealthMonitor = CameraHealthMonitor()
+    private var cameraHealthJob: Job? = null
+
     @Volatile private var currentSpeedKmh: Double = 0.0
     @Volatile private var thermalDegraded: Boolean = false
     @Volatile private var lastStopMarkElapsedMs: Long = 0L
 
     /** 手動停留所マークのセッション内成功回数（Toastフィードバック用、2026-07-13追加）。 */
     @Volatile private var stopMarkCount: Int = 0
+
+    /** 通知テキストの再構築用に現在セッションを保持する（S0-b、カメラ警告表示の切替に使用、2026-07-15追加）。 */
+    @Volatile private var currentSession: RecordingSessionEntity? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -147,6 +155,8 @@ class BusRecordingService : LifecycleService() {
                     targetToStopCardId = targetTo,
                 )
                 recordingStateStore.markRecording(session.id)
+                currentSession = session
+                cameraHealthMonitor.reset()
 
                 stopMasters = loadStopMasters(courseId)
                 stopDetector = StopDetector(stopMasters)
@@ -171,6 +181,7 @@ class BusRecordingService : LifecycleService() {
                 shock.start(handlerThread)
                 camera.start(::computeFrameIntervalMs) // メインスレッド（lifecycleScope）で呼ぶ必要あり
                 gnss.start(onLocation = ::onLocationUpdate)
+                cameraHealthJob = lifecycleScope.launch { runCameraHealthLoop() }
 
                 notificationManager.updateNotification(buildContentText(session))
                 courseRepository.logWork(
@@ -230,6 +241,48 @@ class BusRecordingService : LifecycleService() {
     }
 
     /**
+     * カメラ健全性の定期チェック（S0-b、2026-07-15追加）。
+     *
+     * 実車事故（本番運行セッション#17、2026-07-15）：カメラが1枚も撮影しないまま77分間気づけなかった。
+     * これを防ぐため、記録中は[CAMERA_HEALTH_CHECK_INTERVAL_MS]（20秒）ごとにDB上の累計フレーム数
+     * （`recording_session.frame_count`）を[sessionRepository]から取得し、[cameraHealthMonitor]へ渡す。
+     * `base_frame_interval_ms`は通常1000ms（1秒1枚）のため、20秒あれば正常なら十数枚は貯まっている
+     * 計算になり、閾値0枚（1枚も増えていない）でも十分な検知余裕がある。
+     *
+     * 誤警報対策：[CameraHealthMonitor]は「前回チェックからの増分」のみで判定するため、記録開始直後の
+     * カメラ初期化（CameraX bind〜最初のフレーム到達）にかかる数秒は最初の20秒間隔にそのまま吸収される
+     * （初期化だけで20秒を超えて遅延する機種があれば、それ自体が異常として警告して差し支えない）。
+     * 状態が変化した回のみ[onCameraHealthChanged]を呼ぶため、異常が続いている間に通知や振動を
+     * 連打することもない。セッションが終了すると[RecordingSessionRepository.getCurrentFrameCount]が
+     * nullを返すため、ループは自然終了する（明示キャンセルは[releaseControllers]でも行う）。
+     */
+    private suspend fun runCameraHealthLoop() {
+        while (true) {
+            delay(CAMERA_HEALTH_CHECK_INTERVAL_MS)
+            val frameCount = sessionRepository.getCurrentFrameCount() ?: return
+            if (cameraHealthMonitor.evaluate(frameCount)) {
+                onCameraHealthChanged(cameraHealthMonitor.isWarning)
+            }
+        }
+    }
+
+    /**
+     * カメラ健全性の状態が変化した時だけ呼ばれる（[CameraHealthMonitor.evaluate]がtrueを返した回のみ）。
+     * 常駐通知の警告表示切替・振動・[RecordingStateStore]（S0-c、`RecordingScreen`側の表示用）への
+     * 反映をまとめて行う。
+     */
+    private fun onCameraHealthChanged(warning: Boolean) {
+        if (warning) {
+            Log.w(TAG, "カメラ健全性チェック: フレームが増えていません。警告表示に切り替えます")
+            vibrateCameraWarning()
+        } else {
+            Log.i(TAG, "カメラ健全性チェック: 撮影が復帰しました。警告表示を解除します")
+        }
+        lifecycleScope.launch { recordingStateStore.setCameraWarning(warning) }
+        currentSession?.let { notificationManager.updateNotification(buildContentText(it), cameraWarning = warning) }
+    }
+
+    /**
      * 常駐通知の「停留所マーク」ボタン（設計書§4.8.3）。最寄りの登録済み停留所を対象にする。
      *
      * オーナー確定方針（2026-07-12、運行記録③機能）：手動マークではHIRES撮影を行わない。
@@ -237,6 +290,16 @@ class BusRecordingService : LifecycleService() {
      * 直前のLORESフレームへ `stop_card_id` をマーカーとして付与する（②のスクラバ用）。
      * AUTO検出（[captureAndRecordStopVisit] 経由、[onLocationUpdate] 参照）はHIRES撮影＋イベント記録の
      * 従来方式のまま変更しない（意図的な非対称。オーナー確認済み）。
+     *
+     * 【S0-a 3分岐フィードバック、2026-07-15追加】実車事故（本番運行セッション#17、2026-07-15、
+     * FULL_RUN・77分）：カメラが1枚も撮影しないままマーカーボタンを24回押し、24回とも成功の振動・
+     * Toastを受け取っていた。実際は毎回下記(b)のLORESフレーム探索が失敗し、黙って捨てられていた。
+     * この事故を防ぐため、押下結果を3分岐で正直に伝える。
+     *   1. 完全成功：`stop_visit_event`記録 ＋ LORESフレームへのマーク成功 → 成功の振動＋Toast
+     *   2. 部分成功＝映像なし：`stop_visit_event`は記録できたがLORESフレームが見つからない →
+     *      成功と区別できる振動パターン＋Toastで映像なしを明示する（位置情報自体は後の解析に
+     *      使えるため「失敗」とは言わない）
+     *   3. カード無し（`nearest == null`、下記の分岐）→ 振動なし＋Toast（従来どおり）
      */
     private fun onManualStopMark() {
         if (isDebounced(lastStopMarkElapsedMs)) return
@@ -262,15 +325,12 @@ class BusRecordingService : LifecycleService() {
             return
         }
 
-        vibrateMarkSuccess()
-        stopMarkCount++
-        val stopLabel = nearest.name?.takeIf { it.isNotBlank() } ?: "停留所#${nearest.id}"
-        Toast.makeText(this, "停留所マーク: ${stopLabel}（${stopMarkCount}件目）", Toast.LENGTH_SHORT).show()
-
         val markTs = System.currentTimeMillis()
         val distance = location?.let {
             GeoMath.haversineM(it.latitude, it.longitude, nearest.latitude, nearest.longitude)
         }
+        val stopLabel = nearest.name?.takeIf { it.isNotBlank() } ?: "停留所#${nearest.id}"
+
         lifecycleScope.launch {
             sessionRepository.recordStopVisitEvent(
                 stopCardId = nearest.id,
@@ -281,11 +341,27 @@ class BusRecordingService : LifecycleService() {
                 positionErrorM = distance,
                 hiresFrameId = null,
             )
+            // 位置情報の記録はここまでで完了している（＝「失敗」ではない）。以降はLORESフレームへの
+            // マーカー付与が成功したかどうかだけで、振動・Toastの内容を出し分ける。
+            stopMarkCount++
+
             val frameId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = markTs)
             if (frameId != null) {
                 sessionRepository.markStopCardOnLoresFrame(frameId, nearest.id)
+                vibrateMarkSuccess()
+                Toast.makeText(
+                    this@BusRecordingService, "停留所マーク: ${stopLabel}（${stopMarkCount}件目）", Toast.LENGTH_SHORT
+                ).show()
             } else {
+                // ここがセッション#17で24回連続発生した箇所。位置は記録済みだが映像側に異常がある
+                // ことを、成功時とは違う振動パターン・より長く表示するToastではっきり伝える。
                 Log.w(TAG, "手動停留所マーク: マーカーを付与するLORESフレームが見つかりません stopCardId=${nearest.id}")
+                vibrateMarkNoVideo()
+                Toast.makeText(
+                    this@BusRecordingService,
+                    "${stopLabel}の位置は記録しました。ただし映像が撮れていません。",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
@@ -295,13 +371,35 @@ class BusRecordingService : LifecycleService() {
         SystemClock.elapsedRealtime() - previousElapsedMs < intervalMs
 
     /**
-     * 停留所マーク成功時の触覚フィードバック（短-強の2連、2026-07-13強化）。
+     * 停留所マーク完全成功時の触覚フィードバック（短-強の2連、2026-07-13強化）。
      * 実車データ(session8)で「押した実感が無く再押ししてしまう」誤操作が確認されたため、
      * 単発50msの[VibrationEffect.createOneShot]から、はっきり分かる波形パターンへ変更した。
-     * 失敗時（最寄り停留所なし）は振動しない（Toastのみ）ことで成功/失敗を区別できるようにする。
+     * カード無し（[isDebounced]直後の分岐）は振動しない（Toastのみ）ことで成功/失敗を区別できるようにする。
      */
     private fun vibrateMarkSuccess() {
-        val effect = VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1)
+        vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1))
+    }
+
+    /**
+     * 停留所マーク「部分成功＝映像なし」時の触覚フィードバック（S0-a、2026-07-15追加）。
+     * [vibrateMarkSuccess]の「短-短」パターンと逆順の「長-短」にすることで、走行中に画面を見なくても
+     * 触感だけで完全成功と区別できるようにする（オーナー観察：振動自体は感じ取りにくいため、
+     * 主表示はS0-cの画面側に置き、振動はあくまで気づきのきっかけと位置付ける）。
+     */
+    private fun vibrateMarkNoVideo() {
+        vibrate(VibrationEffect.createWaveform(longArrayOf(0, 120, 80, 40), -1))
+    }
+
+    /**
+     * カメラ健全性チェック異常検知時の触覚フィードバック（S0-b、2026-07-15追加）。
+     * 単発の長い振動にすることで、停留所マークの2パターン（短-短／長-短）とも区別できるようにする。
+     */
+    private fun vibrateCameraWarning() {
+        vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300), -1))
+    }
+
+    /** [VibrationEffect]をAPIバージョンに応じた経路で発火する共通ヘルパー（2026-07-15、3パターンへの拡張に伴い共通化）。 */
+    private fun vibrate(effect: VibrationEffect) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vibratorManager.defaultVibrator.vibrate(effect)
@@ -407,6 +505,9 @@ class BusRecordingService : LifecycleService() {
         thermalGuard = null
         cameraCaptureController?.stop()
         cameraCaptureController = null
+        cameraHealthJob?.cancel() // S0-b：runCameraHealthLoopはgetCurrentFrameCount()がnullを返せば
+        cameraHealthJob = null    // 自然終了するが、明示キャンセルもして次回起動に持ち越さない
+        currentSession = null
     }
 
     override fun onDestroy() {
@@ -432,5 +533,8 @@ class BusRecordingService : LifecycleService() {
         private const val SHOCK_PRE_WINDOW_MS = 2_000L
         private const val SHOCK_POST_WINDOW_MS = 3_000L
         private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
+
+        /** カメラ健全性チェックの周期（S0-b、2026-07-15追加）。判定ロジックの詳細は[runCameraHealthLoop]参照。 */
+        private const val CAMERA_HEALTH_CHECK_INTERVAL_MS = 20_000L
     }
 }
