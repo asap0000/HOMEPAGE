@@ -63,6 +63,8 @@ import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
 import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseWithDetails
+import com.istech.buscourse.core.data.requireCard
+import com.istech.buscourse.core.data.requireStopCardId
 import com.istech.buscourse.course.CourseSegmentStatus
 import kotlinx.coroutines.launch
 import java.io.File
@@ -112,7 +114,9 @@ fun CourseDetailScreen(
     // 必要があるため宣言をLaunchedEffectより前に置く）。dirty中はeditedStopsの再構築をスキップする
     // （フェーズ2レビュー#7。無いと、GPX取込成功等でrefreshKey++された際にドラッグ&ドロップの
     // 未確定並べ替えが破棄されてしまう）
-    val persistedOrder = details?.stops?.sortedBy { it.courseStop.sequenceIndex }?.map { it.courseStop.stopCardId }
+    // course_stop.stop_card_id はNULL許容化されたが（[CourseStopWithCard]のクラスKDoc参照）、
+    // このコース編成画面は3パス化スコープ外＝常にカードのみの点前提のため requireStopCardId で明示する
+    val persistedOrder = details?.stops?.sortedBy { it.courseStop.sequenceIndex }?.map { it.courseStop.requireStopCardId }
     val dirty = persistedOrder != null && persistedOrder != editedStops.map { it.cardId }
 
     LaunchedEffect(courseId, refreshKey) {
@@ -138,7 +142,7 @@ fun CourseDetailScreen(
             } else {
                 loaded?.stops?.sortedBy { it.courseStop.sequenceIndex }?.forEach {
                     editedStops.add(
-                        StopRow(cardId = it.courseStop.stopCardId, name = it.card.name, riderCount = it.card.riderCount)
+                        StopRow(cardId = it.courseStop.requireStopCardId, name = it.requireCard.name, riderCount = it.requireCard.riderCount)
                     )
                 }
             }
@@ -249,7 +253,7 @@ fun CourseDetailScreen(
     }
 
     val cardNameById = remember(details) {
-        details?.stops?.associate { it.card.id to it.card.name }.orEmpty()
+        details?.stops?.associate { it.requireCard.id to it.requireCard.name }.orEmpty()
     }
 
     // 未確定の並べ替えがある状態でのシステム戻る操作は確認ダイアログを挟む(下書きはViewModel保持済みのため消失はしない)。

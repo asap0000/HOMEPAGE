@@ -40,12 +40,28 @@ data class CourseEntity(
 
 /**
  * `course_stop`（コース内の停留所順列。設計書§3.5）。企画原則の「順列」部分そのもの。
+ *
+ * version 11（2026-07-15、「座標を持つ点」への転換の土台）: `course_stop` を「座標を持つ点」として
+ * 扱えるよう再定義した。映像（ローレゾ点＝[frameId]、`timelapse_frame` 参照）と戸籍（カード＝
+ * [stopCardId]、`bus_stop_card` 参照）はどちらも任意の肉付けで、少なくとも一方があればよい。
+ * 位置は「frame座標 → card座標」の順にcoalesceして解決する想定（この解決ロジック自体は
+ * [com.istech.buscourse.course.CourseRepository] 側で今回未実装。データモデルの用意のみ）。
+ * SQLiteはALTERでNOT NULL制約を外せないため、[stopCardId] のNULL許容化はテーブル再作成で行った
+ * （[BusCourseDatabase.MIGRATION_10_11]）。既存データはすべて stop_card_id を保持・frame_id は NULL
+ * ＝card-onlyの点として移行済み。
+ *
+ * **不変条件（コード層で担保。DBのCHECK制約は使わない）**: [frameId] と [stopCardId] の
+ * 少なくとも一方は非nullでなければならない（RoomはCHECK制約と相性が悪いため）。この制約は
+ * `course_stop` への書き込み経路である
+ * [com.istech.buscourse.course.CourseRepository.setCourseStops] の
+ * `requireCoordinateSource` で担保する（同メソッドのKDoc参照）。
  */
 @Entity(
     tableName = "course_stop",
     indices = [
         Index(value = ["course_id", "sequence_index"], unique = true),
         Index(value = ["course_id"]),
+        Index(value = ["frame_id"]),
     ],
     foreignKeys = [
         ForeignKey(
@@ -56,12 +72,27 @@ data class CourseEntity(
             entity = BusStopCardEntity::class, parentColumns = ["id"],
             childColumns = ["stop_card_id"], onDelete = ForeignKey.RESTRICT
         ),
+        ForeignKey(
+            entity = TimelapseFrameEntity::class, parentColumns = ["id"],
+            childColumns = ["frame_id"], onDelete = ForeignKey.RESTRICT
+        ),
     ]
 )
 data class CourseStopEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     @ColumnInfo(name = "course_id") val courseId: Long,
-    @ColumnInfo(name = "stop_card_id") val stopCardId: Long,
+    /**
+     * 戸籍（カード）側の座標参照。version 11でNULL許容化（本クラスのKDoc「不変条件」参照）。
+     * カラム名は `timelapse_frame.stop_card_id` と揃えるため `stop_card_id` を維持している
+     * （`card_id` への改名はしない、2026-07-15オーナー確定）。
+     */
+    @ColumnInfo(name = "stop_card_id") val stopCardId: Long? = null,
+    /**
+     * 映像（ローレゾ点）側の座標参照。`timelapse_frame.id` を指す（version 11で新設）。
+     * NULL許容。[stopCardId] とあわせて「少なくとも一方は非null」という不変条件がある
+     * （本クラスのKDoc参照）。
+     */
+    @ColumnInfo(name = "frame_id") val frameId: Long? = null,
     /** 0-based順序 */
     @ColumnInfo(name = "sequence_index") val sequenceIndex: Int,
     /** コース起点からの累積距離キャッシュ。RoutePreprocessor が route_point 生成時に算出（§3.9・§7.3） */

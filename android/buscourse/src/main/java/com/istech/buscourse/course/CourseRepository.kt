@@ -17,6 +17,8 @@ import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RoutePointEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.TimelapseFrameEntity
+import com.istech.buscourse.core.data.requireCard
+import com.istech.buscourse.core.data.requireStopCardId
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.core.geo.GeoMath
@@ -545,6 +547,13 @@ class CourseRepository(
     /**
      * 順列の書き換え確定（追加・削除・ドラッグ&ドロップ並べ替えの確定操作）。
      * `course_stop` を全削除→再挿入し、§3.8どおり `regenerateCourseSegments` に接続する。
+     *
+     * `course_stop.stop_card_id` は version 11（[BusCourseDatabase.MIGRATION_10_11]）でNULL許容化
+     * されたが（「座標を持つ点」への転換、[CourseStopEntity]参照）、この関数自体は3パス化の解決
+     * ロジックを実装しない現状のスコープに合わせ、**従来どおり必ずカードを指す点として**作る
+     * （`frameId` は常に null）。将来frame座標のみの点を書き込む経路が追加されても、
+     * [requireCoordinateSource] を通すことで不変条件（frame_id/stop_card_idの少なくとも一方は非null）
+     * を担保する。
      */
     suspend fun setCourseStops(courseId: Long, stopCardIds: List<Long>) {
         database.withTransaction {
@@ -552,9 +561,11 @@ class CourseRepository(
             if (stopCardIds.isNotEmpty()) {
                 courseStopDao.insertAll(
                     stopCardIds.mapIndexed { index, cardId ->
+                        requireCoordinateSource(stopCardId = cardId, frameId = null, context = "courseId=$courseId, index=$index")
                         CourseStopEntity(
                             courseId = courseId,
                             stopCardId = cardId,
+                            frameId = null, // 3パス化の座標解決ロジックは未実装のため、現状は常にカードのみの点として作る
                             sequenceIndex = index,
                             expectedChainageM = null, // regenerate 後に RoutePreprocessor が再計算
                         )
@@ -569,6 +580,20 @@ class CourseRepository(
     }
 
     /**
+     * `course_stop` の不変条件チェック（[CourseStopEntity]のKDoc「不変条件」参照）: [frameId] と
+     * [stopCardId] の少なくとも一方が非nullであることを担保する。RoomはCHECK制約と相性が悪いため、
+     * DBのCHECK制約ではなくコード層（この関数）で担保する方針（2026-07-15オーナー確定）。
+     * `course_stop` への書き込み経路（現状は [setCourseStops] のみ）は必ずこの関数を通すこと。
+     * 違反時は [IllegalArgumentException] を送出する（既存の `require`/`check` を使ったバリデーション
+     * 流儀に合わせる）。
+     */
+    private fun requireCoordinateSource(stopCardId: Long?, frameId: Long?, context: String) {
+        require(stopCardId != null || frameId != null) {
+            "course_stop には stop_card_id / frame_id の少なくとも一方が必要です（$context）"
+        }
+    }
+
+    /**
      * コース区間の再構築（設計書§3.8の疑似コードどおり）。順列の隣接ペアごとに既存 `segment_track`
      * （有向エッジ）を引き当て、実測ありは CONFIRMED・未走行は PENDING で `course_segment` を作り直し、
      * 続けて `RoutePreprocessor.rebuildRoutePoints` で route_point / expected_chainage_m を再生成する。
@@ -579,13 +604,19 @@ class CourseRepository(
 
             courseSegmentDao.deleteAllForCourse(courseId)
 
+            // course_segment.from/to_stop_card_id は本タスクのスコープ外（カード列のみ）のため、
+            // setCourseStopsが常にカードのみの点として作る現状の前提どおり、requireStopCardId
+            // （非null実質保証、[CourseStopWithCard]のクラスKDoc参照）で明示する
+            // （frame座標のみの点からの区間生成は3パス化スコープで別途実装）。
             val newSegments = stops.zipWithNext().mapIndexed { i, (from, to) ->
-                val track = segmentTrackDao.findByDirectedEdge(from.stopCardId, to.stopCardId)
+                val fromCardId = from.requireStopCardId
+                val toCardId = to.requireStopCardId
+                val track = segmentTrackDao.findByDirectedEdge(fromCardId, toCardId)
                 CourseSegmentEntity(
                     courseId = courseId,
                     sequenceIndex = i,
-                    fromStopCardId = from.stopCardId,
-                    toStopCardId = to.stopCardId,
+                    fromStopCardId = fromCardId,
+                    toStopCardId = toCardId,
                     segmentTrackId = track?.id,
                     status = if (track != null) CourseSegmentStatus.CONFIRMED.name else CourseSegmentStatus.PENDING.name,
                 )
@@ -737,7 +768,7 @@ class CourseRepository(
 
         val missing = details.stops
             .sortedBy { it.courseStop.sequenceIndex }
-            .map { it.card }
+            .map { it.requireCard } // カードのみの点前提（[CourseStopWithCard]のクラスKDoc参照）
             .distinctBy { it.id }
             .filter { it.id !in markedStopIds }
             .map { card -> classifyMissingStop(card, points) }
@@ -1135,7 +1166,7 @@ class CourseRepository(
             courseDao.updateSourceSession(courseId, sessionId, now)
 
             val details = courseDao.getWithDetails(courseId) ?: return@withTransaction 0
-            val courseStopIds = details.stops.map { it.card.id }.toSet()
+            val courseStopIds = details.stops.map { it.requireCard.id }.toSet()
             if (courseStopIds.isEmpty()) return@withTransaction 0
 
             // セッション内の全マーカー（seq順＝時系列順）。拠点分割／拠点延伸の探索にはコース外のマーカーも要る。
@@ -1566,7 +1597,9 @@ class CourseRepository(
             "抽出可能なセッション種別ではありません（現在: ${session.type}）"
         }
 
-        val orderedStopCardIds = courseStopDao.getOrderedStops(courseId).map { it.stopCardId }
+        // 区間抽出（ジオフェンス走査）はカードのみの点を前提とする現状のスコープのため、
+        // regenerateCourseSegmentsと同様にrequireStopCardId（非null実質保証）で明示する
+        val orderedStopCardIds = courseStopDao.getOrderedStops(courseId).map { it.requireStopCardId }
         check(orderedStopCardIds.size >= 2) { "このコースには2つ以上の停留所が必要です" }
 
         val points = gpsPointDao.getBySession(sessionId)
@@ -1685,7 +1718,7 @@ class CourseRepository(
         val orderedSegments = details.segments.sortedBy { it.sequenceIndex }
 
         val waypoints = orderedStops.map { stopWithCard ->
-            val card = stopWithCard.card
+            val card = stopWithCard.requireCard
             GpxWaypoint(
                 lat = card.latitude,
                 lon = card.longitude,

@@ -199,7 +199,10 @@ class BusRecordingService : LifecycleService() {
     private suspend fun loadStopMasters(courseId: Long?): List<StopMaster> {
         val cards = if (courseId != null) {
             val stops = database.courseStopDao().getOrderedStops(courseId)
-            stops.mapNotNull { database.busStopCardDao().getById(it.stopCardId) }
+            // course_stop.stop_card_id はNULL許容化された（[CourseStopWithCard]のクラスKDoc参照）が、
+            // ここは既存の「カードが見つからなければ除外」という既存のmapNotNullの緩やかな扱いに
+            // 合わせ、null安全にたどるだけで例外は投げない（frame座標のみの点は3パス化スコープ）
+            stops.mapNotNull { stop -> stop.stopCardId?.let { database.busStopCardDao().getById(it) } }
         } else {
             database.busStopCardDao().getAllActive()
         }

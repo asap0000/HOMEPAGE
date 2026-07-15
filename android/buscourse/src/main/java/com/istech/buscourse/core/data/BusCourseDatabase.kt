@@ -53,6 +53,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * [com.istech.buscourse.course.CourseRepository.confirmCourseRouteFromSession] が
  * `database.withTransaction {}` で囲み冪等に書き込む（route_point は delete＋insertのため
  * 再実行しても重複しない）。
+ *
+ * version 11（2026-07-15、「座標を持つ点」への転換の土台）: course_stop.stop_card_id を
+ * NOT NULL → NULL許容に変更し、frame_id（`timelapse_frame` 参照、NULL可、ON DELETE RESTRICT）を
+ * 新設（[CourseStopEntity]）。SQLiteはALTERでNOT NULL制約を外せないため、テーブル再作成
+ * （新テーブル作成→データコピー→旧テーブル削除→リネーム）で行う（[MIGRATION_10_11]）。既存データは
+ * 全行 stop_card_id を保持・frame_id は NULL のまま移行する（card-onlyの点として、実機7コース・
+ * 121行を1行も失わない）。「frame_id と stop_card_id の少なくとも一方は非null」という不変条件は
+ * DBのCHECK制約ではなくコード層（[com.istech.buscourse.course.CourseRepository.setCourseStops]）で
+ * 担保する（RoomはCHECK制約と相性が悪いため）。
  */
 @Database(
     entities = [
@@ -70,7 +79,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WorkLogEntity::class,
         MapDataPackageEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -105,6 +114,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_7_8,
                 MIGRATION_8_9,
                 MIGRATION_9_10,
+                MIGRATION_10_11,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -215,6 +225,56 @@ abstract class BusCourseDatabase : RoomDatabase() {
         val MIGRATION_9_10 = object : androidx.room.migration.Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE course ADD COLUMN source_session_id INTEGER")
+            }
+        }
+
+        /**
+         * course_stop テーブル再作成（「座標を持つ点」への転換の土台、2026-07-15）。
+         *
+         * 変更点:
+         * 1. `stop_card_id` を NOT NULL → NULL許容に変更する。SQLiteはALTERでNOT NULL制約を
+         *    外せないため、Roomの定石どおりテーブル再作成（新テーブル作成→データコピー→
+         *    旧テーブル削除→リネーム）で行う。
+         * 2. `frame_id`（`timelapse_frame.id` への参照、NULL可）を新設する。セッション削除機能は
+         *    作らない方針のため、意図的に ON DELETE RESTRICT で安全側に倒す
+         *    （`stop_visit_event.stop_card_id` 等、既存の RESTRICT 方針を踏襲）。
+         *
+         * 既存データは全行「stop_card_id をそのまま保持・frame_id は NULL」＝card-onlyの点として
+         * 移行する（実機7コース・121行、1行も失わない前提。`BusCourseDatabaseMigrationTest`で検証）。
+         * カラム名は `stop_card_id` のまま維持する（`timelapse_frame.stop_card_id` と揃えるため。
+         * `card_id` への改名はしない、2026-07-15オーナー確定）。
+         *
+         * 「frame_id と stop_card_id の少なくとも一方は非null」という不変条件は、Roomと相性の悪い
+         * DBのCHECK制約ではなくコード層（[com.istech.buscourse.course.CourseRepository.setCourseStops]
+         * の `requireCoordinateSource`）で担保する（[CourseStopEntity]のKDoc参照）。
+         */
+        val MIGRATION_10_11 = object : androidx.room.migration.Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 新スキーマのテーブルを別名で作成（stop_card_id は NULL 許容、frame_id を新設）
+                db.execSQL(
+                    "CREATE TABLE course_stop_new (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "course_id INTEGER NOT NULL, " +
+                        "stop_card_id INTEGER, " +
+                        "frame_id INTEGER, " +
+                        "sequence_index INTEGER NOT NULL, " +
+                        "expected_chainage_m REAL, " +
+                        "FOREIGN KEY(course_id) REFERENCES course(id) ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(stop_card_id) REFERENCES bus_stop_card(id) ON UPDATE NO ACTION ON DELETE RESTRICT, " +
+                        "FOREIGN KEY(frame_id) REFERENCES timelapse_frame(id) ON UPDATE NO ACTION ON DELETE RESTRICT)"
+                )
+                // 2. 既存データをコピー。stop_card_id は保持、frame_id は常に NULL（card-onlyの点として移行）
+                db.execSQL(
+                    "INSERT INTO course_stop_new (id, course_id, stop_card_id, frame_id, sequence_index, expected_chainage_m) " +
+                        "SELECT id, course_id, stop_card_id, NULL, sequence_index, expected_chainage_m FROM course_stop"
+                )
+                // 3. 旧テーブルを削除して新テーブルへリネーム
+                db.execSQL("DROP TABLE course_stop")
+                db.execSQL("ALTER TABLE course_stop_new RENAME TO course_stop")
+                // 4. 既存インデックスを再作成（旧テーブルのものを踏襲）し、frame_id 用のインデックスを追加
+                db.execSQL("CREATE UNIQUE INDEX index_course_stop_course_id_sequence_index ON course_stop (course_id, sequence_index)")
+                db.execSQL("CREATE INDEX index_course_stop_course_id ON course_stop (course_id)")
+                db.execSQL("CREATE INDEX index_course_stop_frame_id ON course_stop (frame_id)")
             }
         }
     }

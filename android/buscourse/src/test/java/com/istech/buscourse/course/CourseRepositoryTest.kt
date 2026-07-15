@@ -10,6 +10,7 @@ import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.core.data.RoutePointEntity
 import com.istech.buscourse.core.data.TimelapseFrameEntity
+import com.istech.buscourse.core.data.requireCard
 import com.istech.buscourse.recording.FrameKind
 import com.istech.buscourse.recording.RecordingSessionStatus
 import com.istech.buscourse.recording.RecordingSessionType
@@ -299,7 +300,7 @@ class CourseRepositoryTest {
         val courseId = result.createdCourseIds.single()
         val details = repository.getCourseWithDetails(courseId)
         assertThat(details).isNotNull()
-        val stopCardIds = details!!.stops.sortedBy { it.courseStop.sequenceIndex }.map { it.card.id }
+        val stopCardIds = details!!.stops.sortedBy { it.courseStop.sequenceIndex }.map { it.requireCard.id }
         assertThat(stopCardIds).hasSize(3)
         assertThat(stopCardIds[0]).isEqualTo(cardA)
         assertThat(stopCardIds[2]).isEqualTo(cardB)

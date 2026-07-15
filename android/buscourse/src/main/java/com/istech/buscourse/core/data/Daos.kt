@@ -33,12 +33,37 @@ interface BusStopCardDao {
     suspend fun setHub(id: Long, hub: Boolean, t: Long)
 }
 
-/** `course_stop` を停留所カードと JOIN した集約（設計書§3.6 CourseWithDetails 用）。 */
+/**
+ * `course_stop` を停留所カードと JOIN した集約（設計書§3.6 CourseWithDetails 用）。
+ *
+ * 注意（version 11、[CourseStopEntity]参照）: `course_stop.stop_card_id` はNULL許容化されたが、
+ * [card] は非nullのまま据え置いている。現状の書き込み経路
+ * （[com.istech.buscourse.course.CourseRepository.setCourseStops]）は常にカードのみの点を作るため
+ * 実害はないが、将来frame座標のみの点（stop_card_id が null）を書き込む経路を追加する場合は、
+ * この集約（および利用側のexportCourse等）を合わせて見直すこと（3パス化の解決ロジックは本タスクの
+ * スコープ外）。
+ */
 data class CourseStopWithCard(
     @Embedded val courseStop: CourseStopEntity,
     @Relation(parentColumn = "stop_card_id", entityColumn = "id")
-    val card: BusStopCardEntity,
+    val card: BusStopCardEntity?,
 )
+
+/**
+ * [CourseStopWithCard.card] を非null前提で取り出す（[CourseStopWithCard]のクラスKDoc「注意」参照）。
+ * 現状の書き込み経路（[com.istech.buscourse.course.CourseRepository.setCourseStops]）は必ずカードのみの
+ * 点を作るため実質常に非null。frame座標のみの点（stop_card_id が null）を扱う3パス化の解決ロジックは
+ * 本タスクのスコープ外のため、それが実装されるまではこの前提で運用し、違反時はここで例外にする。
+ */
+val CourseStopWithCard.requireCard: BusStopCardEntity
+    get() = requireNotNull(card) { "course_stop(id=${courseStop.id}) にカードが紐づいていません（frame座標のみの点は未対応）" }
+
+/**
+ * [CourseStopEntity.stopCardId] を非null前提で取り出す（[CourseStopWithCard]のクラスKDoc「注意」参照、
+ * [requireCard]と同じ前提）。
+ */
+val CourseStopEntity.requireStopCardId: Long
+    get() = requireNotNull(stopCardId) { "course_stop(id=$id) の stop_card_id が null です（frame座標のみの点は未対応）" }
 
 /** コース詳細の一発取得用 集約POJO（設計書§3.6）。 */
 data class CourseWithDetails(

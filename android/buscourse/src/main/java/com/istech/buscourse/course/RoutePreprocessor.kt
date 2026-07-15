@@ -82,7 +82,10 @@ class RoutePreprocessor(
         val stops = courseStopDao.getOrderedStops(courseId) // sequence_index順＝走行順
         var cursor = 0
         for (stop in stops) {
-            val card = busStopCardDao.getById(stop.stopCardId)
+            // course_stop.stop_card_id はNULL許容化された（[CourseStopWithCard]のクラスKDoc参照）が、
+            // ここは既存の「カードが見つからなければ chainage=null」という既存の緩やかな扱いに
+            // 合わせ、null安全にたどるだけで例外は投げない（frame座標のみの点の投影は3パス化スコープ）
+            val card = stop.stopCardId?.let { busStopCardDao.getById(it) }
             val chainage = if (card == null || cursor >= points.size) {
                 null
             } else {

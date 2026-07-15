@@ -50,6 +50,8 @@ import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.MapDataPackageEntity
+import com.istech.buscourse.core.data.requireCard
+import com.istech.buscourse.core.data.requireStopCardId
 import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.map.GnssBackedLocationEngineAdapter
 import com.istech.buscourse.map.MapVehiclePositionOverlay
@@ -247,17 +249,20 @@ private fun RouteMapContent(
                         routePoints.map { it.lat to it.lon }, ROUTE_LINE_COLOR_HEX
                     )
                 } else {
+                    // course_stop.stop_card_id はNULL許容化されたが（[CourseStopWithCard]のクラスKDoc
+                    // 参照）、地図描画は3パス化スコープ外＝常にカードのみの点前提のため
+                    // requireStopCardId で明示する
                     stops.zipWithNext().forEach { (from, to) ->
                         routeOverlay.showSegment(
-                            from.courseStop.stopCardId, to.courseStop.stopCardId, ROUTE_LINE_COLOR_HEX
+                            from.courseStop.requireStopCardId, to.courseStop.requireStopCardId, ROUTE_LINE_COLOR_HEX
                         )
                     }
                 }
 
                 // ピンは旧・全アクティブカード表示ではなく、このコースの停留所だけに絞る。
-                val courseCards = stops.map { it.card }.distinctBy { it.id }
+                val courseCards = stops.map { it.requireCard }.distinctBy { it.id }
                 val sequenceIndexByCardId =
-                    stops.associate { it.courseStop.stopCardId to it.courseStop.sequenceIndex }
+                    stops.associate { it.courseStop.requireStopCardId to it.courseStop.sequenceIndex }
                 stopSymbolOverlay?.onDestroy()
                 val overlay = StopSymbolOverlay(
                     context = context,
@@ -274,7 +279,7 @@ private fun RouteMapContent(
                 // 停留所が2件未満（0件 or 1件で点になりgetCameraForLatLngBoundsが扱いにくい）、
                 // または地図サイズ未確定でgetCameraForLatLngBoundsがnullを返す場合は、
                 // パッケージbbox中心＋既定ズームへフォールバックする。
-                val stopLatLngs = stops.map { LatLng(it.card.latitude, it.card.longitude) }
+                val stopLatLngs = stops.map { LatLng(it.requireCard.latitude, it.requireCard.longitude) }
                 val fittedCameraPosition = if (stopLatLngs.size >= 2) {
                     val stopsBounds = LatLngBounds.Builder().apply {
                         stopLatLngs.forEach { include(it) }
