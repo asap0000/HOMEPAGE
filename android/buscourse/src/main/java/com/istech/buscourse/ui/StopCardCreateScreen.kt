@@ -155,16 +155,20 @@ fun StopCardCreateScreen(
         if (gnss.isRunning) return
         try {
             fixing = true
-            gnss.start(minIntervalMs = 500L, minDistanceM = 0f) { location ->
-                fixTimeoutJob?.cancel()
-                fixTimeoutJob = null
-                latitude = location.latitude
-                longitude = location.longitude
-                altitudeM = if (location.hasAltitude()) location.altitude else null
-                accuracyM = if (location.hasAccuracy()) location.accuracy.toDouble() else null
-                fixing = false
-                gnss.stop()
-            }
+            gnss.start(
+                minIntervalMs = 500L,
+                minDistanceM = 0f,
+                onLocation = { location ->
+                    fixTimeoutJob?.cancel()
+                    fixTimeoutJob = null
+                    latitude = location.latitude
+                    longitude = location.longitude
+                    altitudeM = if (location.hasAltitude()) location.altitude else null
+                    accuracyM = if (location.hasAccuracy()) location.accuracy.toDouble() else null
+                    fixing = false
+                    gnss.stop()
+                },
+            )
             // 電波不良等でコールバックが永久に来ない場合に備えたタイムアウト（フェーズ2レビュー#12）
             fixTimeoutJob = scope.launch {
                 delay(GPS_FIX_TIMEOUT_MS)

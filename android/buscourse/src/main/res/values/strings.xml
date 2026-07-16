@@ -9,6 +9,9 @@
     <string name="notification_text_initializing">記録を準備しています…</string>
     <!-- S0-b カメラ健全性チェック（2026-07-15追加）：LORESフレームが増えていない異常を検知した時の通知タイトル -->
     <string name="notification_title_camera_warning">⚠ 映像が撮れていません</string>
+    <!-- S0-d GNSS健全性チェック（2026-07-16追加）：衛星捕捉喪失で測位が失われている異常を検知した時の通知タイトル -->
+    <string name="notification_title_gnss_warning">⚠ 位置情報が取得できていません</string>
+    <string name="notification_title_camera_gnss_warning">⚠ 映像・位置とも異常です</string>
     <string name="notification_action_mark_stop">停留所マーク</string>
     <string name="notification_action_quick_capture">カード撮影</string>
 </resources>

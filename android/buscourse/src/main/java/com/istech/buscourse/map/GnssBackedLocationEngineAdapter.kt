@@ -23,7 +23,11 @@ class GnssBackedLocationEngineAdapter(private val gnss: GnssLocationSource) {
 
     /** [gnss]の位置更新購読を開始し、以後[sink]へ転送する（設計書§5.7.3のパラメータそのまま）。 */
     fun connect(sink: VehiclePositionSink) {
-        gnss.start(minIntervalMs = 1000L, minDistanceM = 2f) { location -> sink.onLocationUpdate(location) }
+        gnss.start(
+            minIntervalMs = 1000L,
+            minDistanceM = 2f,
+            onLocation = { location -> sink.onLocationUpdate(location) },
+        )
     }
 
     /** 位置更新購読を停止する（設計書サンプルにはないが、画面破棄時の後始末に必要なため追加）。冪等。 */

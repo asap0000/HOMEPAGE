@@ -25,6 +25,9 @@ private val Context.recordingStateDataStore by preferencesDataStore(name = "reco
  * （`CameraHealthMonitor`）が異常を検知した状態も同じ仕組みでUI（`RecordingScreen`）へ公開する。
  * `isRecording`/`sessionId`と同様、サービス⇔UI間で新たなIPC機構を増やさずDataStoreの購読で
  * 完結させる。[clear] はこのフラグも含め全キーを消すため、セッション終了時に明示リセット不要。
+ *
+ * 【S0-d GNSS健全性フラグ、2026-07-16追加】測位側（`GnssHealthMonitor`）の異常検知結果も
+ * カメラ側と対称に同じ仕組みで公開する。
  */
 class RecordingStateStore(private val context: Context) {
 
@@ -38,6 +41,10 @@ class RecordingStateStore(private val context: Context) {
     val cameraWarningFlow: Flow<Boolean> =
         context.recordingStateDataStore.data.map { it[KEY_CAMERA_WARNING] ?: false }
 
+    /** GNSS異常（測位が失われている）状態。既定はfalse（正常）。 */
+    val gnssWarningFlow: Flow<Boolean> =
+        context.recordingStateDataStore.data.map { it[KEY_GNSS_WARNING] ?: false }
+
     suspend fun markRecording(sessionId: Long) {
         context.recordingStateDataStore.edit { prefs ->
             prefs[KEY_IS_RECORDING] = true
@@ -50,6 +57,11 @@ class RecordingStateStore(private val context: Context) {
         context.recordingStateDataStore.edit { prefs -> prefs[KEY_CAMERA_WARNING] = active }
     }
 
+    /** GNSS健全性チェックの結果を反映する（`BusRecordingService`が状態遷移時のみ呼ぶ）。 */
+    suspend fun setGnssWarning(active: Boolean) {
+        context.recordingStateDataStore.edit { prefs -> prefs[KEY_GNSS_WARNING] = active }
+    }
+
     suspend fun clear() {
         context.recordingStateDataStore.edit { it.clear() }
     }
@@ -60,5 +72,6 @@ class RecordingStateStore(private val context: Context) {
         private val KEY_IS_RECORDING = booleanPreferencesKey("is_recording")
         private val KEY_SESSION_ID = longPreferencesKey("session_id")
         private val KEY_CAMERA_WARNING = booleanPreferencesKey("camera_warning")
+        private val KEY_GNSS_WARNING = booleanPreferencesKey("gnss_warning")
     }
 }

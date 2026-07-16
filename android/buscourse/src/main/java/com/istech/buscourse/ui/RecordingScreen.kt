@@ -418,6 +418,9 @@ private fun RecordingActiveContent(
     // S0-b カメラ健全性チェックの結果（BusRecordingService → RecordingStateStore経由で公開）。
     val cameraWarning by stateStore.cameraWarningFlow.collectAsState(initial = false)
 
+    // S0-d GNSS健全性チェックの結果（BusRecordingService → RecordingStateStore経由で公開、2026-07-16追加）。
+    val gnssWarning by stateStore.gnssWarningFlow.collectAsState(initial = false)
+
     var stopRequested by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
 
@@ -496,6 +499,46 @@ private fun RecordingActiveContent(
                     )
                     Text(
                         "停留所マークの位置情報は記録できますが、映像は保存されません。カメラの状態を確認してください。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+
+        // S0-d 測位状態の常時表示（2026-07-16追加）。カメラ側S0-cと同じ考え方：
+        // オーナー観察「走行中は振動を体感しづらい。画面表示の方が圧倒的に分かりやすい」を踏まえ、
+        // 測位についても振動だけに頼らず常時表示する。
+        Text(
+            "測位: ${if (gnssWarning) "警告" else "正常"}",
+            style = MaterialTheme.typography.titleLarge,
+            color = if (gnssWarning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        if (gnssWarning) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(32.dp),
+                    )
+                    Text(
+                        "位置情報が取得できていません",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        "停留所マークを押しても位置がずれて記録される可能性があります。GPSが有効か、屋外・見通しの良い場所か確認してください。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         textAlign = TextAlign.Center,
