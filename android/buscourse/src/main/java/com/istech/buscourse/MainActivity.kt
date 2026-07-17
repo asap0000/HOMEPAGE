@@ -20,6 +20,7 @@ import com.istech.buscourse.ui.HomeScreen
 import com.istech.buscourse.ui.MapImportScreen
 import com.istech.buscourse.ui.RecordingScreen
 import com.istech.buscourse.ui.RouteMapScreen
+import com.istech.buscourse.ui.SpeedMapScreen
 import com.istech.buscourse.ui.StopCardCreateScreen
 import com.istech.buscourse.ui.StopCardEditScreen
 import com.istech.buscourse.ui.StopCardListScreen
@@ -69,10 +70,14 @@ private object Routes {
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
     const val MAP_IMPORT = "map_import"
+    // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
+    // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
+    const val SPEED_MAP = "sessions/{sessionId}/speedmap"
     fun stopCardEdit(id: Long) = "stopcards/$id"
     fun stopCardRetake(id: Long) = "stopcards/$id/retake"
     fun courseDetail(id: Long) = "courses/$id"
     fun courseMap(id: Long) = "courses/$id/map"
+    fun speedMap(sessionId: Long) = "sessions/$sessionId/speedmap"
 }
 
 @Composable
@@ -180,6 +185,7 @@ private fun AppNavHost() {
             CourseCreateScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
+                onOpenSpeedMap = { sessionId -> navController.navigate(Routes.speedMap(sessionId)) },
             )
         }
         composable(Routes.MAP_IMPORT) {
@@ -187,6 +193,17 @@ private fun AppNavHost() {
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
             )
+        }
+        composable(Routes.SPEED_MAP) { backStackEntry ->
+            val sessionId = backStackEntry.arguments?.getString("sessionId")?.toLongOrNull()
+            if (sessionId != null) {
+                SpeedMapScreen(
+                    viewModel = viewModel,
+                    sessionId = sessionId,
+                    onBack = { navController.popBackStack() },
+                    onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+                )
+            }
         }
     }
 }

@@ -123,8 +123,12 @@ fun RouteMapScreen(
     }
 }
 
+/**
+ * 地図パッケージ未インポート時の空状態（[RouteMapScreen]・[com.istech.buscourse.ui.SpeedMapScreen]の
+ * 共通導線のためinternal公開、2026-07-18）。
+ */
 @Composable
-private fun MapEmptyState(modifier: Modifier = Modifier, onOpenMapImport: () -> Unit) {
+internal fun MapEmptyState(modifier: Modifier = Modifier, onOpenMapImport: () -> Unit) {
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,

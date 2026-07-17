@@ -27,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -72,6 +73,7 @@ import com.istech.buscourse.course.splitCourseCreationStops
 fun CourseCreateScreen(
     viewModel: BusCourseViewModel,
     onBack: () -> Unit,
+    onOpenSpeedMap: (Long) -> Unit,
 ) {
     val repository = viewModel.repository
     var sessions by remember { mutableStateOf<List<RecordingSessionEntity>>(emptyList()) }
@@ -136,6 +138,7 @@ fun CourseCreateScreen(
             sessionId = sessionId,
             viewModel = viewModel,
             onDismiss = { creatingSessionId = null },
+            onOpenSpeedMap = onOpenSpeedMap,
         )
     }
 }
@@ -156,6 +159,7 @@ private fun CourseCreateDialog(
     sessionId: Long,
     viewModel: BusCourseViewModel,
     onDismiss: () -> Unit,
+    onOpenSpeedMap: (Long) -> Unit,
 ) {
     val repository = viewModel.repository
     val context = LocalContext.current
@@ -237,6 +241,17 @@ private fun CourseCreateDialog(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     item { SummarySection(currentPreview) }
+                    item {
+                        // 速度マップへの導線（トップダウン創設S4、設計ドラフトv2§6）。
+                        // マーカーが無い停車・徐行を確認したいときの検証用入口として、パス1/2の
+                        // プレビュー画面から直接開けるようにした（入口の判断は本タスクに委ねられていた）。
+                        OutlinedButton(
+                            onClick = { onOpenSpeedMap(sessionId) },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        ) {
+                            Text("このセッションの速度マップを見る")
+                        }
+                    }
                     item { SectionHeader("拠点で分割") }
                     item {
                         HubChipsSection(
