@@ -1705,6 +1705,21 @@ class CourseRepository(
     }
 
     /**
+     * S8「再創設ガード」（読み取り専用、設計ドラフトv2 §9、2026-07-18追加）。指定セッションから
+     * 既に創設済みのコースを検出する。[createCoursesFromSession] は意図的に非冪等（同メソッドのKDoc
+     * 「冪等ではない」参照）であり、同じセッションから2回創設すると重複コースができてしまう
+     * （実データ実例: セッション#8からS8-1/S8-2/S8-3が2組、course id 6/7/8 と 9/10/11）。
+     *
+     * オーナー確定の設計方針（2026-07-18）: この検出結果は**作成をブロックしない**。作り直したい
+     * 正当なケース（上記の#9/#10/#11がまさにそれ）を塞がないため、UI
+     * （[com.istech.buscourse.ui.CourseCreateScreen]）が創設前に見せる警告バナー用の「読み取り専用の
+     * 事前確認」としてのみ使う。上書き・マージ（重複コースの統合）はフェーズ4スコープ
+     * （設計ドラフトv2 §9「思いつき9」）のため本メソッドの対象外。
+     */
+    suspend fun findExistingCoursesFromSession(sessionId: Long): List<CourseEntity> =
+        courseDao.getBySourceSession(sessionId)
+
+    /**
      * コース創設（トップダウン、パス1＋パス2、2026-07-15全面改訂）。[sessionId] からパス1（悉皆生成）
      * →パス2（吸着・昇格）で点列を作り、[hubStopCardIds] で拠点分割（[splitCourseCreationStops]）して
      * 断片ごとに1コースを作る。[courseNames] は断片indexに対応するコース名（[courseNames]が短い・
@@ -1715,7 +1730,9 @@ class CourseRepository(
      * [confirmCourseRouteFromSession]（route_point生成。同メソッドのKDoc参照、カード無し点も安全）。
      *
      * **冪等ではない**：呼ぶたびに新しいコースを作成する（創設＝新規作成という操作の意味論上、
-     * 意図的に非冪等。二重生成ガードは設計ドラフトv2 §9のスコープで別途実装）。
+     * 意図的に非冪等）。二重生成ガード（S8、2026-07-18実装）は[findExistingCoursesFromSession]
+     * による読み取り専用の事前検出＋UI側の警告バナーのみで、このメソッド自体には手を加えない
+     * （オーナー確定：ブロックせず警告に留める。作り直したい正当なケースを塞がないため）。
      * パス1はbus_stop_cardを一切作らない（[CourseCreationStopPreview]のクラスKDoc参照）ため、
      * 既存コース・既存カードは一切変更しない（新規追加のみ）。
      */

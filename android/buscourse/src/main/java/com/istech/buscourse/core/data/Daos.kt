@@ -98,6 +98,16 @@ interface CourseDao {
     suspend fun updateSourceSession(courseId: Long, sourceSessionId: Long, updatedAt: Long)
 
     /**
+     * 指定セッションから既に創設済みのコース一覧（S8「再創設ガード」、2026-07-18追加、
+     * [com.istech.buscourse.course.CourseRepository.findExistingCoursesFromSession]が使用）。
+     * `source_session_id` は createCoursesFromSession の断片ごとの創設フローを通れば
+     * [updateSourceSession] で必ず設定される（[CourseEntity.sourceSessionId]のKDoc参照）ため、
+     * このクエリで「同じセッションから既に何本創設済みか」を検出できる。created_at昇順（古い順）で返す。
+     */
+    @Query("SELECT * FROM course WHERE source_session_id = :sessionId ORDER BY created_at")
+    suspend fun getBySourceSession(sessionId: Long): List<CourseEntity>
+
+    /**
      * コース削除（コース削除機能、2026-07-14追加、
      * [com.istech.buscourse.course.CourseRepository.deleteCourse]が使用）。
      * `course` は参照リストのため物理削除。`course_stop`/`route_point`/`course_segment` は

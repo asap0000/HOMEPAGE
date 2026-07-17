@@ -28,9 +28,10 @@ import org.robolectric.annotation.Config
  * [CourseRepository] のS1(find-or-create半径判定)/S2(セッション全体カバレッジ)/S3(トップダウン
  * コース創設、3パス成熟モデルのパス1＋パス2)・[CourseRepository.analyzeStopEstimates]
  * （パス3=停車推定の示唆、設計ドラフトv2 §3パス3・実装ステップS3）・
- * [CourseRepository.reassignMarkerFrames]・[CourseRepository.deleteCourse] の単体テスト
+ * [CourseRepository.reassignMarkerFrames]・[CourseRepository.deleteCourse]・
+ * [CourseRepository.findExistingCoursesFromSession]（S8「再創設ガード」）の単体テスト
  * （Room in-memory DB + Robolectric、②「コース編成(抽出)」フェーズB/S1〜S3、2026-07-14追加・
- * 2026-07-15パス1/パス2対応で改訂・2026-07-18パス3(停車推定)追加）。
+ * 2026-07-15パス1/パス2対応で改訂・2026-07-18パス3(停車推定)・S8(再創設ガード)追加）。
  *
  * 実データの完全再現はせず、各ロジックの分岐（半径しきい値・コリドー内外・カスケード削除・
  * パス1の素材2種の統合と重複防止・低速クラスタのdwell閾値等）を最小限のseedデータで突く。
@@ -735,6 +736,68 @@ class CourseRepositoryTest {
         // 停留所カードは削除されず残る
         assertThat(repository.getStopCard(cardA)).isNotNull()
         assertThat(repository.getStopCard(cardB)).isNotNull()
+    }
+
+    // ------------------------------------------------------------------
+    // findExistingCoursesFromSession（S8「再創設ガード」、読み取り専用、2026-07-18追加）
+    // ------------------------------------------------------------------
+
+    /** 一度も創設していないセッションでは空を返す。 */
+    @Test
+    fun findExistingCoursesFromSession_neverCreated_returnsEmpty() = runTest {
+        val sessionId = insertSession()
+
+        val existing = repository.findExistingCoursesFromSession(sessionId)
+
+        assertThat(existing).isEmpty()
+    }
+
+    /** あるセッションから創設した後、そのコースを検出する。 */
+    @Test
+    fun findExistingCoursesFromSession_afterCreation_detectsCreatedCourses() = runTest {
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val sessionId = insertSession()
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
+
+        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+
+        val existing = repository.findExistingCoursesFromSession(sessionId)
+
+        assertThat(existing.map { it.id }).containsExactlyElementsIn(result.createdCourseIds)
+    }
+
+    /** 別セッション由来のコースは検出しない。 */
+    @Test
+    fun findExistingCoursesFromSession_otherSession_isNotDetected() = runTest {
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val sessionA = insertSession()
+        insertFrame(sessionA, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
+        repository.createCoursesFromSession(sessionA, hubStopCardIds = emptySet())
+
+        val sessionB = insertSession() // 別セッション、まだ創設していない
+
+        val existing = repository.findExistingCoursesFromSession(sessionB)
+
+        assertThat(existing).isEmpty()
+    }
+
+    /**
+     * 同じセッションから2回創設すると、両方の創設分が検出される（実データ実例のセッション#8と同じ
+     * 状況の再現。[CourseRepository.createCoursesFromSession]は意図的に非冪等で、二重生成ガードは
+     * ブロックせず警告のみに留める設計のため、2回目の作成自体はエラーにならない）。
+     */
+    @Test
+    fun findExistingCoursesFromSession_createdTwice_detectsBothRounds() = runTest {
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val sessionId = insertSession()
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
+
+        val first = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val second = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+
+        val existing = repository.findExistingCoursesFromSession(sessionId)
+
+        assertThat(existing.map { it.id }).containsExactlyElementsIn(first.createdCourseIds + second.createdCourseIds)
     }
 
     // ------------------------------------------------------------------

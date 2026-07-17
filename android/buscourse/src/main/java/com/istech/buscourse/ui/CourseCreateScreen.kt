@@ -14,13 +14,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -45,6 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseCreationFragment
 import com.istech.buscourse.course.CourseCreationResult
@@ -169,6 +174,9 @@ private fun CourseCreateDialog(
     var hubSelection by remember(sessionId) { mutableStateOf<Set<Long>>(emptySet()) }
     var hubSelectionInitialized by remember(sessionId) { mutableStateOf(false) }
     var courseNameOverrides by remember(sessionId) { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    // S8「再創設ガード」用: このセッションから既に創設済みのコース（[CourseRepository.findExistingCoursesFromSession]）。
+    // 非空なら警告バナーを出すが、作成はブロックしない（オーナー確定、[CourseRepository.createCoursesFromSession]のKDoc参照）。
+    var existingCourses by remember(sessionId) { mutableStateOf<List<CourseEntity>>(emptyList()) }
 
     var creating by remember(sessionId) { mutableStateOf(false) }
     var resultMessage by remember(sessionId) { mutableStateOf<String?>(null) }
@@ -185,6 +193,9 @@ private fun CourseCreateDialog(
             hubSelection = loadedPreview.filter { it.isHubCandidate }.mapNotNull { it.cardId }.toSet()
             hubSelectionInitialized = true
         }
+        // 再創設ガード（S8）: プレビューの成否に関わらず、既存創設コースの有無は確認しておく
+        // （読み取り専用。失敗してもプレビュー自体は使えるようにするため、ここは黙って空扱いにする）。
+        existingCourses = runCatching { repository.findExistingCoursesFromSession(sessionId) }.getOrDefault(emptyList())
         loading = false
     }
 
@@ -240,6 +251,13 @@ private fun CourseCreateDialog(
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 48.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    // S8「再創設ガード」: 既に創設済みのコースがあれば冒頭に警告バナーを出す
+                    // （ブロックはしない、[CourseRepository.findExistingCoursesFromSession]のKDoc参照）。
+                    if (existingCourses.isNotEmpty()) {
+                        item {
+                            ExistingCoursesWarningBanner(existingCourses)
+                        }
+                    }
                     item { SummarySection(currentPreview) }
                     item {
                         // 速度マップへの導線（トップダウン創設S4、設計ドラフトv2§6）。
@@ -287,7 +305,10 @@ private fun CourseCreateDialog(
                                 onClick = { createCourses() },
                                 enabled = !creating && fragments.isNotEmpty(),
                             ) {
-                                Text(if (creating) "創設中…" else "創設（断片${fragments.size}件）")
+                                // 既存創設コースがある場合はボタン文言でも二重生成であることを分かるようにする
+                                // （S8、ブロックはしない。文言変更のみ）。
+                                val label = if (existingCourses.isNotEmpty()) "重複して作成" else "創設"
+                                Text(if (creating) "創設中…" else "$label（断片${fragments.size}件）")
                             }
                         }
                     }
@@ -313,6 +334,45 @@ private fun CourseCreateDialog(
                 ) { Text("OK") }
             },
         )
+    }
+}
+
+/**
+ * S8「再創設ガード」の警告バナー（2026-07-18追加）。[existingCourses] は
+ * [com.istech.buscourse.course.CourseRepository.findExistingCoursesFromSession] が返す、
+ * このセッションから既に創設済みのコース一覧。オーナー確定の設計方針により、これは**警告に留まり
+ * 作成をブロックしない**（作り直したい正当なケースを塞がないため。詳細は同メソッドのKDoc参照）。
+ */
+@Composable
+private fun ExistingCoursesWarningBanner(existingCourses: List<CourseEntity>) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(24.dp),
+            )
+            Column {
+                Text(
+                    "このセッションからは既に${existingCourses.size}本のコースを作成しています。" +
+                        "もう一度作成すると、上書きではなく重複して増えます。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Text(
+                    "既存: " + existingCourses.joinToString("、") { it.name },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
     }
 }
 
