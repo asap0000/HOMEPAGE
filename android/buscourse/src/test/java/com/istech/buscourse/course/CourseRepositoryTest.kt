@@ -26,13 +26,15 @@ import org.robolectric.annotation.Config
 
 /**
  * [CourseRepository] のS1(find-or-create半径判定)/S2(セッション全体カバレッジ)/S3(トップダウン
- * コース創設、3パス成熟モデルのパス1＋パス2)・[CourseRepository.reassignMarkerFrames]・
- * [CourseRepository.deleteCourse] の単体テスト（Room in-memory DB + Robolectric、
- * ②「コース編成(抽出)」フェーズB/S1〜S3、2026-07-14追加・2026-07-15パス1/パス2対応で改訂）。
+ * コース創設、3パス成熟モデルのパス1＋パス2)・[CourseRepository.analyzeStopEstimates]
+ * （パス3=停車推定の示唆、設計ドラフトv2 §3パス3・実装ステップS3）・
+ * [CourseRepository.reassignMarkerFrames]・[CourseRepository.deleteCourse] の単体テスト
+ * （Room in-memory DB + Robolectric、②「コース編成(抽出)」フェーズB/S1〜S3、2026-07-14追加・
+ * 2026-07-15パス1/パス2対応で改訂・2026-07-18パス3(停車推定)追加）。
  *
  * 実データの完全再現はせず、各ロジックの分岐（半径しきい値・コリドー内外・カスケード削除・
- * パス1の素材2種の統合と重複防止等）を最小限のseedデータで突く。パス1＋パス2はカードを作らない
- * 設計（v2）のため写真ファイルI/O（旧S3テスト）は不要になった。
+ * パス1の素材2種の統合と重複防止・低速クラスタのdwell閾値等）を最小限のseedデータで突く。
+ * パス1＋パス2はカードを作らない設計（v2）のため写真ファイルI/O（旧S3テスト）は不要になった。
  */
 // application = android.app.Application::class: マニフェスト既定の BusCourseApplication だと
 // onCreate() が StorageRotationWorker.schedule(this) 経由で WorkManager.getInstance(context) を呼び、
@@ -173,6 +175,39 @@ class CourseRepositoryTest {
                 lon = baseLon,
                 altM = null,
                 speedMps = 5.0,
+                bearingDeg = null,
+                accuracyM = null,
+            )
+        }
+        db.gpsPointDao().insertAll(points)
+    }
+
+    /**
+     * S3(パス3、停車推定)テスト用: 同一座標に速度[speedMps]で滞在する低速クラスタを、
+     * [startTs]から[intervalMs]間隔で[count]点ぶん投入する（seqは[seqStart]起点）。
+     * 末尾点の`ts_epoch_ms`は`startTs + (count-1)*intervalMs`になるため、
+     * 滞在秒数(dwellSec)を`(count-1)*intervalMs/1000.0`として狙い撃ちできる。
+     */
+    private suspend fun insertSlowCluster(
+        sessionId: Long,
+        seqStart: Int,
+        lat: Double,
+        lon: Double,
+        speedMps: Double,
+        startTs: Long,
+        intervalMs: Long,
+        count: Int,
+    ) {
+        val points = (0 until count).map { i ->
+            GpsPointEntity(
+                sessionId = sessionId,
+                seq = seqStart + i,
+                tsEpochMs = startTs + i * intervalMs,
+                elapsedRealtimeNanos = (seqStart + i) * 1_000_000_000L,
+                lat = lat,
+                lon = lon,
+                altM = null,
+                speedMps = speedMps,
                 bearingDeg = null,
                 accuracyM = null,
             )
@@ -535,6 +570,122 @@ class CourseRepositoryTest {
             db.courseStopDao().getOrderedStops(courseId).map { it.stopCardId }
         }
         assertThat(allStopCardIds).containsExactly(cardA, cardB)
+    }
+
+    // ------------------------------------------------------------------
+    // analyzeStopEstimates（パス3=停車推定の示唆、設計ドラフトv2 §3パス3・実装ステップS3、
+    // 2026-07-18追加）。ファイル冒頭KDocの「S1/S2/S3」は本ファイル内の旧グルーピング名で、
+    // 設計ドラフト§8の実装ステップ番号(S1〜S8)とは対応が異なる（本セクションは実装ステップの
+    // S3に当たる）。命名の衝突を避けるため、本セクションは関数名で参照する。
+    // ------------------------------------------------------------------
+
+    /** 低速クラスタの滞在秒数がDWELL_MIN_SEC(20秒)以上なら示唆に出る。 */
+    @Test
+    fun stopEstimate_clusterAboveDwellThreshold_appearsInEstimates() = runTest {
+        val sessionId = insertSession()
+        // 0,5,10,...,25秒の6点(速度0.5m/s) → 滞在25秒
+        insertSlowCluster(
+            sessionId, seqStart = 0, lat = 35.000, lon = 139.000, speedMps = 0.5,
+            startTs = 1_700_000_000_000L, intervalMs = 5000L, count = 6,
+        )
+
+        val estimates = repository.analyzeStopEstimates(sessionId)
+
+        assertThat(estimates).hasSize(1)
+        assertThat(estimates.single().dwellSec).isEqualTo(25.0)
+        assertThat(estimates.single().latitude).isEqualTo(35.000)
+        assertThat(estimates.single().longitude).isEqualTo(139.000)
+    }
+
+    /** 低速クラスタでも滞在秒数がDWELL_MIN_SEC未満なら示唆に出ない（信号待ち程度の短い減速を拾わない）。 */
+    @Test
+    fun stopEstimate_clusterBelowDwellThreshold_isExcluded() = runTest {
+        val sessionId = insertSession()
+        // 0,5,10秒の3点(速度0.5m/s) → 滞在10秒(<20秒)
+        insertSlowCluster(
+            sessionId, seqStart = 0, lat = 35.000, lon = 139.000, speedMps = 0.5,
+            startTs = 1_700_000_000_000L, intervalMs = 5000L, count = 3,
+        )
+
+        val estimates = repository.analyzeStopEstimates(sessionId)
+
+        assertThat(estimates).isEmpty()
+    }
+
+    /** 速度がDWELL_SPEED_MPS(1.5m/s)以上の区間は、滞在時間が長くても示唆に出ない(走行中とみなす)。 */
+    @Test
+    fun stopEstimate_fastSegment_isNotSuggested() = runTest {
+        val sessionId = insertSession()
+        // 30秒分・速度5.0m/s(走行速度) → 停車ではない
+        insertSlowCluster(
+            sessionId, seqStart = 0, lat = 35.000, lon = 139.000, speedMps = 5.0,
+            startTs = 1_700_000_000_000L, intervalMs = 5000L, count = 7,
+        )
+
+        val estimates = repository.analyzeStopEstimates(sessionId)
+
+        assertThat(estimates).isEmpty()
+    }
+
+    /**
+     * パス1で既に確定済みの点(マーカー付きLORESフレーム)の近傍(通常半径70m以内)にある低速クラスタは、
+     * 「既に停留所」とみなし示唆から除外する(二重提示しない、設計ドラフト§3パス3)。
+     * 同じ滞在時間・速度のクラスタでも、パス1確定点が無ければ示唆に出ることを対照群として確認する。
+     */
+    @Test
+    fun stopEstimate_nearPass1ConfirmedPoint_isExcluded() = runTest {
+        val cardId = createCard("既存カード", lat = 35.000, lon = 139.000)
+        val sessionWithMarker = insertSession()
+        insertFrame(sessionWithMarker, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId) // パス1確定点
+        insertSlowCluster(
+            sessionWithMarker, seqStart = 1,
+            lat = 35.000 + latOffsetForMeters(30.0), lon = 139.000, // 通常半径70m以内
+            speedMps = 0.5, startTs = 1_700_000_100_000L, intervalMs = 5000L, count = 6, // 滞在25秒
+        )
+
+        assertThat(repository.analyzeStopEstimates(sessionWithMarker)).isEmpty()
+
+        // 対照群: 同じクラスタでもパス1確定点が無いセッションでは示唆に出る
+        val sessionWithoutMarker = insertSession()
+        insertSlowCluster(
+            sessionWithoutMarker, seqStart = 0,
+            lat = 35.000 + latOffsetForMeters(30.0), lon = 139.000,
+            speedMps = 0.5, startTs = 1_700_000_100_000L, intervalMs = 5000L, count = 6,
+        )
+        assertThat(repository.analyzeStopEstimates(sessionWithoutMarker)).hasSize(1)
+    }
+
+    /**
+     * しきい値の境界値: 滞在秒数がDWELL_MIN_SEC(20秒)ちょうどなら候補になり、1秒未満(19秒)なら
+     * 候補にならない(`dwellSec >= DWELL_MIN_SEC`の等号側の挙動を確認する)。
+     */
+    @Test
+    fun stopEstimate_dwellSecondsBoundary_changesResult() = runTest {
+        val justBelow = insertSession()
+        // 0,19秒の2点 → 滞在19秒(<20秒)
+        insertSlowCluster(
+            justBelow, seqStart = 0, lat = 35.000, lon = 139.000, speedMps = 0.5,
+            startTs = 1_700_000_000_000L, intervalMs = 19_000L, count = 2,
+        )
+        assertThat(repository.analyzeStopEstimates(justBelow)).isEmpty()
+
+        val justAtThreshold = insertSession()
+        // 0,20秒の2点 → 滞在20秒(=20秒、境界を含む)
+        insertSlowCluster(
+            justAtThreshold, seqStart = 0, lat = 35.000, lon = 139.000, speedMps = 0.5,
+            startTs = 1_700_000_000_000L, intervalMs = 20_000L, count = 2,
+        )
+        assertThat(repository.analyzeStopEstimates(justAtThreshold)).hasSize(1)
+    }
+
+    /** 空セッション(GPS点が1つも無い)でも例外を投げず、空リストを返す。 */
+    @Test
+    fun stopEstimate_emptySession_returnsEmptyListWithoutCrashing() = runTest {
+        val sessionId = insertSession() // gps_pointを一切挿入しない
+
+        val estimates = repository.analyzeStopEstimates(sessionId)
+
+        assertThat(estimates).isEmpty()
     }
 
     // ------------------------------------------------------------------

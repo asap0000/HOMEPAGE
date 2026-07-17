@@ -325,6 +325,29 @@ internal fun splitCourseCreationStops(
 }
 
 /**
+ * 停車推定の示唆1件（トップダウン創設 S3・パス3、[CourseRepository.analyzeStopEstimates] の要素、
+ * 設計ドラフトv2 §3「パス3」・§10.1、2026-07-18追加）。
+ *
+ * パス3は「マーカーが無くても車速から停車と判断できる点」を検出するが、1セッションだけでは
+ * 停留所・信号待ち・（園児欠席等で）減速しただけの通過を区別できない（実機セッション#8では
+ * 速度<1.5m/s・15秒以上の低速クラスタが23個検出され、最長271秒＝実際の拠点、短いものは信号の
+ * 可能性がある）。そのため**この型はcourse_stopへ書き込む値ではなく、UIに提示する「示唆」に
+ * とどまる**。採否（格上げ）は人が行う（UIは後続S4、要確認バー・速度ヒート地図）。
+ */
+data class StopEstimate(
+    /** クラスタ内GPS点の緯度の単純平均（重心）。低速でほぼ静止している前提のため中央値との差は実用上無視できる。 */
+    val latitude: Double,
+    /** クラスタ内GPS点の経度の単純平均（重心）。 */
+    val longitude: Double,
+    /** クラスタの滞在秒数（([endAt] − [startAt]) / 1000）。 */
+    val dwellSec: Double,
+    /** クラスタ先頭GPS点の `ts_epoch_ms`。UIが軌跡上の正しい時系列位置に割り込み表示するために持つ。 */
+    val startAt: Long,
+    /** クラスタ末尾GPS点の `ts_epoch_ms`。 */
+    val endAt: Long,
+)
+
+/**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
  *
  * - 停留所カードCRUD（写真の `stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 の
@@ -1730,6 +1753,82 @@ class CourseRepository(
         )
     }
 
+    // ------------------------------------------------------------------
+    // パス3: 停車推定の示唆（トップダウン創設 S3、設計ドラフトv2 §3「パス3」・§4.2（軌跡コリドー）・
+    // §6（速度ヒート地図）・§10.1、2026-07-18追加、読み取り専用）
+    //
+    // マーカー（パス1）が無くても、gps_pointの車速から「停車していそうな点」を検出する。ただし
+    // 1セッションだけでは停留所・信号待ち・（園児欠席等で）減速しただけの通過かを断定できないため、
+    // course_stopには一切書き込まず、[StopEstimate] という「示唆」だけを返す（採否＝格上げは人が
+    // 後で行う、UIは後続S4）。パス1で既に点になっている座標の近傍は二重提示しないよう除外する。
+    // ------------------------------------------------------------------
+
+    /**
+     * 停車推定の解析（トップダウン創設 S3・パス3、読み取り専用）。[sessionId] の `gps_point` を
+     * 時系列（seq順＝`ts_epoch_ms`順）に走査し、次の手順で停車推定の示唆リストを作る。
+     *
+     * 1. **低速クラスタ抽出**: 速度が [DWELL_SPEED_MPS] 未満の点が連続する区間をひとまとめにする。
+     *    速度未計測（`speedMps=null`）の点は「低速」と断定できないため非低速として扱い、クラスタを
+     *    断ち切る（未知を停車と誤認しない安全側の判断）。連続の判定は隣接するGPS点そのものであり、
+     *    [analyzeCourseCoverage] 等の `COVERAGE_PASS_GAP_MS`（半径内の点を時間間隔で別パスに分割）
+     *    のような時間ギャップ判定は行わない（設計ドラフト§3パス3の記述どおり「速度が…連続する区間」
+     *    をそのまま実装した。低速点が疎らな場合に離れた2つの停車が誤って1クラスタに繋がる懸念は
+     *    残るため、実データで問題が出れば時間ギャップ判定の追加を検討する）。
+     * 2. クラスタの滞在秒数（末尾ts − 先頭ts）が [DWELL_MIN_SEC] 以上のものを候補とする（信号待ち等の
+     *    短い減速を拾いすぎないための足切り）。
+     * 3. 候補クラスタの代表座標（クラスタ内GPS点の緯度・経度の単純平均＝重心）と滞在秒数から
+     *    [StopEstimate] を作る。
+     * 4. **パス1で確定済みの点との重複除外**: [generatePass1RawStops] が返す点（マーカー付きLORES
+     *    フレーム／MANUALイベント由来、いずれも実測座標）の近傍 [STOP_ESTIMATE_EXCLUSION_RADIUS_M]
+     *    以内にあるクラスタは、既に停留所として確定済みとみなし示唆から除外する（二重提示しない、
+     *    設計ドラフト§3パス3）。パス1の点はカード（`card_id`）を一切引き継がない設計
+     *    （[generatePass1RawStops]のKDoc参照）のため、[findOrCreateRadiusFor] のような拠点/通常の
+     *    半径使い分けはできず、単一の通常半径のみを使う。
+     *
+     * 空セッション・低速クラスタなしの場合は空リストを返す（例外を投げない）。
+     */
+    suspend fun analyzeStopEstimates(sessionId: Long): List<StopEstimate> = withContext(Dispatchers.IO) {
+        val points = gpsPointDao.getBySession(sessionId) // seq順（≒ts_epoch_ms順）
+
+        val clusters = mutableListOf<List<GpsPointEntity>>()
+        var current = mutableListOf<GpsPointEntity>()
+        for (point in points) {
+            val isSlow = point.speedMps != null && point.speedMps < DWELL_SPEED_MPS
+            if (isSlow) {
+                current += point
+            } else if (current.isNotEmpty()) {
+                clusters += current
+                current = mutableListOf()
+            }
+        }
+        if (current.isNotEmpty()) clusters += current
+
+        // 除外判定に使う「パス1で既に点になっている座標」。パス1自体は書き込みを伴わない純粋な
+        // 素材収集のため、ここで呼んでも副作用は無い（[createCoursesFromSession]と同じ関数を再利用）。
+        val pass1Points = generatePass1RawStops(sessionId)
+
+        clusters.mapNotNull { cluster ->
+            val dwellSec = (cluster.last().tsEpochMs - cluster.first().tsEpochMs) / 1000.0
+            if (dwellSec < DWELL_MIN_SEC) return@mapNotNull null
+
+            val latitude = cluster.map { it.lat }.average()
+            val longitude = cluster.map { it.lon }.average()
+
+            val alreadyConfirmed = pass1Points.any {
+                GeoMath.haversineM(latitude, longitude, it.latitude, it.longitude) <= STOP_ESTIMATE_EXCLUSION_RADIUS_M
+            }
+            if (alreadyConfirmed) return@mapNotNull null
+
+            StopEstimate(
+                latitude = latitude,
+                longitude = longitude,
+                dwellSec = dwellSec,
+                startAt = cluster.first().tsEpochMs,
+                endAt = cluster.last().tsEpochMs,
+            )
+        }
+    }
+
     /**
      * 完了済みセッションから停留所間の区間を切り出して `segment_track` へUPSERTする（設計書§3.9）。
      *
@@ -2187,6 +2286,34 @@ class CourseRepository(
          * （共有停留所が別コース走行中に単発でマークされた場合の孤立を切り離すため）。2026-07-14暫定値。
          */
         private const val CLUSTER_GAP_MS = 600_000L
+
+        /**
+         * パス3（停車推定、[analyzeStopEstimates]）: 停車・徐行とみなす速度しきい値（m/s）。
+         * **実データ由来**: 本番セッション#8で「速度<1.5m/s」かつ「15秒以上」の低速クラスタが23個
+         * 観測された（設計ドラフトv2 §3パス3・§10）。1.5m/s（≒5.4km/h）を採用した初期値。
+         * **暫定値・後で調整可**。
+         */
+        private const val DWELL_SPEED_MPS = 1.5
+
+        /**
+         * パス3（停車推定、[analyzeStopEstimates]）: 停車推定の候補とみなす最小滞在秒数。実データの
+         * 観測しきい値は15秒（上記23クラスタの内訳、最長271秒＝拠点・短いものは信号待ちの可能性）
+         * だったが、信号待ち（青信号までの待ち時間としてしばしば十数秒〜を要する）を拾いすぎない
+         * よう、設計ドラフトv2 §3パス3の指示（「信号長交差点…で1セッションでは断定できない」）を
+         * 踏まえ余裕を持たせて20秒とした。**暫定値・後で調整可**（設計ドラフト§12「半径・
+         * corridor_r・dwell校正は青バス4台分データが揃った段階で再チューニング」）。
+         */
+        private const val DWELL_MIN_SEC = 20.0
+
+        /**
+         * パス3（停車推定、[analyzeStopEstimates]）: クラスタの代表座標が、パス1で既に確定済みの点
+         * （[generatePass1RawStops]）の近傍にあるとみなす除外半径（m）。「既に停留所」として二重
+         * 提示しないための判定であり、パス1生の点はカード（拠点フラグ）を一切引き継がない設計
+         * （[generatePass1RawStops]参照）のため [findOrCreateRadiusFor] のような拠点/通常の
+         * 半径使い分けはできず、単一の通常半径のみを使う。[FIND_OR_CREATE_RADIUS_M]・
+         * [COVERAGE_RADIUS_M] と同じ値（実データ由来の校正済み値）を採用した。**暫定値・後で調整可**。
+         */
+        private const val STOP_ESTIMATE_EXCLUSION_RADIUS_M = 70.0
 
         /**
          * 区間抽出対象のセッション種別（§3.9）。設計書は PARTIAL_RUN を主対象に記述しているが、
