@@ -442,9 +442,14 @@ private fun RecordingActiveContent(
         )
     }
 
+    // スクロール可能にしておくこと（S0-d 実機検証 2026-07-16 で判明した不具合の修正）。
+    // カメラ・測位の警告カード（S0-c/S0-d）が出ると縦に伸び、固定Columnのままでは
+    // 「停留所マーク」「記録を終了」が画面外へ押し出されて押せなくなる。警告が出ている時ほど
+    // 運転手はマークと終了を使う必要があるため、ここがスクロールしないのは致命的になる。
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
