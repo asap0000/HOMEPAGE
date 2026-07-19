@@ -55,4 +55,10 @@ data class BusStopCardEntity(
      * フェーズBでは記録のみでコース分割ロジックへの反映は行わない。
      */
     @ColumnInfo(name = "is_hub", defaultValue = "0") val isHub: Boolean = false,
+    /** 試走・案内時に接近として扱う半径（D5、v13）。 */
+    @ColumnInfo(name = "approach_radius_m", defaultValue = "300") val approachRadiusM: Double = 300.0,
+    /** 試走で到着・停車を判定する半径（D5、v13）。 */
+    @ColumnInfo(name = "arrival_radius_m", defaultValue = "50") val arrivalRadiusM: Double = 50.0,
+    /** 案内時の進行方向許容差（D5、v13）。 */
+    @ColumnInfo(name = "heading_tolerance_deg", defaultValue = "70") val headingToleranceDeg: Double = 70.0,
 )

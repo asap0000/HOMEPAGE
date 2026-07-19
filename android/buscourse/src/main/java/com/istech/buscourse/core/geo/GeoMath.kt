@@ -51,4 +51,14 @@ object GeoMath {
         Location.distanceBetween(lat1, lon1, lat2, lon2, results)
         return results[0]
     }
+
+    /** 基準点からの東・北方向の局所平面座標。短い線分への投影だけに使用する近似。 */
+    data class LocalEnu(val eastM: Double, val northM: Double)
+
+    fun toLocalEnu(lat: Double, lon: Double, refLat: Double, refLon: Double): LocalEnu {
+        val radius = EARTH_RADIUS_M
+        val east = Math.toRadians(lon - refLon) * radius * cos(Math.toRadians(refLat))
+        val north = Math.toRadians(lat - refLat) * radius
+        return LocalEnu(east, north)
+    }
 }

@@ -77,6 +77,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 「frame_id・event_id・stop_card_idの少なくとも一つは非null」という拡張後の不変条件も、
  * 引き続きDBのCHECK制約ではなくコード層
  * （[com.istech.buscourse.course.CourseRepository.requireCoordinateSource]）で担保する。
+ *
+ * version 13（2026-07-19、フェーズ5 Step 5a）: bus_stop_card にD5の到着判定パラメータ3列を追加し、
+ * 試走比較のサマリ・停留所差分・逸脱区間テーブルを新設する（[MIGRATION_12_13]）。いずれも既存データを
+ * 保持するADD COLUMN／CREATE TABLEのみで、比較の子行は親比較行の削除時にCASCADEする。
  */
 @Database(
     entities = [
@@ -93,8 +97,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ShockEventEntity::class,
         WorkLogEntity::class,
         MapDataPackageEntity::class,
+        TestRunComparisonEntity::class,
+        TestRunComparisonStopDiffEntity::class,
+        TestRunComparisonDeviationSegmentEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -111,6 +118,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun shockEventDao(): ShockEventDao
     abstract fun workLogDao(): WorkLogDao
     abstract fun mapDataPackageDao(): MapDataPackageDao
+    abstract fun testRunComparisonDao(): TestRunComparisonDao
 
     companion object {
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
@@ -131,6 +139,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_9_10,
                 MIGRATION_10_11,
                 MIGRATION_11_12,
+                MIGRATION_12_13,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -344,6 +353,22 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_course_stop_course_id ON course_stop (course_id)")
                 db.execSQL("CREATE INDEX index_course_stop_frame_id ON course_stop (frame_id)")
                 db.execSQL("CREATE INDEX index_course_stop_event_id ON course_stop (event_id)")
+            }
+        }
+
+        /** D5案内半径3列と、フェーズ5試走比較結果テーブルを追加する（既存データは保持）。 */
+        val MIGRATION_12_13 = object : androidx.room.migration.Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN approach_radius_m REAL NOT NULL DEFAULT 300")
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN arrival_radius_m REAL NOT NULL DEFAULT 50")
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN heading_tolerance_deg REAL NOT NULL DEFAULT 70")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, course_id INTEGER NOT NULL, baseline_source TEXT NOT NULL, candidate_session_id INTEGER NOT NULL, computed_at_epoch_ms INTEGER NOT NULL, schema_version INTEGER NOT NULL, params_json TEXT NOT NULL, FOREIGN KEY(course_id) REFERENCES course(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(candidate_session_id) REFERENCES recording_session(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_course_id ON test_run_comparison (course_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_candidate_session_id ON test_run_comparison (candidate_session_id)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison_stop_diff (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, comparison_id INTEGER NOT NULL, stop_card_id INTEGER, sequence_index INTEGER NOT NULL, status TEXT NOT NULL, position_error_m REAL, matched_point_seq INTEGER, nearest_approach_m REAL, cause TEXT NOT NULL DEFAULT 'UNSET', FOREIGN KEY(comparison_id) REFERENCES test_run_comparison(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_stop_diff_comparison_id ON test_run_comparison_stop_diff (comparison_id)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison_deviation_segment (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, comparison_id INTEGER NOT NULL, start_chainage_m REAL NOT NULL, end_chainage_m REAL NOT NULL, start_point_seq INTEGER NOT NULL, end_point_seq INTEGER NOT NULL, max_lateral_offset_m REAL NOT NULL, mean_lateral_offset_m REAL NOT NULL, duration_sec INTEGER NOT NULL, FOREIGN KEY(comparison_id) REFERENCES test_run_comparison(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_deviation_segment_comparison_id ON test_run_comparison_deviation_segment (comparison_id)")
             }
         }
     }
