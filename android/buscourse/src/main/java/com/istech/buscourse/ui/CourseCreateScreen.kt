@@ -27,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,6 +55,7 @@ import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseCreationFragment
 import com.istech.buscourse.course.CourseCreationResult
 import com.istech.buscourse.course.CourseCreationStopPreview
+import com.istech.buscourse.course.detectHubCandidates
 import com.istech.buscourse.course.splitCourseCreationStops
 
 /**
@@ -187,10 +189,10 @@ private fun CourseCreateDialog(
             .onFailure { e -> Toast.makeText(context, "解析に失敗しました: ${e.message}", Toast.LENGTH_LONG).show() }
             .getOrNull()
         preview = loadedPreview
-        // 拠点選択の初期値: プレビューが拠点候補と示す点（is_hub済みカード）を最初から選んでおく
+        // 拠点選択の初期値: 明示的にis_hubとなっている候補だけを最初から選んでおく。
         // （データ確定後に一度だけ設定。以降はユーザーのトグル操作を優先する）。
         if (loadedPreview != null && !hubSelectionInitialized) {
-            hubSelection = loadedPreview.filter { it.isHubCandidate }.mapNotNull { it.cardId }.toSet()
+            hubSelection = detectHubCandidates(loadedPreview).filter { it.isHub }.map { it.cardId }.toSet()
             hubSelectionInitialized = true
         }
         // 再創設ガード（S8）: プレビューの成否に関わらず、既存創設コースの有無は確認しておく
@@ -423,6 +425,9 @@ private fun HubChipsSection(
     onToggleHub: (Long) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        val hubCandidates = remember(preview) { detectHubCandidates(preview) }
+        val candidatesByCardId = remember(hubCandidates) { hubCandidates.associateBy { it.cardId } }
+        val discoveredHubCount = remember(hubCandidates) { hubCandidates.count { it.isHub } }
         val distinctCards = remember(preview) {
             preview.filter { it.cardId != null }.distinctBy { it.cardId }.map { it.cardId!! to it.displayName }
         }
@@ -430,15 +435,43 @@ private fun HubChipsSection(
             EmptyHint("カードが付いた停留所が無いため拠点を選べません。")
             return@Column
         }
+        if (discoveredHubCount > 0) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            ) {
+                Text(
+                    text = "拠点を ${discoveredHubCount}件 発見しました",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             distinctCards.forEach { (cardId, name) ->
+                val candidate = candidatesByCardId[cardId]
                 FilterChip(
                     selected = cardId in hubSelection,
                     onClick = { onToggleHub(cardId) },
-                    label = { Text(name) },
+                    label = {
+                        Text(
+                            if (candidate == null) name else "$name（経由${candidate.visitCount}回）",
+                        )
+                    },
+                    colors = if (candidate == null) {
+                        FilterChipDefaults.filterChipColors()
+                    } else {
+                        FilterChipDefaults.filterChipColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            labelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                            selectedContainerColor = MaterialTheme.colorScheme.tertiary,
+                            selectedLabelColor = MaterialTheme.colorScheme.onTertiary,
+                        )
+                    },
                 )
             }
         }
