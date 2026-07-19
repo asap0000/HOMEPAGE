@@ -341,6 +341,13 @@ interface GpsPointDao {
 
     @Query("SELECT * FROM gps_point WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<GpsPointEntity>
+
+    /** コース編集地図用。コースの停留所時刻に含まれる記録GPSだけをseq順で返す。 */
+    @Query(
+        "SELECT * FROM gps_point WHERE session_id = :sessionId " +
+            "AND ts_epoch_ms BETWEEN :startMs AND :endMs ORDER BY seq"
+    )
+    suspend fun getBySessionInRange(sessionId: Long, startMs: Long, endMs: Long): List<GpsPointEntity>
 }
 
 /** 試走比較結果の保存・参照。子テーブルは親削除時にCASCADEする。 */

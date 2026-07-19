@@ -245,13 +245,36 @@ private fun RouteMapContent(
                 val stops = editDetails?.stops.orEmpty() // CourseStopView, 既に sequence_index 順
 
                 // 記録セッション由来の gps_point は、途中で分断され得る segment_track を再組立する
-                // ことなく、実際に記録された順序のまま一本の連続線として描く。
+                // ことなく、コース停留所の時刻区間にある実際の記録順で一本の連続線として描く。
                 val routeOverlay = RouteTrackOverlay(context, database, style)
-                val course = database.courseDao().getById(courseId)
+                val course = editDetails?.course ?: database.courseDao().getById(courseId)
+                val courseTimeRange = deriveCourseTimeRange(stops.map { stop ->
+                    when {
+                        stop.frameId != null -> CourseStopTimestamp(
+                            frameId = stop.frameId,
+                            frameCapturedAtMs = database.timelapseFrameDao()
+                                .getById(stop.frameId)?.capturedAt,
+                        )
+                        stop.eventId != null -> CourseStopTimestamp(
+                            eventId = stop.eventId,
+                            eventTimestampMs = database.stopVisitEventDao()
+                                .getById(stop.eventId)?.eventTs,
+                        )
+                        else -> CourseStopTimestamp()
+                    }
+                })
                 val gpsPoints = course?.sourceSessionId
-                    ?.let { sessionId -> database.gpsPointDao().getBySession(sessionId) }
+                    ?.let { sessionId ->
+                        courseTimeRange?.let { timeRange ->
+                            database.gpsPointDao()
+                                .getBySessionInRange(sessionId, timeRange.startMs, timeRange.endMs)
+                                .map { point ->
+                                    TimestampedGpsPoint(point.tsEpochMs, point.lat, point.lon)
+                                }
+                                .let { points -> usableGpsPointsForCourseTimeRange(points, timeRange) }
+                        }
+                    }
                     .orEmpty()
-                    .map { it.lat to it.lon }
                 val routePoints = database.routePointDao().getOrdered(courseId)
                     .map { it.lat to it.lon }
                 val routeLine = selectRouteLine(

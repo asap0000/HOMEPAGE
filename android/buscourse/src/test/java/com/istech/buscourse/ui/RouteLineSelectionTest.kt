@@ -7,6 +7,72 @@ import org.junit.Test
 class RouteLineSelectionTest {
 
     @Test
+    fun deriveCourseTimeRange_prefersFrameThenEvent_andSkipsCardOnlyStops() {
+        val timeRange = deriveCourseTimeRange(
+            listOf(
+                CourseStopTimestamp(frameId = 1L, eventId = 11L, frameCapturedAtMs = 300L, eventTimestampMs = 100L),
+                CourseStopTimestamp(eventId = 12L, eventTimestampMs = 500L),
+                CourseStopTimestamp(), // カードだけの停留所
+                CourseStopTimestamp(frameId = 2L, frameCapturedAtMs = 700L),
+            )
+        )
+
+        assertThat(timeRange).isEqualTo(CourseTimeRange(startMs = 300L, endMs = 700L))
+    }
+
+    @Test
+    fun sliceGpsPointsToCourseTimeRange_excludesPointsOutsideCourseStops() {
+        val sliced = sliceGpsPointsToCourseTimeRange(
+            gpsPoints = listOf(
+                TimestampedGpsPoint(100L, 35.0, 139.0),
+                TimestampedGpsPoint(200L, 35.1, 139.1),
+                TimestampedGpsPoint(300L, 35.2, 139.2),
+                TimestampedGpsPoint(400L, 35.3, 139.3),
+            ),
+            timeRange = CourseTimeRange(startMs = 200L, endMs = 300L),
+        )
+
+        assertThat(sliced).containsExactly(35.1 to 139.1, 35.2 to 139.2).inOrder()
+        assertThat(
+            selectRouteLine(
+                sourceSessionId = 42L,
+                gpsPoints = sliced,
+                routePoints = listOf(36.0 to 140.0, 36.1 to 140.1),
+            ).source
+        ).isEqualTo(RouteLineSource.GPS_POINTS)
+    }
+
+    @Test
+    fun noCourseStopTimestamps_fallsBackToRoutePoints() {
+        assertThat(deriveCourseTimeRange(listOf(CourseStopTimestamp(), CourseStopTimestamp()))).isNull()
+
+        val routePoints = listOf(35.0 to 139.0, 35.001 to 139.001)
+        val selection = selectRouteLine(
+            sourceSessionId = 42L,
+            gpsPoints = emptyList(),
+            routePoints = routePoints,
+        )
+
+        assertThat(selection.source).isEqualTo(RouteLineSource.ROUTE_POINTS)
+    }
+
+    @Test
+    fun fewerThanTwoSlicedGpsPoints_fallsBackToRoutePoints() {
+        val usableGpsPoints = usableGpsPointsForCourseTimeRange(
+            gpsPoints = listOf(TimestampedGpsPoint(200L, 35.1, 139.1)),
+            timeRange = CourseTimeRange(startMs = 200L, endMs = 300L),
+        )
+
+        assertThat(
+            selectRouteLine(
+                sourceSessionId = 42L,
+                gpsPoints = usableGpsPoints,
+                routePoints = listOf(36.0 to 140.0, 36.1 to 140.1),
+            ).source
+        ).isEqualTo(RouteLineSource.ROUTE_POINTS)
+    }
+
+    @Test
     fun sourceSessionWithGpsPoints_prefersContinuousGpsTrack() {
         val gpsTrack = listOf(35.0 to 139.0, 35.001 to 139.001)
 
