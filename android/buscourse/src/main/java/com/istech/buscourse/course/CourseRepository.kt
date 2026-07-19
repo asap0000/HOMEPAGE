@@ -348,6 +348,60 @@ data class StopEstimate(
 )
 
 /**
+ * 編集画面（[com.istech.buscourse.ui.CourseDetailScreen]）向けの停留所1点の表示用ビュー
+ * （実装ステップS6a「コース編集画面の刷新（土台）」、設計ドラフトv2 §7.1、2026-07-18追加）。
+ *
+ * 既存の [CourseStopWithCard]／[requireCard] は「各停留所＝カード1枚」前提で、3パス化
+ * （version 11〜12）が生む**カードの無い点**（映像のみ・イベントのみ）を扱えず、そういう点を
+ * 含むコースを編集画面で開くと [requireCard] の例外でクラッシュしていた。本クラスはカードの
+ * 有無に関わらず必ず組み立てられる（[CourseRepository.getCourseEditDetails]参照）。
+ *
+ * [displayName] と [latitude]/[longitude] はDBに保存しない、その場で導出した値
+ * （[CourseCreationStopPreview] と同じ考え方。カードがあればカード名、無ければ
+ * `S{course.sourceSessionId}-{通番}`。通番は `sequence_index + 1`＝安定した値を使う）。
+ */
+data class CourseStopView(
+    /** `course_stop.id`（並べ替え・削除操作の対象特定、保存時の差分計算に使う）。 */
+    val courseStopId: Long,
+    /** 保存済みの並び順（`course_stop.sequence_index`）。 */
+    val sequenceIndex: Int,
+    val frameId: Long?,
+    val eventId: Long?,
+    val cardId: Long?,
+    /** カードがあればカード名、無ければ `S{sourceSessionId}-{通番}`（設計ドラフト§2.3）。 */
+    val displayName: String,
+    /** カードの乗車人数（カードが無い点は0）。 */
+    val riderCount: Int,
+    /** 解決済み座標（coalesce(frame座標, event座標, card座標)、[CourseRepository.resolveStopPosition]）。 */
+    val latitude: Double,
+    val longitude: Double,
+) {
+    /** 状態ドット表示用: 映像（`frame_id`）を持つか（設計ドラフト§7.1「映像＝青」）。 */
+    val hasFrame: Boolean get() = frameId != null
+    /** 状態ドット表示用: カード（`stop_card_id`）を持つか（設計ドラフト§7.1「カード＝緑」）。 */
+    val hasCard: Boolean get() = cardId != null
+}
+
+/** [CourseRepository.getCourseEditDetails] の返り値（編集画面専用のロード集約、S6a）。 */
+data class CourseEditDetails(
+    val course: CourseEntity,
+    /** `sequence_index` 順。 */
+    val stops: List<CourseStopView>,
+)
+
+/**
+ * 並べ替え・削除・追加を保存する際の1点分の入力（S6a、[CourseRepository.setCourseStopsPreservingPointers]
+ * の引数）。既存点は編集画面が [CourseStopView] からそのまま `frameId`/`eventId`/`cardId` を引き継いで
+ * 作る（並べ替え・削除をしても座標の出所が変わらない）。「＋停留所を追加」で新規追加する点は
+ * `cardId` のみ非null（設計ドラフト§5「card-onlyのcourse_stop」）。
+ */
+data class CourseStopEdit(
+    val frameId: Long?,
+    val eventId: Long?,
+    val cardId: Long?,
+)
+
+/**
  * コース管理機能の窓口（設計書§2.1 course パッケージ、フェーズ2）。
  *
  * - 停留所カードCRUD（写真の `stopcards/{id}/photo_orig.jpg` 保存＋長辺320px/JPEG q80 の
@@ -650,6 +704,48 @@ class CourseRepository(
 
     suspend fun getCourseWithDetails(courseId: Long): CourseWithDetails? = courseDao.getWithDetails(courseId)
 
+    /**
+     * 編集画面（[com.istech.buscourse.ui.CourseDetailScreen]）専用のロード（S6a、2026-07-18追加）。
+     * [getCourseWithDetails]・[CourseStopWithCard.requireCard] は「各停留所＝カード1枚」前提のため、
+     * 3パス化で生まれるカード無しの点（`frame_id`/`event_id` のみ）を含むコースを開くと
+     * クラッシュしていた（本メソッドが刷新のきっかけ）。本メソッドは例外を投げず、
+     * 表示名・解決済み座標込みの [CourseStopView] を返す。
+     */
+    suspend fun getCourseEditDetails(courseId: Long): CourseEditDetails? = withContext(Dispatchers.IO) {
+        val course = courseDao.getById(courseId) ?: return@withContext null
+        val orderedStops = courseStopDao.getOrderedStops(courseId) // sequence_index順
+
+        // カードは複数の点から同じIDを参照しうるため、コースあたり最大1回だけ引き直す
+        val cardCache = mutableMapOf<Long, BusStopCardEntity?>()
+        suspend fun cardFor(id: Long) = cardCache.getOrPut(id) { busStopCardDao.getById(id) }
+
+        val views = orderedStops.map { stop ->
+            val card = stop.stopCardId?.let { cardFor(it) }
+            val frame = stop.frameId?.let { timelapseFrameDao.getById(it) }
+            val event = stop.eventId?.let { stopVisitEventDao.getById(it) }
+            // 不変条件（frame_id/event_id/stop_card_id の少なくとも一つは非null）が守られていれば
+            // 必ず非nullになるはずだが、過去データ異常等への保険として原点にフォールバックする。
+            val (lat, lon) = resolveStopPosition(
+                frameLatitude = frame?.latitude, frameLongitude = frame?.longitude,
+                eventLatitude = event?.lat, eventLongitude = event?.lon,
+                cardLatitude = card?.latitude, cardLongitude = card?.longitude,
+            ) ?: (0.0 to 0.0)
+            val displayName = card?.name ?: "S${course.sourceSessionId ?: "?"}-${stop.sequenceIndex + 1}"
+            CourseStopView(
+                courseStopId = stop.id,
+                sequenceIndex = stop.sequenceIndex,
+                frameId = stop.frameId,
+                eventId = stop.eventId,
+                cardId = stop.stopCardId,
+                displayName = displayName,
+                riderCount = card?.riderCount ?: 0,
+                latitude = lat,
+                longitude = lon,
+            )
+        }
+        CourseEditDetails(course = course, stops = views)
+    }
+
     suspend fun createCourse(name: String, kind: CourseKind, baseCourseId: Long? = null): Long {
         val now = System.currentTimeMillis()
         return courseDao.upsert(
@@ -698,6 +794,52 @@ class CourseRepository(
             }
         }
         regenerateCourseSegments(courseId)
+    }
+
+    /**
+     * 並べ替え・削除・追加の保存（S6a「コース編集画面の刷新（土台）」、[com.istech.buscourse.ui.CourseDetailScreen]
+     * 「保存」、2026-07-18追加）。[setCourseStops] は「必ずカードのみの点として作る」契約
+     * （同メソッドのKDoc参照）のため `frame_id`/`event_id` を書けず、3パス化由来の点を含むコースの
+     * 編集保存に使えない。本メソッドは各行の [CourseStopEdit.frameId]/[CourseStopEdit.eventId]/
+     * [CourseStopEdit.cardId] をそのまま保持したまま `course_stop` を全削除→再挿入する
+     * （[requireCoordinateSource] で不変条件を担保）。
+     *
+     * 保存後は [regenerateCourseSegments]（区間・route_pointの再構築。カードを持つ隣接ペアのみ区間化）を
+     * 常に実行する。さらに `course.source_session_id` が設定されているコース（トップダウン創設由来、
+     * [createCoursesFromSession] 参照）については、[confirmCourseRouteFromSession] でセッションの
+     * 実測GPS軌跡からナビ用 `route_point` を作り直す（設計ドラフトv2 §7.1「ナビの線は維持」）。
+     * `source_session_id` が無い（従来のボトムアップ編成）コースでは [regenerateCourseSegments] 内の
+     * `segment_track` 由来の再構築のみで足りるため、[confirmCourseRouteFromSession] は呼ばない。
+     */
+    suspend fun setCourseStopsPreservingPointers(courseId: Long, stops: List<CourseStopEdit>) {
+        database.withTransaction {
+            courseStopDao.deleteAllForCourse(courseId)
+            if (stops.isNotEmpty()) {
+                courseStopDao.insertAll(
+                    stops.mapIndexed { index, s ->
+                        requireCoordinateSource(
+                            stopCardId = s.cardId, frameId = s.frameId, eventId = s.eventId,
+                            context = "courseId=$courseId, index=$index（編集画面の保存）",
+                        )
+                        CourseStopEntity(
+                            courseId = courseId,
+                            stopCardId = s.cardId,
+                            frameId = s.frameId,
+                            eventId = s.eventId,
+                            sequenceIndex = index,
+                            expectedChainageM = null, // regenerate後にRoutePreprocessorが再計算
+                        )
+                    }
+                )
+            }
+            courseDao.getById(courseId)?.let {
+                courseDao.upsert(it.copy(updatedAt = System.currentTimeMillis()))
+            }
+        }
+        regenerateCourseSegments(courseId)
+        courseDao.getById(courseId)?.sourceSessionId?.let { sessionId ->
+            confirmCourseRouteFromSession(courseId, sessionId)
+        }
     }
 
     /**

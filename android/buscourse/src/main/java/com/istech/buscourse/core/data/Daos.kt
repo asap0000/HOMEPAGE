@@ -149,24 +149,35 @@ interface CourseStopDao {
      * MIN(cs.id) を含めることで、同じカードが複数コースで使われている場合にどの行の
      * courseName/courseStopIdが返るかをSQLite仕様上決定的にする（bare columnはmin/max対象行から
      * 取られることがSQLiteドキュメントで保証されている。2026-07-11レビュー指摘の修正）。
+     *
+     * `stop_card_id IS NOT NULL` を明示（S6a、2026-07-18追加）: version 11で `stop_card_id` が
+     * NULL許容化された（[CourseStopWithCard]のクラスKDoc参照）ため、3パス化由来の映像/イベントのみの
+     * 点（`stop_card_id IS NULL`）が1件でもDB全体に存在すると、[StopCardUsage.cardId]（非null）への
+     * バインドでRoomが例外を投げる。このクエリはコースを問わず全 `course_stop` を走査するため、
+     * 「＋停留所を追加」ダイアログ（[com.istech.buscourse.course.CourseRepository.getStopCardUsage]
+     * 経由）を開くたびに、DB内のどこかのコースにカード無しの点があるだけで落ちていた。
      */
     @Query(
         """
         SELECT cs.stop_card_id AS cardId, c.name AS courseName, MIN(cs.id) AS courseStopId
         FROM course_stop cs
         JOIN course c ON c.id = cs.course_id
-        WHERE cs.course_id != :excludeCourseId
+        WHERE cs.course_id != :excludeCourseId AND cs.stop_card_id IS NOT NULL
         GROUP BY cs.stop_card_id
     """
     )
     suspend fun getUsageExcluding(excludeCourseId: Long): List<StopCardUsage>
 
-    /** 全カードの使用状況一覧（停留所カード一覧の使用中バッジ用）。決定性についてはgetUsageExcluding参照。 */
+    /**
+     * 全カードの使用状況一覧（停留所カード一覧の使用中バッジ用）。決定性についてはgetUsageExcluding参照。
+     * `stop_card_id IS NOT NULL` の理由も同メソッドのKDoc参照（S6a、2026-07-18追加）。
+     */
     @Query(
         """
         SELECT cs.stop_card_id AS cardId, c.name AS courseName, cs.sequence_index AS sequenceIndex, MIN(cs.id) AS courseStopId
         FROM course_stop cs
         JOIN course c ON c.id = cs.course_id
+        WHERE cs.stop_card_id IS NOT NULL
         GROUP BY cs.stop_card_id
     """
     )
@@ -340,6 +351,14 @@ interface StopVisitEventDao {
 
     @Query("SELECT * FROM stop_visit_event WHERE session_id = :sessionId ORDER BY event_ts")
     suspend fun getBySession(sessionId: Long): List<StopVisitEventEntity>
+
+    /**
+     * 単一イベントの取得（S6a「コース編集画面の刷新」、2026-07-18追加）。編集画面のロード
+     * （[com.istech.buscourse.course.CourseRepository.getCourseEditDetails]）が `course_stop.event_id`
+     * から座標（`lat`/`lon`）を解決するために使う（[TimelapseFrameDao.getById]のevent版）。
+     */
+    @Query("SELECT * FROM stop_visit_event WHERE id = :id")
+    suspend fun getById(id: Long): StopVisitEventEntity?
 }
 
 /** `shock_event`（衝撃検知イベント）の操作（設計書§3.5）。 */

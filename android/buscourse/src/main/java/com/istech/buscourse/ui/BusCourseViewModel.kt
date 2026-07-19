@@ -13,6 +13,7 @@ import com.istech.buscourse.course.ApplyApprovedResult
 import com.istech.buscourse.course.CourseCreationResult
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
+import com.istech.buscourse.course.CourseStopEdit
 import com.istech.buscourse.course.DuplicateFrameCandidate
 import com.istech.buscourse.course.FindOrCreateCandidate
 import com.istech.buscourse.course.SegmentExtractionResult
@@ -62,10 +63,11 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
 
     /**
      * courseIdごとの編成下書き（画面破棄・戻る操作で失われないようViewModelに保持する）。
-     * cardIdの並び順だけを持つ。name/riderCountは他画面でのカード編集を反映できるよう、
-     * 復元時に呼び出し側（CourseDetailScreen）が都度最新のカードデータから引き直す。
+     * frame_id/event_id/stop_card_id の並び順だけを持つ（S6a改、[CourseStopEdit]参照）。
+     * name/riderCountは他画面でのカード編集を反映できるよう、復元時に呼び出し側（CourseDetailScreen）が
+     * 都度最新のカードデータ・コース情報から引き直す。
      */
-    private val courseStopDrafts = mutableMapOf<Long, List<Long>>()
+    private val courseStopDrafts = mutableMapOf<Long, List<CourseStopEdit>>()
 
     /**
      * 作業進捗ログ（依頼３ 2026-07-11）の共通記録。書き込み操作の成否確定後に呼ぶ。
@@ -85,10 +87,10 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun getCourseStopDraft(courseId: Long): List<Long>? = courseStopDrafts[courseId]
+    fun getCourseStopDraft(courseId: Long): List<CourseStopEdit>? = courseStopDrafts[courseId]
 
-    fun setCourseStopDraft(courseId: Long, cardIdOrder: List<Long>) {
-        courseStopDrafts[courseId] = cardIdOrder
+    fun setCourseStopDraft(courseId: Long, stops: List<CourseStopEdit>) {
+        courseStopDrafts[courseId] = stops
     }
 
     fun clearCourseStopDraft(courseId: Long) {
@@ -197,13 +199,39 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** 順列の書き換え確定（CourseDetailScreen「編成を確定」、§3.8）。 */
+    /**
+     * 順列の書き換え確定（カードのみの点を前提とする旧経路、§3.8）。現在は[CourseRepository]内部の
+     * カスケード削除テスト等で使われている。編集画面（CourseDetailScreen）はS6a以降、
+     * frame_id/event_id を保持できる[saveCourseStopArrangement]を使う。
+     */
     fun setCourseStops(courseId: Long, stopCardIds: List<Long>, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
             val result = runCatching { repository.setCourseStops(courseId, stopCardIds) }
             logOutcome(result, WorkLogCategory.COURSE, "編成の確定") {
                 val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
                 "コース『${courseName ?: "ID:$courseId"}』の編成を確定（停留所${stopCardIds.size}件・区間再構築）"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * 並べ替え・削除・追加の保存（CourseDetailScreen「保存」、S6a「コース編集画面の刷新（土台）」、
+     * 2026-07-18追加）。[CourseRepository.setCourseStopsPreservingPointers] を経由し、
+     * frame_id/event_id/stop_card_id を保持したまま `course_stop` を書き換える（3パス化由来の
+     * 映像/イベントのみの点を落とさない）。書き込み系のため他の関数と同様に[viewModelScope]管理下で
+     * 実行する（フェーズ2レビュー#13の方針）。
+     */
+    fun saveCourseStopArrangement(
+        courseId: Long,
+        stops: List<CourseStopEdit>,
+        onResult: (Result<Unit>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { repository.setCourseStopsPreservingPointers(courseId, stops) }
+            logOutcome(result, WorkLogCategory.COURSE, "編成の保存") {
+                val courseName = runCatching { repository.getCourseEditDetails(courseId)?.course?.name }.getOrNull()
+                "コース『${courseName ?: "ID:$courseId"}』の編成を保存（停留所${stops.size}件・区間/ルート再構築）"
             }
             onResult(result)
         }

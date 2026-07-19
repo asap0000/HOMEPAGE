@@ -6,7 +6,6 @@ import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.istech.buscourse.R
 import com.istech.buscourse.core.data.BusCourseDatabase
-import com.istech.buscourse.core.data.BusStopCardEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.maplibre.android.geometry.LatLng
@@ -27,10 +26,24 @@ import org.maplibre.android.style.layers.Property
  * `sequenceIndexByCardId`に無いカードでは`null`（下記クラスKDoc参照）。
  */
 data class StopSymbolInfo(
-    val stopCardId: Long,
+    val stopCardId: Long?,
     val name: String,
     val sequenceIndex: Int?,
     val note: String?,
+)
+
+/**
+ * 地図上の1本のピンを表す軽量データ（3パス化のカード無し点対応、2026-07-18追加）。
+ * `stop_card_id`が無い停留所（`frame_id`/`event_id`のみ）も地図に描画できるよう、
+ * `bus_stop_card`実体への依存を切り離した最小表現。[stopCardId]は無ければ`null`。
+ */
+data class StopSymbolPoint(
+    val stopCardId: Long?,
+    val name: String,
+    val latitude: Double,
+    val longitude: Double,
+    val sequenceIndex: Int? = null,
+    val note: String? = null,
 )
 
 /**
@@ -92,35 +105,45 @@ class StopSymbolOverlay(
         val cards = withContext(Dispatchers.IO) { busStopCardDao.getAllActive() }
         withContext(Dispatchers.Main) {
             symbolManager.deleteAll()
-            val options = cards.map { card -> buildSymbolOptions(card, sequenceIndexByCardId[card.id]) }
+            val options = cards.map { card ->
+                buildSymbolOptions(
+                    StopSymbolPoint(
+                        stopCardId = card.id,
+                        name = card.name,
+                        latitude = card.latitude,
+                        longitude = card.longitude,
+                        sequenceIndex = sequenceIndexByCardId[card.id],
+                        note = card.notes,
+                    )
+                )
+            }
             if (options.isNotEmpty()) symbolManager.create(options)
         }
     }
 
     /**
-     * 指定した[cards]（呼び出し側が絞り込んだ停留所カード集合、例：特定コースの停留所のみ）を
-     * 地図上のピンとして再描画する（フェーズC-2、[showAllActiveStops]の絞り込み版）。
+     * 指定した[points]（呼び出し側が絞り込んだ点集合、例：特定コースの停留所のみ。カードの有無を
+     * 問わない）を地図上のピンとして再描画する（フェーズC-2、[showAllActiveStops]の絞り込み版。
+     * 3パス化のカード無し点対応で[StopSymbolPoint]化、2026-07-18）。
      * 既存ピンは全削除してから作り直す点は[showAllActiveStops]と同じ。
-     *
-     * @param sequenceIndexByCardId `stopCardId → sequence_index`。無指定のカードは`data.sequenceIndex`が`null`になる。
      */
-    suspend fun showStops(cards: List<BusStopCardEntity>, sequenceIndexByCardId: Map<Long, Int> = emptyMap()) {
+    suspend fun showStops(points: List<StopSymbolPoint>) {
         withContext(Dispatchers.Main) {
             symbolManager.deleteAll()
-            val options = cards.map { card -> buildSymbolOptions(card, sequenceIndexByCardId[card.id]) }
+            val options = points.map { buildSymbolOptions(it) }
             if (options.isNotEmpty()) symbolManager.create(options)
         }
     }
 
-    private fun buildSymbolOptions(card: BusStopCardEntity, sequenceIndex: Int?): SymbolOptions {
+    private fun buildSymbolOptions(point: StopSymbolPoint): SymbolOptions {
         val data = JsonObject().apply {
-            addProperty("stopCardId", card.id)
-            addProperty("name", card.name)
-            if (sequenceIndex != null) addProperty("sequenceIndex", sequenceIndex) else add("sequenceIndex", JsonNull.INSTANCE)
-            if (card.notes != null) addProperty("note", card.notes) else add("note", JsonNull.INSTANCE)
+            if (point.stopCardId != null) addProperty("stopCardId", point.stopCardId) else add("stopCardId", JsonNull.INSTANCE)
+            addProperty("name", point.name)
+            if (point.sequenceIndex != null) addProperty("sequenceIndex", point.sequenceIndex) else add("sequenceIndex", JsonNull.INSTANCE)
+            if (point.note != null) addProperty("note", point.note) else add("note", JsonNull.INSTANCE)
         }
         return SymbolOptions()
-            .withLatLng(LatLng(card.latitude, card.longitude))
+            .withLatLng(LatLng(point.latitude, point.longitude))
             .withIconImage(ICON_ID)
             .withIconAnchor(Property.ICON_ANCHOR_BOTTOM)
             .withData(data)
@@ -128,7 +151,7 @@ class StopSymbolOverlay(
 
     private fun parseData(symbol: Symbol): StopSymbolInfo? {
         val data = symbol.data as? JsonObject ?: return null
-        val stopCardId = data.get("stopCardId")?.takeIf { !it.isJsonNull }?.asLong ?: return null
+        val stopCardId = data.get("stopCardId")?.takeIf { !it.isJsonNull }?.asLong
         val name = data.get("name")?.takeIf { !it.isJsonNull }?.asString ?: return null
         val sequenceIndex = data.get("sequenceIndex")?.takeIf { !it.isJsonNull }?.asInt
         val note = data.get("note")?.takeIf { !it.isJsonNull }?.asString

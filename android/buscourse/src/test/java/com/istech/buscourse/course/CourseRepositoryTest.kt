@@ -862,4 +862,196 @@ class CourseRepositoryTest {
     fun resolveStopPosition_allAbsent_returnsNull() {
         assertThat(repository.resolveStopPosition()).isNull()
     }
+
+    // ------------------------------------------------------------------
+    // getCourseEditDetails（S6a「コース編集画面の刷新（土台）」、2026-07-18追加）
+    //
+    // 旧 CourseWithDetails / CourseStopWithCard.requireCard は「各停留所＝カード1枚」前提のため、
+    // 3パス化由来のカード無しの点（frame_id/event_id のみ）を含むコースを開くとクラッシュしていた。
+    // ここではまずその「落ちない」ことと、表示名・座標の導出則を確認する。
+    // ------------------------------------------------------------------
+
+    /**
+     * 映像のみの点（frame_id はあるがcard_idが無い）でも例外を投げず、表示名を
+     * `S{sourceSessionId}-{sequence_index+1}` として導出する。座標はframe座標をそのまま返す。
+     */
+    @Test
+    fun getCourseEditDetails_frameOnlyStop_doesNotCrash_derivesDisplayNameFromSession() = runTest {
+        val farCardId = createCard("遠いカード", lat = 36.000, lon = 140.000) // コリドー外、吸着させない
+        val sessionId = insertSession()
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = farCardId)
+        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val courseId = result.createdCourseIds.single()
+
+        val details = repository.getCourseEditDetails(courseId)
+
+        assertThat(details).isNotNull()
+        assertThat(details!!.stops).hasSize(1)
+        val stop = details.stops.single()
+        assertThat(stop.hasFrame).isTrue()
+        assertThat(stop.hasCard).isFalse()
+        assertThat(stop.displayName).isEqualTo("S$sessionId-1") // sequence_index(0)+1
+        assertThat(stop.latitude).isEqualTo(35.000)
+        assertThat(stop.longitude).isEqualTo(139.000)
+        assertThat(stop.riderCount).isEqualTo(0)
+    }
+
+    /**
+     * イベントのみの点（event_id はあるがcard_idが無い、カメラ故障セッション#17相当）でも
+     * 例外を投げず、座標はイベントの実測座標をそのまま返す。
+     */
+    @Test
+    fun getCourseEditDetails_eventOnlyStop_doesNotCrash_usesEventCoordinate() = runTest {
+        val misattachedFarCardId = createCard("誤吸着された遠いカード", lat = 36.000, lon = 140.000)
+        val sessionId = insertSession()
+        insertManualEvent(
+            sessionId, stopCardId = misattachedFarCardId,
+            lat = 35.000, lon = 139.000, eventTs = 1_700_000_000_000L,
+        )
+        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val courseId = result.createdCourseIds.single()
+
+        val details = repository.getCourseEditDetails(courseId)
+
+        val stop = details!!.stops.single()
+        assertThat(stop.hasFrame).isFalse()
+        assertThat(stop.hasCard).isFalse()
+        assertThat(stop.latitude).isEqualTo(35.000) // イベントの実測座標（誤吸着カードの座標=36.000ではない）
+        assertThat(stop.longitude).isEqualTo(139.000)
+        assertThat(stop.displayName).isEqualTo("S$sessionId-1")
+    }
+
+    /** カードを持つ点は、従来どおりカード名・乗車人数を表示名/riderCountに使う。 */
+    @Test
+    fun getCourseEditDetails_cardAttachedStop_usesCardNameAndRiderCount() = runTest {
+        val cardId = repository.createStopCard(
+            name = "本町バス停", latitude = 35.000, longitude = 139.000, altitudeM = null,
+            notes = null, riderCount = 5, photoTempFile = null,
+        )
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(courseId, listOf(CourseStopEdit(frameId = null, eventId = null, cardId = cardId)))
+
+        val details = repository.getCourseEditDetails(courseId)
+
+        val stop = details!!.stops.single()
+        assertThat(stop.hasCard).isTrue()
+        assertThat(stop.hasFrame).isFalse()
+        assertThat(stop.displayName).isEqualTo("本町バス停")
+        assertThat(stop.riderCount).isEqualTo(5)
+        assertThat(stop.latitude).isEqualTo(35.000)
+        assertThat(stop.longitude).isEqualTo(139.000)
+    }
+
+    /** 存在しないcourseIdはnullを返す（例外にしない）。 */
+    @Test
+    fun getCourseEditDetails_unknownCourseId_returnsNull() = runTest {
+        assertThat(repository.getCourseEditDetails(999_999L)).isNull()
+    }
+
+    // ------------------------------------------------------------------
+    // setCourseStopsPreservingPointers（S6a、2026-07-18追加）
+    // ------------------------------------------------------------------
+
+    /**
+     * 並べ替え後も frame_id/event_id/stop_card_id はそのまま保持される（[CourseRepository.setCourseStops]
+     * と異なり、カードのみの点に作り直されない）。
+     */
+    @Test
+    fun setCourseStopsPreservingPointers_reorder_preservesFrameEventCardIds() = runTest {
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val sessionId = insertSession()
+        val frameId = insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000)
+        val eventId = insertManualEvent(sessionId, stopCardId = cardId, lat = 35.010, lon = 139.010, eventTs = 1_700_000_000_000L)
+
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = frameId, eventId = null, cardId = null),
+                CourseStopEdit(frameId = null, eventId = eventId, cardId = null),
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardId),
+            ),
+        )
+
+        // 先頭と末尾を入れ替えて再保存する
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardId),
+                CourseStopEdit(frameId = null, eventId = eventId, cardId = null),
+                CourseStopEdit(frameId = frameId, eventId = null, cardId = null),
+            ),
+        )
+
+        val stops = db.courseStopDao().getOrderedStops(courseId).sortedBy { it.sequenceIndex }
+        assertThat(stops.map { it.stopCardId }).containsExactly(cardId, null, null).inOrder()
+        assertThat(stops.map { it.eventId }).containsExactly(null, eventId, null).inOrder()
+        assertThat(stops.map { it.frameId }).containsExactly(null, null, frameId).inOrder()
+    }
+
+    /** 削除も反映される（渡さなかった行はcourse_stopから消える）。 */
+    @Test
+    fun setCourseStopsPreservingPointers_omittedStop_isDeleted() = runTest {
+        val cardA = createCard("A", lat = 35.000, lon = 139.000)
+        val cardB = createCard("B", lat = 35.010, lon = 139.010)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardA),
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardB),
+            ),
+        )
+
+        // Bを除いて保存し直す（編集画面の削除操作に相当）
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(CourseStopEdit(frameId = null, eventId = null, cardId = cardA)),
+        )
+
+        val stops = db.courseStopDao().getOrderedStops(courseId)
+        assertThat(stops.map { it.stopCardId }).containsExactly(cardA)
+    }
+
+    /**
+     * `course.source_session_id` が設定されているコース（トップダウン創設由来）では、保存後に
+     * セッションの実測GPS軌跡から route_point が再生成される（「ナビの線は維持」、設計ドラフト§7.1）。
+     */
+    @Test
+    fun setCourseStopsPreservingPointers_withSourceSessionId_regeneratesRoutePointsFromSession() = runTest {
+        val cardA = createCard("A", lat = 35.000, lon = 139.000)
+        val cardB = createCard("B", lat = 35.0005, lon = 139.000)
+        val sessionId = insertSession()
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, capturedAt = 1_700_000_000_000L, stopCardId = cardA)
+        insertFrame(sessionId, seq = 1, lat = 35.0005, lon = 139.000, capturedAt = 1_700_000_005_000L, stopCardId = cardB)
+        insertGpsTrack(sessionId, baseLat = 35.000, baseLon = 139.000) // 0〜9秒分の実測軌跡
+
+        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val courseId = result.createdCourseIds.single()
+        assertThat(db.routePointDao().getOrdered(courseId)).isNotEmpty() // 創設時点で生成済みという前提の確認
+
+        // 並べ替え（2件を入れ替え）を保存する。frame_id は各カードのマーカー付きフレームを引き継ぐ。
+        val stops = db.courseStopDao().getOrderedStops(courseId).sortedBy { it.sequenceIndex }
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            stops.reversed().map { CourseStopEdit(frameId = it.frameId, eventId = it.eventId, cardId = it.stopCardId) },
+        )
+
+        assertThat(db.courseDao().getById(courseId)?.sourceSessionId).isEqualTo(sessionId)
+        assertThat(db.routePointDao().getOrdered(courseId)).isNotEmpty() // ナビの線は消えない
+    }
+
+    /** `source_session_id` が無い（従来のボトムアップ編成）コースでは confirmCourseRouteFromSession を呼ばない。 */
+    @Test
+    fun setCourseStopsPreservingPointers_withoutSourceSessionId_doesNotThrowAndSkipsSessionRoute() = runTest {
+        val cardA = createCard("A", lat = 35.000, lon = 139.000)
+        val courseId = repository.createCourse("従来コース", CourseKind.STANDARD)
+
+        // sourceSessionIdが無い状態で保存しても例外にならない（存在しないセッションIDを
+        // confirmCourseRouteFromSessionに渡してしまうと落ちるはずだが、その分岐に入らないことを確認）
+        repository.setCourseStopsPreservingPointers(courseId, listOf(CourseStopEdit(frameId = null, eventId = null, cardId = cardA)))
+
+        assertThat(db.courseDao().getById(courseId)?.sourceSessionId).isNull()
+        assertThat(db.courseStopDao().getOrderedStops(courseId)).hasSize(1)
+    }
 }

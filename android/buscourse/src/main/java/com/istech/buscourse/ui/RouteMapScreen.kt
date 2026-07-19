@@ -50,14 +50,14 @@ import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.MapDataPackageEntity
-import com.istech.buscourse.core.data.requireCard
-import com.istech.buscourse.core.data.requireStopCardId
 import com.istech.buscourse.core.location.GnssLocationSource
+import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.map.GnssBackedLocationEngineAdapter
 import com.istech.buscourse.map.MapVehiclePositionOverlay
 import com.istech.buscourse.map.RouteTrackOverlay
 import com.istech.buscourse.map.StopSymbolInfo
 import com.istech.buscourse.map.StopSymbolOverlay
+import com.istech.buscourse.map.StopSymbolPoint
 import kotlin.math.max
 import kotlinx.coroutines.launch
 import org.maplibre.android.camera.CameraPosition
@@ -116,6 +116,7 @@ fun RouteMapScreen(
                 modifier = Modifier.padding(padding),
                 context = context,
                 database = database,
+                repository = viewModel.repository,
                 courseId = courseId,
                 pkg = pkg,
             )
@@ -165,6 +166,7 @@ internal fun MapEmptyState(modifier: Modifier = Modifier, onOpenMapImport: () ->
 private fun RouteMapContent(
     context: Context,
     database: BusCourseDatabase,
+    repository: CourseRepository,
     courseId: Long,
     pkg: MapDataPackageEntity,
     modifier: Modifier = Modifier,
@@ -240,8 +242,8 @@ private fun RouteMapContent(
             map.setMaxZoomPreference(pkg.maxzoom.toDouble())
 
             scope.launch {
-                val details = database.courseDao().getWithDetails(courseId)
-                val stops = details?.stops?.sortedBy { it.courseStop.sequenceIndex }.orEmpty()
+                val editDetails = repository.getCourseEditDetails(courseId)
+                val stops = editDetails?.stops.orEmpty() // CourseStopView, 既に sequence_index 順
 
                 // フェーズC-2: route_point（C-1で確定した連続ポリライン）があれば1本の連続線で描く。
                 // 未確定コース（route_pointが空/1点）では、従来どおりsegment_trackの区間再組立に
@@ -253,20 +255,30 @@ private fun RouteMapContent(
                         routePoints.map { it.lat to it.lon }, ROUTE_LINE_COLOR_HEX
                     )
                 } else {
-                    // course_stop.stop_card_id はNULL許容化されたが（[CourseStopWithCard]のクラスKDoc
-                    // 参照）、地図描画は3パス化スコープ外＝常にカードのみの点前提のため
-                    // requireStopCardId で明示する
+                    // カードを持つ隣接ペアのみ区間軌跡を描く。segment_track の端点は NOT NULL の
+                    // 停留所カードのため、カード無しの点（frame_id/event_id のみ）は端点にできない。
+                    // regenerateCourseSegments と同じ扱いで、その区間だけ静かにスキップする。
                     stops.zipWithNext().forEach { (from, to) ->
-                        routeOverlay.showSegment(
-                            from.courseStop.requireStopCardId, to.courseStop.requireStopCardId, ROUTE_LINE_COLOR_HEX
-                        )
+                        val fromCardId = from.cardId
+                        val toCardId = to.cardId
+                        if (fromCardId != null && toCardId != null) {
+                            routeOverlay.showSegment(fromCardId, toCardId, ROUTE_LINE_COLOR_HEX)
+                        }
                     }
                 }
 
-                // ピンは旧・全アクティブカード表示ではなく、このコースの停留所だけに絞る。
-                val courseCards = stops.map { it.requireCard }.distinctBy { it.id }
-                val sequenceIndexByCardId =
-                    stops.associate { it.courseStop.requireStopCardId to it.courseStop.sequenceIndex }
+                // ピンはこのコースの停留所だけに絞る。カード有無を問わず解決済み座標
+                // （frame→event→card 優先、CourseRepository.resolveStopPosition）で描く。
+                val symbolPoints = stops.map { stop ->
+                    StopSymbolPoint(
+                        stopCardId = stop.cardId,
+                        name = stop.displayName,
+                        latitude = stop.latitude,
+                        longitude = stop.longitude,
+                        sequenceIndex = stop.sequenceIndex,
+                        note = null, // 地図のタップダイアログに note は出さない方針（オーナー確定 2026-07-18）
+                    )
+                }
                 stopSymbolOverlay?.onDestroy()
                 val overlay = StopSymbolOverlay(
                     context = context,
@@ -276,14 +288,14 @@ private fun RouteMapContent(
                     style = style,
                     onSymbolClick = { info -> tappedStop = info },
                 )
-                overlay.showStops(courseCards, sequenceIndexByCardId)
+                overlay.showStops(symbolPoints)
                 stopSymbolOverlay = overlay
 
                 // (A) 初期カメラ＝開いたコースの停留所範囲へauto-fit（設計書§9次工程の仕上げ）。
                 // 停留所が2件未満（0件 or 1件で点になりgetCameraForLatLngBoundsが扱いにくい）、
                 // または地図サイズ未確定でgetCameraForLatLngBoundsがnullを返す場合は、
                 // パッケージbbox中心＋既定ズームへフォールバックする。
-                val stopLatLngs = stops.map { LatLng(it.requireCard.latitude, it.requireCard.longitude) }
+                val stopLatLngs = stops.map { LatLng(it.latitude, it.longitude) }
                 val fittedCameraPosition = if (stopLatLngs.size >= 2) {
                     val stopsBounds = LatLngBounds.Builder().apply {
                         stopLatLngs.forEach { include(it) }
