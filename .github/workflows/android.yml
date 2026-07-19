@@ -59,20 +59,36 @@ jobs:
           echo "OK: no INTERNET permission; print module has no share-intent or temp-file paths."
 
       # BusCourse (:buscourse) 向け istech オフライン厳守の機械的担保 (Layer1 1/2・設計書§8.2.1):
-      # ソース AndroidManifest.xml に INTERNET 権限が直接宣言されていないかの一次フィルタ。
-      # MapLibre 等の AAR が自動注入する権限はソースには現れず、ここでは検出できない
-      # （マージ後の最終マニフェストにのみ現れる）ため、最終的な合否判定は後段の
-      # 「出荷APK検査」ステップが持つ（設計書§8.2.1、AAR注入の見落とし対策）。
-      # :buscourse は現時点で MapLibre 未導入（フェーズ3まで追加しない）のため、
-      # 検査対象は INTERNET のみとする。
-      - name: Verify :buscourse offline policy (no INTERNET permission in source manifest)
+      # ソース AndroidManifest.xml にネットワーク系権限が「除去指定なし」で直接宣言されて
+      # いないかの一次フィルタ。MapLibre 等の AAR が自動注入する権限はソースには現れず、
+      # ここでは検出できない（マージ後の最終マニフェストにのみ現れる）ため、最終的な
+      # 合否判定は後段の「出荷APK検査」ステップが持つ（設計書§8.2.1、AAR注入の見落とし対策）。
+      # :buscourse はフェーズ3でMapLibreを導入済みのため、検査対象を INTERNET だけでなく
+      # ACCESS_NETWORK_STATE / ACCESS_WIFI_STATE にも拡張する。androidx.work(WorkManager)も
+      # ACCESS_NETWORK_STATEをマージ後マニフェストへ自動注入することが実機確認済みだが
+      # （設計書§8.2.1の2026-07-09発覚レビュー・§8.6 WorkManager行）、
+      # buscourse/src/main/AndroidManifest.xmlは3権限とも tools:node="remove" により
+      # 明示的に除去しており、2026-07-11のデバッグビルド（processDebugManifestForPackage）で
+      # マージ後マニフェストから実際に消えていることを確認済みのため拡張して問題ない。
+      # 本ステップは tools:node="remove" 指定のある行（=意図した除去宣言）を除外し、
+      # 除去指定なしで宣言している行のみを違反として検出する
+      # （tools:node="remove" の行自体が文字列 "android.permission.INTERNET" 等を含むため、
+      #   単純な文字列一致だと防御コードそのものを誤検知してしまう点に注意、設計書§8.2.4
+      #   「誤検知（偽陽性）その2」と同種のパターン）。同じ理由でマッチ対象は
+      #   `android:name="android.permission.X"` というXML属性値の形に絞り、ファイル冒頭
+      #   コメント中の説明文（"android.permission.INTERNET はアプリ自身では宣言しない"等）
+      #   を誤検知しないようにする（実際にファイル全体をそのまま素朴grepすると、この
+      #   コメント行自体がヒットして誤爆することをローカルで確認済み。§8.2.4がまさに
+      #   警告していたパターン）。
+      - name: Verify :buscourse offline policy (no network permissions in source manifest)
         run: |
           set -e
-          if grep -q 'android.permission.INTERNET' buscourse/src/main/AndroidManifest.xml; then
-            echo "::error::buscourse/src/main/AndroidManifest.xml declares android.permission.INTERNET — istech offline policy violation (BusCourse must not access the network)."
+          PATTERN='android:name="android\.permission\.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE)"'
+          if grep -E "$PATTERN" buscourse/src/main/AndroidManifest.xml | grep -v 'tools:node="remove"' | grep -q .; then
+            echo "::error::buscourse/src/main/AndroidManifest.xml declares a network permission (INTERNET/ACCESS_NETWORK_STATE/ACCESS_WIFI_STATE) without tools:node=\"remove\" — istech offline policy violation (BusCourse must not access the network)."
             exit 1
           fi
-          echo "OK: buscourse/src/main/AndroidManifest.xml does not declare INTERNET permission."
+          echo "OK: buscourse/src/main/AndroidManifest.xml does not declare INTERNET/ACCESS_NETWORK_STATE/ACCESS_WIFI_STATE without tools:node=\"remove\"."
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -158,7 +174,12 @@ jobs:
       # あくまで一次フィルタであり、AAR自動注入分を含めた合否判定の最終権威はこのステップが持つ
       # （設計書§8.2.1：「合否判定の最終権威はLayer1のAPK検査」）。
       # :buscourse は product flavor を持たないため :app のような `*/debug` glob は不要。
-      - name: Verify :buscourse offline policy (no INTERNET permission in shipped APK)
+      # フェーズ3でMapLibreを導入済みのため、検査対象を INTERNET だけでなく
+      # ACCESS_NETWORK_STATE / ACCESS_WIFI_STATE にも拡張する（拡張の根拠は前段
+      # 「source manifest」ステップのコメント参照。aapt dump permissions はマージ後の
+      # 最終権限一覧を返すため、tools:node="remove" 済みの権限は元々ここには出現しない
+      # ——ソースgrepのような誤検知の心配はない）。
+      - name: Verify :buscourse offline policy (no network permissions in shipped APK)
         run: |
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
           checked=0
@@ -166,15 +187,123 @@ jobs:
                      buscourse/build/outputs/apk/release/*.apk; do
             [ -f "$apk" ] || continue
             checked=1
-            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
-              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
+            if "$AAPT" dump permissions "$apk" | grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE)'; then
+              echo "::error::$apk requests a network permission (INTERNET/ACCESS_NETWORK_STATE/ACCESS_WIFI_STATE) — istech offline policy violation."
               exit 1
             fi
-            echo "OK: $apk does not request INTERNET permission."
+            echo "OK: $apk does not request INTERNET/ACCESS_NETWORK_STATE/ACCESS_WIFI_STATE."
           done
           if [ "$checked" -eq 0 ]; then
             echo "::error::No :buscourse APK found to verify."
             exit 1
+          fi
+
+      # BusCourse (:buscourse) 向け Version Catalog 標準逸脱検知（フェーズ3・軽量名指し検査）:
+      # MapLibre 等の依存が要求する Kotlin が、Version Catalog（gradle/libs.versions.toml）で
+      # 宣言している標準 Kotlin 版を超えていないかを、実際に解決された kotlin-stdlib の
+      # バージョンで確認する。追加の pip 等は使わず grep/awk/sed のみで判定する。
+      - name: Verify :buscourse resolved Kotlin matches libs.versions.toml
+        run: |
+          set -e
+          DEPS_FILE="$RUNNER_TEMP/buscourse-kotlin-deps.txt"
+          CATALOG="gradle/libs.versions.toml"
+
+          ./gradlew -q :buscourse:dependencies --configuration releaseRuntimeClasspath --no-daemon > "$DEPS_FILE"
+
+          # 依存ツリー中の org.jetbrains.kotlin:kotlin-stdlib（kotlin-stdlib-jdk8等の
+          # 別アーティファクトは ":kotlin-stdlib:" の直後にハイフンが続かないため除外される）
+          # を抜き出し、"X -> Y" 形式（強制上書き）なら解決後バージョン Y を、単独表記なら
+          # そのままのバージョンを採用する。複数箇所に出現するが、Gradle は1configuration内で
+          # 単一バージョンに統一するため一意になるはず。
+          RESOLVED=$(grep -oE 'kotlin-stdlib:[0-9][0-9.]*( -> [0-9][0-9.]*)?' "$DEPS_FILE" \
+            | sed -E 's/^kotlin-stdlib:[0-9.]+ -> ([0-9.]+)$/\1/; s/^kotlin-stdlib:([0-9.]+)$/\1/' \
+            | sort -u)
+
+          if [ -z "$RESOLVED" ]; then
+            echo "::error::Could not find org.jetbrains.kotlin:kotlin-stdlib in :buscourse releaseRuntimeClasspath output — check the dependency report format."
+            exit 1
+          fi
+
+          RESOLVED_COUNT=$(echo "$RESOLVED" | wc -l)
+          if [ "$RESOLVED_COUNT" -ne 1 ]; then
+            echo "::error::Multiple distinct kotlin-stdlib versions resolved in :buscourse releaseRuntimeClasspath: $(echo "$RESOLVED" | tr '\n' ' ') — dependency resolution is not unified."
+            exit 1
+          fi
+
+          CATALOG_KOTLIN=$(grep -E '^kotlin = ' "$CATALOG" | sed -E 's/^kotlin = "([0-9.]+)"/\1/')
+          if [ -z "$CATALOG_KOTLIN" ]; then
+            echo "::error::Could not read 'kotlin' version from $CATALOG."
+            exit 1
+          fi
+
+          RESOLVED_MM=$(echo "$RESOLVED" | cut -d. -f1,2)
+          CATALOG_MM=$(echo "$CATALOG_KOTLIN" | cut -d. -f1,2)
+
+          if [ "$RESOLVED_MM" != "$CATALOG_MM" ]; then
+            echo "::error:::buscourse dependencies resolve org.jetbrains.kotlin:kotlin-stdlib $RESOLVED (major.minor $RESOLVED_MM), which exceeds the standard Kotlin $CATALOG_KOTLIN (major.minor $CATALOG_MM) declared in $CATALOG — a transitive dependency is forcing a newer Kotlin than the toolchain standard."
+            exit 1
+          fi
+          echo "OK: :buscourse resolved kotlin-stdlib $RESOLVED matches standard Kotlin $CATALOG_KOTLIN (major.minor $CATALOG_MM)."
+
+      # BusCourse (:buscourse) 向け istech オフライン厳守の機械的担保 (Layer2・設計書§8.2.2):
+      # フェーズ3でMapLibreを導入した :buscourse は、com.squareup.okhttp3:okhttp が
+      # org.maplibre.gl:android-sdk のruntime直接依存としてreleaseRuntimeClasspathに
+      # 混入することが構造上避けられない（設計書§5.2実地確認・2026-07-11依存解決結果）ため、
+      # :app と同じブラックリスト方式（「存在=即NG」）のままでは常時redになる
+      # （設計書§8.2.4「運用不能」パターン）。:buscourse に限り、ネットワーク系ライブラリの
+      # 混入を「android/ci/offline-allowlist.yml に理由付きで登録済みか」の差分検査に
+      # 置き換える（allowlist方式、§8.2.2）。:app（PrivacyCamera）は引き続き上記の
+      # ブラックリスト方式のまま（MapLibre非導入のためallowlistへ移行する理由がない）。
+      # releaseRuntimeClasspathに限定することで、テスト専用の okhttp3:mockwebserver 等
+      # （設計書§8.2.4「誤検知（偽陽性）その1」）を出荷対象から除外する。
+      # PyYAML等の追加インストールを避けるため、allowlist(android/ci/offline-allowlist.yml)は
+      # 「- group: <g>」「  artifact: <a>」の2行1組の単純な構造に保ち、awkのみで
+      # group:artifact ペアを抽出して照合する（フォーマットの制約はallowlistファイル冒頭の
+      # コメント参照）。
+      - name: Verify :buscourse offline policy (network library allowlist)
+        run: |
+          set -e
+          DEPS_FILE="$RUNNER_TEMP/buscourse-deps.txt"
+          ALLOWLIST="ci/offline-allowlist.yml"
+          NETWORK_LIB_PATTERN='okhttp|retrofit|ktor-client|volley|grpc|apache\.http|cronet'
+
+          ./gradlew -q :buscourse:dependencies --configuration releaseRuntimeClasspath --no-daemon > "$DEPS_FILE"
+
+          # allowlist から許可済みの "group:artifact" ペアを抽出する。
+          ALLOWED=$(awk '
+            /^- group:/ { g = $3 }
+            /^  artifact:/ { print g ":" $2 }
+          ' "$ALLOWLIST")
+
+          # 依存ツリーからネットワーク系パターンに一致する行を抜き出し、罫線
+          # (+---, \---, |) とバージョン以降(" -> x.y.z"・" (*)") を取り除いて
+          # "group:artifact" だけに正規化する。
+          # ★注意: 該当ライブラリが0件のとき grep はexit 1を返す(=マッチ無し)。
+          # ここはコマンド置換(FOUND=$(...))なので、if文の条件式内と違って
+          # set -e / pipefail の対象になり、`|| true` が無いと「ネットワーク系
+          # ライブラリが1つも無い」という健全な状態でステップ自体が異常終了する
+          # （実際に再現・修正確認済み、ローカル試験で確認）。
+          FOUND=$(grep -Ei "$NETWORK_LIB_PATTERN" "$DEPS_FILE" \
+            | sed -E 's/^[ |\+-]+//' \
+            | sed -E 's/ .*$//' \
+            | cut -d: -f1,2 \
+            | sort -u) || true
+
+          unlisted=0
+          for ga in $FOUND; do
+            if echo "$ALLOWED" | grep -qxF "$ga"; then
+              echo "OK (allowlisted): $ga"
+            else
+              echo "::error::Unlisted network library detected in :buscourse releaseRuntimeClasspath: $ga — add a group/artifact/via/reason entry to android/ci/offline-allowlist.yml (istech offline policy, 設計書§8.2.2)."
+              unlisted=1
+            fi
+          done
+
+          if [ "$unlisted" -ne 0 ]; then
+            exit 1
+          fi
+          if [ -z "$FOUND" ]; then
+            echo "OK: no known network libraries in :buscourse releaseRuntimeClasspath."
           fi
 
       # istech オフライン厳守の機械的担保 (2/2):

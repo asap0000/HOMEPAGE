@@ -21,13 +21,21 @@ data class StopMaster(
     val latitude: Double,
     val longitude: Double,
     val arrivalRadiusM: Double,
+    /** 停留所カードの表示名（手動マークのToastフィードバック用、2026-07-13追加）。 */
+    val name: String? = null,
 ) {
     companion object {
         /** フェーズ1暫定値。設計書§3.5 `arrival_radius_m`の`NOT NULL DEFAULT 50`と一致させる。フェーズ4で列に置き換える。 */
         const val DEFAULT_ARRIVAL_RADIUS_M = 50.0
 
         fun from(card: BusStopCardEntity, arrivalRadiusM: Double = DEFAULT_ARRIVAL_RADIUS_M): StopMaster =
-            StopMaster(id = card.id, latitude = card.latitude, longitude = card.longitude, arrivalRadiusM = arrivalRadiusM)
+            StopMaster(
+                id = card.id,
+                latitude = card.latitude,
+                longitude = card.longitude,
+                arrivalRadiusM = arrivalRadiusM,
+                name = card.name,
+            )
     }
 }
 

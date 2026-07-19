@@ -28,6 +28,7 @@ object BusCourseStorage {
     // §3.3 固定ファイル名
     const val FILE_STOPCARD_PHOTO_ORIG = "photo_orig.jpg"
     const val FILE_STOPCARD_PHOTO_THUMB = "photo_thumb.jpg"
+    const val FILE_STOPCARD_VOICE_MEMO = "voice_memo.m4a"
     const val FILE_SESSION_META = "meta.json"
     const val FILE_SESSION_GPS_RAW = "gps_raw.jsonl"
     const val DIR_SESSION_FRAMES = "frames"

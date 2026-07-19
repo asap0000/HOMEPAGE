@@ -1,0 +1,44 @@
+# BusCourse (:buscourse) istech オフライン厳守 Layer2 allowlist（設計書§8.2.2）
+#
+# releaseRuntimeClasspath（出荷対象configuration）に存在してよいネットワーク系
+# ライブラリの一覧。「存在=即NG」のブラックリストではなく、「理由未記載のまま
+# 増えたら止める」設計変更管理として運用する（§8.2「構成管理」の目的）。
+# :app（PrivacyCamera）は引き続きブラックリスト方式（既存の
+# "Verify offline policy (no network libraries)" ステップ）のまま。
+# allowlist方式への転換はフェーズ3ゲート条件解消後の :buscourse に限定する
+# （§8.2 Layer2の稼働開始時期の表・§8.4）。
+#
+# 新規追加は必ず「なぜ実通信に至らないか」の具体的根拠を reason に記載すること
+# （PRレビュー対象、§8.2.2）。
+#
+# フォーマット上の制約（重要）: CIステップは PyYAML 等の追加インストールを避け
+# awk のみで照合する（.github/workflows/android.yml 参照）。そのため各エントリは
+# 必ず下記の2行を厳密にこの見た目で保つこと。
+#   - group: <group>
+#     artifact: <artifact>
+# （"- group:" と "  artifact:" の行頭パターンだけを awk が拾う。via/reason は
+#  人間向けの記録であり照合ロジックは参照しない。将来 group/artifact に空白を
+#  含む値を追加する場合はこの単純awk実装が壊れるため、その際はPython3標準
+#  ライブラリでの再実装を検討すること）。
+#
+# org.maplibre.gl 名義の他アーティファクト（android-sdk-geojson / android-sdk-turf /
+# maplibre-android-gestures / android-plugin-annotation 等）や androidx・Kotlin標準
+# ライブラリは対象外（ネットワーク系ライブラリではないため）。これらは「監査済み
+# SDK本体」として §8.6 総合表・依存関係解決結果（2026-07-11実地確認）で確認済み。
+
+- group: com.squareup.okhttp3
+  artifact: okhttp
+  via: org.maplibre.gl:android-sdk
+  reason: >
+    org.maplibre.gl:android-sdk のPOM上のruntime直接依存（推移依存ではなく一次依存、
+    §5.2実地確認）。mbtiles:// はネイティブ層でSQLiteを直読みしOkHttpを経由しない
+    （§5.2.3実測）。INTERNET / ACCESS_NETWORK_STATE / ACCESS_WIFI_STATE 権限は
+    buscourse/src/main/AndroidManifest.xml で tools:node="remove" により除去済みで、
+    マージ後マニフェストに一切残らないことを実機ビルドで確認済み（2026-07-11、
+    §5.3.1・Layer1）。okhttpのクラス自体はAPKに同梱されるが、Android OSの
+    パーミッションチェックによりソケット生成自体がSecurityException/EACCESSで
+    実行時に失敗する状態を一次防御としている。補助防御として
+    FailClosedNetworkInterceptor（§5.5）をhttp(s)スキームの即時例外化として
+    追加予定（未実装、§8.7）。最終防波堤はLayer3の実機/エミュレータ回帰テスト
+    （OfflineEgressGuardTest、§8.2.3）。
+    詳細: docs/2026-07-08_システム設計_BusCourse.md §5.2, §5.3.1, §5.5, §8.2.2

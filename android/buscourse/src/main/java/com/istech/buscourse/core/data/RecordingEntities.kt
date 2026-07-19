@@ -47,6 +47,12 @@ data class RecordingSessionEntity(
     @ColumnInfo(name = "total_distance_m") val totalDistanceM: Double?,
     /** RECORDING | COMPLETED | DISCARDED | INTERRUPTED */
     val status: String,
+    /**
+     * セッションメモ（2026-07-11追加）。「いつ・何の目的で走ったか」を後から自由記述する。
+     * コース編成・区間抽出を後日まとめて別の担当者が行うことがあるため、区間抽出画面の
+     * セッション一覧から編集する。
+     */
+    val memo: String? = null,
 )
 
 /**
@@ -80,6 +86,12 @@ data class TimelapseFrameEntity(
     val width: Int?,
     val height: Int?,
     @ColumnInfo(name = "size_bytes") val sizeBytes: Long?,
+    /**
+     * 手動停留所マーク時に、そのコマが表す停留所カードidを記録（②のスクラバ上の停留所ピン用）。
+     * NULL=通常フレーム。version 8（2026-07-12）で追加。意図的にFK制約は付けない
+     * （ALTER TABLE ADD COLUMNのみで済ませ、テーブル再作成を避けるため。[BusCourseDatabase.MIGRATION_7_8]）。
+     */
+    @ColumnInfo(name = "stop_card_id") val stopCardId: Long? = null,
 )
 
 /**

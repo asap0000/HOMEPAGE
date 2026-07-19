@@ -73,3 +73,19 @@ fun formatDistance(meters: Double?): String = when {
     meters >= 1000.0 -> String.format(Locale.JAPAN, "%.1f km", meters / 1000.0)
     else -> String.format(Locale.JAPAN, "%.0f m", meters)
 }
+
+/**
+ * epoch millis → `07:00:12` 形式（②「コース編成(抽出)」セッション解析レポートのマーカー時系列用、
+ * 2026-07-13追加）。JSTは端末TZ前提（[formatDateTime]と同様）。
+ */
+fun formatTimeOfDay(epochMs: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.JAPAN).format(Date(epochMs))
+
+/** 秒数 → `HH:MM:SS` 形式（走行時間表示用、2026-07-13追加）。null/負値は "-"。 */
+fun formatDuration(seconds: Long?): String {
+    if (seconds == null || seconds < 0) return "-"
+    val h = seconds / 3600
+    val m = (seconds % 3600) / 60
+    val s = seconds % 60
+    return String.format(Locale.JAPAN, "%02d:%02d:%02d", h, m, s)
+}

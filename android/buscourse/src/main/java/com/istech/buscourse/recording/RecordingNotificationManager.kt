@@ -67,16 +67,34 @@ class RecordingNotificationManager(private val context: Context) {
         stopMarkReceiver = null
     }
 
-    /** FGS常駐通知を構築する（設計書§4.3・§4.8.3）。 */
-    fun buildOngoingNotification(contentText: String): Notification {
+    /**
+     * FGS常駐通知を構築する（設計書§4.3・§4.8.3）。
+     *
+     * [cameraWarning]（S0-b、2026-07-15追加）がtrueの場合は、`BusRecordingService`の
+     * カメラ健全性チェックが異常（LORESフレームが増えていない）を検知した状態の表示に切り替える。
+     * 実車事故（セッション#17）で通知を見ても異常に気づけなかった反省から、タイトルに絵文字での
+     * 強調を入れて素通りされにくくする。アクションボタンの構成自体は正常時と変えない
+     * （停留所マークは映像なしでも位置情報だけは記録できるため、押せなくする理由が無い）。
+     *
+     * [gnssWarning]（S0-d、2026-07-16追加）はカメラ警告と対称の考え方で、`GnssHealthMonitor`が
+     * 衛星捕捉喪失（測位が失われている）を検知した状態の表示に切り替える。カメラ・GNSS両方が
+     * 同時に異常な場合は専用のタイトル文言（両方異常）を出す（どちらか片方の警告に埋もれさせない）。
+     */
+    fun buildOngoingNotification(contentText: String, cameraWarning: Boolean = false, gnssWarning: Boolean = false): Notification {
         val markStopIntent = PendingIntent.getBroadcast(
             context,
             REQ_MARK_STOP,
             Intent(ACTION_MARK_STOP).setPackage(context.packageName),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val title = when {
+            cameraWarning && gnssWarning -> context.getString(R.string.notification_title_camera_gnss_warning)
+            cameraWarning -> context.getString(R.string.notification_title_camera_warning)
+            gnssWarning -> context.getString(R.string.notification_title_gnss_warning)
+            else -> context.getString(R.string.notification_title_recording)
+        }
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle(context.getString(R.string.notification_title_recording))
+            .setContentTitle(title)
             .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
@@ -87,9 +105,12 @@ class RecordingNotificationManager(private val context: Context) {
             .build()
     }
 
-    /** 通知内容を更新する（例：セッション開始後にコース名・開始時刻を反映）。 */
-    fun updateNotification(contentText: String) {
-        notificationManager.notify(NOTIFICATION_ID, buildOngoingNotification(contentText))
+    /**
+     * 通知内容を更新する（例：セッション開始後にコース名・開始時刻を反映、[cameraWarning]でS0-bの
+     * 警告表示に切り替え、[gnssWarning]でS0-dの警告表示に切り替え）。
+     */
+    fun updateNotification(contentText: String, cameraWarning: Boolean = false, gnssWarning: Boolean = false) {
+        notificationManager.notify(NOTIFICATION_ID, buildOngoingNotification(contentText, cameraWarning, gnssWarning))
     }
 
     /** 動的登録される「停留所マーク」ボタンの受信先（設計書§4.8.3）。 */

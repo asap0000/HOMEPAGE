@@ -353,6 +353,26 @@ class RecordingSessionRepository(
         frame?.id
     }
 
+    /**
+     * 手動停留所マーク時、押下時刻に最も近いLORESフレームへ [stopCardId] をマーカーとして記録する
+     * （運行記録③機能、2026-07-12）。HIRES撮影を伴わない停留所マーク方式のため、既に保存済みの
+     * LORESフレームへの後追いUPDATEのみで完結する。
+     */
+    suspend fun markStopCardOnLoresFrame(frameId: Long, stopCardId: Long) = withContext(writeDispatcher) {
+        timelapseFrameDao.markStopCardOnLoresFrame(frameId, stopCardId)
+    }
+
+    /**
+     * 現在セッションの `frame_count`（LORES＋HIRES合計）を取得する（S0-b カメラ健全性チェック用、2026-07-15追加）。
+     * `LoresFrameAnalyzer`側のインメモリカウンタではなくDB上のカウンタを正とすることで、
+     * 実際に `timelapse_frame` へ書き込みまで到達できたフレーム数を見る（実車事故のセッション#17は
+     * カメラそのものが1枚も撮影しておらず、書き込み経路自体に到達していなかったため、
+     * この経路の値がそのまま異常を検知できる）。セッション未開始・終了後は null。
+     */
+    suspend fun getCurrentFrameCount(): Int? = withContext(writeDispatcher) {
+        session?.let { recordingSessionDao.getById(it.id)?.frameCount }
+    }
+
     // ------------------------------------------------------------------
     // 停留所通過イベント・衝撃検知イベント
     // ------------------------------------------------------------------

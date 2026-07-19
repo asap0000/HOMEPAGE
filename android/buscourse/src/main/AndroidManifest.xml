@@ -1,12 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   BusCourse — オフライン厳守（istech/CLAUDE.md・設計書§8）
-  - android.permission.INTERNET は宣言しない（Layer1 検査対象。絶対に追加しないこと）
+  - android.permission.INTERNET はアプリ自身では宣言しない。ただしフェーズ3で追加した
+    MapLibre Native Android SDK（AAR）が自身のライブラリマニフェストで
+    INTERNET / ACCESS_NETWORK_STATE / ACCESS_WIFI_STATE を宣言してくるため、
+    下記 xmlns:tools + tools:node="remove" によりマニフェストマージ時に明示的に除去する
+    （設計書§5.3.1 第一防御）。Layer1（aapt2 によるAPK直接検査、CI）が最終確認を担う。
   - android.permission.ACCESS_BACKGROUND_LOCATION は要求しない（設計書§4.4 の決め打ち）
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 設計書§5.3.1 第一防御：MapLibre Native Android SDK（AAR）が自身のライブラリ
+         マニフェストで宣言しているネットワーク系権限を明示的に除去する。okhttpクラス自体は
+         APKに残るが、Android OSのパーミッションチェックにより実行時にソケットオープン自体が
+         SecurityException / EACCES で失敗する状態を作る（ACCESS_FINE/COARSE_LOCATIONは
+         アプリ自体がGPS記録に必要とするため対象外・下に残置）。 -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove" />
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -14,17 +29,42 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 設計書§5.3.1a ★重大：MapLibre Native Android SDK 13.x系はVulkanをデフォルト
+         レンダラーとしており、AAR内蔵マニフェストは android.hardware.vulkan.version を
+         required="true" で宣言している（§5.2.2実測）。下記 tools:replace は
+         Google Playのデバイスフィルタリングを回避する効果しか持たず、本アプリはストア外
+         配布（istech/app-android/CLAUDE.md準拠）のためこの効果自体ほぼ無意味である。
+         Vulkan 1.0非対応の実機ではこの宣言に関わらずレンダラー初期化が実行時に失敗し
+         クラッシュ／描画不能になるという本質的リスクには対処できない（tools:replaceは
+         「Playフィルタリング用の形式的整合」以上の意味を持たない）。
+         実質的な安全性は、本アプリの現在唯一の実運用端末である実機OPPO Reno3 A
+         （CPH2013／Android 11／API 30）を `adb shell pm list features` で直接確認した結果
+         （feature:android.hardware.vulkan.version=4198400＝Vulkan 1.1.0、2026-07-09実施）
+         に依っている。他の候補機種（Moto G52J 5G／Teclast P50 Mini）は未確認のまま
+         （設計書§5.3.1a・§9.1a）。 -->
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:required="false"
+        tools:replace="android:required" />
 
     <application
         android:name=".BusCourseApplication"
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:supportsRtl="true"
         android:theme="@style/Theme.BusCourse">
 
+        <!-- 画面回転で撮影・録音中の未保存状態（MediaRecorder/CameraX一時ファイル参照）が
+             Activity再生成により無警告で失われる不具合の対策として縦向き固定にする
+             （2026-07-11レビュー指摘。本アプリはどの画面も横向きレイアウトを持たない）。 -->
         <activity
             android:name=".MainActivity"
+            android:screenOrientation="portrait"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

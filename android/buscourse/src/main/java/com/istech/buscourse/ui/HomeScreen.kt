@@ -9,10 +9,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ListAlt
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,17 +36,40 @@ import androidx.compose.ui.unit.dp
  * 【2026-07-10追加】運行記録（フェーズ1 BusRecordingService）の開始UI（RunSetupActivity相当、
  * [RecordingScreen]）を追加。以前は「フェーズ2スコープ外」としていたが、実機実測・実データ収集の
  * 着手に必須なため実装した。
+ *
+ * 【2026-07-11 依頼３】最上位に [TopScreen]（設計/ナビ2択）が新設されたため、本画面は
+ * 「設計」メニューに格下げ。作業進捗ログ（[WorkLogScreen]）への導線を追加。
+ *
+ * 【2026-07-12追加】フェーズ3「地図データ管理」（`.iscmap`インポート・使用パッケージ切替、
+ * 設計書§5.6）への導線を追加。コース単位の地図表示（§5.7）はコース詳細画面（[CourseDetailScreen]）
+ * の「地図表示」ボタンから遷移する（地図パッケージの管理と、コースの地図閲覧は別画面のため）。
+ *
+ * 【2026-07-14追加】S4「コース創設」（トップダウン、記録セッションから2軸マトリクス評価→承認→
+ * 拠点分割→新規コース群を生成、[CourseCreateScreen]）への導線を追加。既存「コース編成」は
+ * 「コース編集」に改称（ラベルのみ。既存の順列編成機能自体は変更しない）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
+    onBack: () -> Unit,
     onOpenRecording: () -> Unit,
     onOpenStopCards: () -> Unit,
     onOpenCourses: () -> Unit,
-    onOpenExtraction: () -> Unit,
+    onOpenCourseCreate: () -> Unit,
+    onOpenWorkLog: () -> Unit,
+    onOpenMapImport: () -> Unit,
 ) {
     Scaffold(
-        topBar = { TopAppBar(title = { Text("BusCourse") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("設計") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
+                    }
+                },
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -65,15 +92,27 @@ fun HomeScreen(
             )
             HomeMenuCard(
                 icon = Icons.Filled.Route,
-                title = "コース編成",
+                title = "コース編集",
                 description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX入出力）",
                 onClick = onOpenCourses,
             )
             HomeMenuCard(
-                icon = Icons.Filled.Timeline,
-                title = "区間抽出（試走ログ）",
-                description = "完了済みの走行記録から停留所間の区間軌跡を抽出します",
-                onClick = onOpenExtraction,
+                icon = Icons.Filled.AddCircle,
+                title = "コース創設",
+                description = "記録セッションから2軸評価でコースを新規に創ります",
+                onClick = onOpenCourseCreate,
+            )
+            HomeMenuCard(
+                icon = Icons.AutoMirrored.Filled.ListAlt,
+                title = "作業進捗ログ",
+                description = "カード作成・編成確定・記録・抽出・エラーの操作履歴を確認します",
+                onClick = onOpenWorkLog,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.Map,
+                title = "地図データ管理",
+                description = "オフライン地図パッケージ（.iscmap）を取り込み、使用するパッケージを切り替えます",
+                onClick = onOpenMapImport,
             )
         }
     }

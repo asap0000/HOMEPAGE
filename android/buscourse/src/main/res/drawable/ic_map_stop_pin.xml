@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 停留所カードの地図マーカー（設計書§5.7.2 `StopSymbolOverlay`が`Style.addImage()`で登録する
+     アイコン、2026-07-12追加）。
+     既存の`ic_stop_mark.xml`（通知の「停留所マーク」手動アクションボタン用、白無地のティアドロップ型
+     ピン）は暗い通知背景向けの意匠で、彩色された地図タイル上に置くと単色白では周辺色によっては
+     視認できない。形状自体（ティアドロップ型のピン、中心に丸い抜き穴。パスは同一）は流用しつつ、
+     塗りをブランド基調色#3366FF（istech/CLAUDE.md）にし、地図タイル背景色に関わらず輪郭が
+     識別できるよう白の縁取り(stroke)を追加した地図専用アイコンとして新規に用意する。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="32dp"
+    android:height="32dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#3366FF"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="0.75"
+        android:pathData="M12,2C8.13,2 5,5.13 5,9c0,5.25 7,13 7,13s7,-7.75 7,-13c0,-3.87 -3.13,-7 -7,-7zM12,11.5c-1.38,0 -2.5,-1.12 -2.5,-2.5s1.12,-2.5 2.5,-2.5 2.5,1.12 2.5,2.5 -1.12,2.5 -2.5,2.5z"/>
+</vector>
