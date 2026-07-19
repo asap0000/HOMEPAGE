@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -24,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -55,7 +55,6 @@ import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.map.GnssBackedLocationEngineAdapter
 import com.istech.buscourse.map.MapVehiclePositionOverlay
 import com.istech.buscourse.map.RouteTrackOverlay
-import com.istech.buscourse.map.StopSymbolInfo
 import com.istech.buscourse.map.StopSymbolOverlay
 import com.istech.buscourse.map.StopSymbolPoint
 import kotlin.math.max
@@ -70,7 +69,7 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 
-/** 区間軌跡（[RouteTrackOverlay]）の線色。istechブランド基調色（`istech/CLAUDE.md`）を流用する。 */
+/** 経路線（[RouteTrackOverlay]）のブランド青。 */
 private const val ROUTE_LINE_COLOR_HEX = "#3366FF"
 
 /**
@@ -194,7 +193,7 @@ private fun RouteMapContent(
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var stopSymbolOverlay by remember { mutableStateOf<StopSymbolOverlay?>(null) }
     var gnssAdapter by remember { mutableStateOf<GnssBackedLocationEngineAdapter?>(null) }
-    var tappedStop by remember { mutableStateOf<StopSymbolInfo?>(null) }
+    var tappedStopNumber by remember { mutableStateOf<Int?>(null) }
 
     val mapView = remember { MapView(context).apply { onCreate(null) } }
 
@@ -245,23 +244,33 @@ private fun RouteMapContent(
                 val editDetails = repository.getCourseEditDetails(courseId)
                 val stops = editDetails?.stops.orEmpty() // CourseStopView, 既に sequence_index 順
 
-                // フェーズC-2: route_point（C-1で確定した連続ポリライン）があれば1本の連続線で描く。
-                // 未確定コース（route_pointが空/1点）では、従来どおりsegment_trackの区間再組立に
-                // フォールバックする（互換維持）。
+                // 記録セッション由来の gps_point は、途中で分断され得る segment_track を再組立する
+                // ことなく、実際に記録された順序のまま一本の連続線として描く。
                 val routeOverlay = RouteTrackOverlay(context, database, style)
+                val course = database.courseDao().getById(courseId)
+                val gpsPoints = course?.sourceSessionId
+                    ?.let { sessionId -> database.gpsPointDao().getBySession(sessionId) }
+                    .orEmpty()
+                    .map { it.lat to it.lon }
                 val routePoints = database.routePointDao().getOrdered(courseId)
-                if (routePoints.size >= 2) {
-                    routeOverlay.showRouteLine(
-                        routePoints.map { it.lat to it.lon }, ROUTE_LINE_COLOR_HEX
+                    .map { it.lat to it.lon }
+                val routeLine = selectRouteLine(
+                    sourceSessionId = course?.sourceSessionId,
+                    gpsPoints = gpsPoints,
+                    routePoints = routePoints,
+                )
+                when (routeLine.source) {
+                    RouteLineSource.GPS_POINTS,
+                    RouteLineSource.ROUTE_POINTS -> routeOverlay.showRouteLine(
+                        routeLine.points,
+                        ROUTE_LINE_COLOR_HEX,
                     )
-                } else {
-                    // カードを持つ隣接ペアのみ区間軌跡を描く。segment_track の端点は NOT NULL の
-                    // 停留所カードのため、カード無しの点（frame_id/event_id のみ）は端点にできない。
-                    // regenerateCourseSegments と同じ扱いで、その区間だけ静かにスキップする。
-                    stops.zipWithNext().forEach { (from, to) ->
-                        val fromCardId = from.cardId
-                        val toCardId = to.cardId
-                        if (fromCardId != null && toCardId != null) {
+                    RouteLineSource.SEGMENT_TRACKS -> {
+                        // カードを持つ隣接ペアのみ区間軌跡を描く。segment_track の端点は NOT NULL の
+                        // 停留所カードのため、カード無しの点（frame_id/event_id のみ）は端点にできない。
+                        // regenerateCourseSegments と同じ扱いで、その区間だけ静かにスキップする。
+                        // この再組立は、GPS・route_pointのどちらもない旧コースだけの最終フォールバック。
+                        segmentFallbackEdges(stops.map { it.cardId }).forEach { (fromCardId, toCardId) ->
                             routeOverlay.showSegment(fromCardId, toCardId, ROUTE_LINE_COLOR_HEX)
                         }
                     }
@@ -272,11 +281,9 @@ private fun RouteMapContent(
                 val symbolPoints = stops.map { stop ->
                     StopSymbolPoint(
                         stopCardId = stop.cardId,
-                        name = stop.displayName,
                         latitude = stop.latitude,
                         longitude = stop.longitude,
                         sequenceIndex = stop.sequenceIndex,
-                        note = null, // 地図のタップダイアログに note は出さない方針（オーナー確定 2026-07-18）
                     )
                 }
                 stopSymbolOverlay?.onDestroy()
@@ -286,7 +293,9 @@ private fun RouteMapContent(
                     mapView = mapView,
                     mapLibreMap = map,
                     style = style,
-                    onSymbolClick = { info -> tappedStop = info },
+                    onSymbolClick = { info ->
+                        tappedStopNumber = courseSequenceNumber(info.sequenceIndex)
+                    },
                 )
                 overlay.showStops(symbolPoints)
                 stopSymbolOverlay = overlay
@@ -372,28 +381,17 @@ private fun RouteMapContent(
         ) {
             Icon(Icons.Filled.MyLocation, contentDescription = "現在地へ移動")
         }
-    }
 
-    tappedStop?.let { info ->
-        AlertDialog(
-            onDismissRequest = { tappedStop = null },
-            title = { Text(info.name) },
-            text = {
-                Column {
-                    if (info.sequenceIndex != null) {
-                        Text(
-                            "コース内の順番: ${info.sequenceIndex + 1}番目",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    if (!info.note.isNullOrBlank()) {
-                        Text(info.note, style = MaterialTheme.typography.bodySmall)
-                    }
+        // MapLibreのSymbolタップから得たコース番号だけを、地図上の軽量フキダシとして重ねる。
+        // 停留所名・メモ等のPIIは地図上にもSymbol dataにも表示しない。
+        tappedStopNumber?.let { number ->
+            Surface(
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
+            ) {
+                TextButton(onClick = { tappedStopNumber = null }) {
+                    Text(number.toString(), style = MaterialTheme.typography.titleMedium)
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { tappedStop = null }) { Text("閉じる") }
-            },
-        )
+            }
+        }
     }
 }
