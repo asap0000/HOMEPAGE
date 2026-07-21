@@ -1,19 +1,14 @@
 package com.istech.buscourse.trial
 
-import android.content.Context
 import android.location.Location
-import androidx.room.withTransaction
-import com.istech.buscourse.core.data.BusCourseDatabase
-import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RoutePointEntity
-import com.istech.buscourse.core.data.TestRunComparisonDeviationSegmentEntity
-import com.istech.buscourse.core.data.TestRunComparisonEntity
-import com.istech.buscourse.core.data.TestRunComparisonStopDiffEntity
 import com.istech.buscourse.core.geo.GeoMath
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
+
+/*
+ * フェーズ5aの純計算資産。採点・永続層はv14で退役した（正典 `.isnavi` §9-2）。
+ * マッチング／chainageはナビ用マップの継ぎ目検出へ転用予定のため、計算部だけを残している。
+ */
 
 /** 距離計算をAndroid実装から切り離し、JVMテストで差し替えるための境界。 */
 fun interface GeoDistance {
@@ -217,63 +212,4 @@ class StopVisitEvaluator(private val distance: GeoDistance, private val params: 
 
     private fun centroid(points: List<MatchedPoint>): Pair<Double, Double> =
         points.map { it.gps.lat }.average() to points.map { it.gps.lon }.average()
-}
-
-/** PIIを含めず試走比較JSONを内部ストレージへ出力する。 */
-class ComparisonReportRepository(private val context: Context) {
-    fun write(comparisonId: Long, report: String) {
-        val dir = File(BusCourseStorage.root(context), BusCourseStorage.DIR_TRIAL_REPORTS)
-        if (!dir.exists()) dir.mkdirs()
-        File(dir, "$comparisonId.json").writeText(report)
-    }
-}
-
-class TrialRunComparator(
-    private val context: Context,
-    private val database: BusCourseDatabase,
-    private val distance: GeoDistance = AndroidGeoDistance,
-    private val params: TrialParams = TrialParams(),
-    private val reportRepository: ComparisonReportRepository = ComparisonReportRepository(context),
-) {
-    suspend fun compare(courseId: Long, candidateSessionId: Long, baselineSource: String = "COURSE_ROUTE"): Long = withContext(Dispatchers.Default) {
-        val route = database.routePointDao().getOrdered(courseId)
-        require(route.size >= 2) { "比較対象コースにroute_pointが2点以上必要です" }
-        val gps = database.gpsPointDao().getBySession(candidateSessionId).filter { it.accuracyM == null || it.accuracyM <= params.gpsAccuracyRejectM }
-        require(gps.isNotEmpty()) { "精度条件を満たすgps_pointがありません" }
-        val refLat = route.map { it.lat }.average()
-        val refLon = route.map { it.lon }.average()
-        val matched = SlidingWindowMapMatcher(route, refLat, refLon, distance, params).matchTrace(gps)
-        val deviations = RouteDeviationDetector(params).detect(matched)
-        val cards = database.busStopCardDao()
-        // card無しcourse_stopは座標解決の責務が5a外のため、明示的に比較対象から除外する。
-        val results = database.courseStopDao().getOrderedStops(courseId).mapNotNull { stop ->
-            val cardId = stop.stopCardId ?: return@mapNotNull null
-            val chainage = stop.expectedChainageM ?: return@mapNotNull null
-            val card = cards.getById(cardId) ?: return@mapNotNull null
-            val result = StopVisitEvaluator(distance, params).evaluateStop(TrialStop(stop.sequenceIndex, chainage, cardId, card.latitude, card.longitude, card.arrivalRadiusM), matched)
-            StopResultRecord(stop.sequenceIndex, cardId, result)
-        }
-        val paramsJson = params.toJson()
-        val comparisonId = database.withTransaction {
-            val id = database.testRunComparisonDao().insert(TestRunComparisonEntity(courseId = courseId, baselineSource = baselineSource, candidateSessionId = candidateSessionId, computedAtEpochMs = System.currentTimeMillis(), paramsJson = paramsJson))
-            database.testRunComparisonDao().insertStopDiffs(results.map { it.toEntity(id) })
-            database.testRunComparisonDao().insertDeviationSegments(deviations.map { it.toEntity(id) })
-            id
-        }
-        reportRepository.write(comparisonId, reportJson(comparisonId, courseId, candidateSessionId, baselineSource, paramsJson, results, deviations))
-        comparisonId
-    }
-
-    private data class StopResultRecord(val sequenceIndex: Int, val stopCardId: Long, val result: StopResult) {
-        fun toEntity(comparisonId: Long) = TestRunComparisonStopDiffEntity(comparisonId = comparisonId, stopCardId = stopCardId, sequenceIndex = sequenceIndex, status = result.status, positionErrorM = result.positionErrorM, matchedPointSeq = result.matchedPointSeq, nearestApproachM = result.nearestApproachM)
-    }
-    private fun DetectedDeviationSegment.toEntity(comparisonId: Long) = TestRunComparisonDeviationSegmentEntity(comparisonId = comparisonId, startChainageM = startChainageM, endChainageM = endChainageM, startPointSeq = startPointSeq, endPointSeq = endPointSeq, maxLateralOffsetM = maxLateralOffsetM, meanLateralOffsetM = meanLateralOffsetM, durationSec = durationSec)
-    private fun TrialParams.toJson() = "{\"stopSearchChainageBufferM\":$stopSearchChainageBufferM,\"stopSpeedThresholdMps\":$stopSpeedThresholdMps,\"stopMinDwellSec\":$stopMinDwellSec,\"deviationLateralThresholdM\":$deviationLateralThresholdM,\"deviationMinDurationSec\":$deviationMinDurationSec,\"deviationMinLengthM\":$deviationMinLengthM,\"deviationMergeGapSec\":$deviationMergeGapSec,\"mapMatchWindowBack\":$mapMatchWindowBack,\"mapMatchWindowForward\":$mapMatchWindowForward,\"mapMatchGrossMismatchM\":$mapMatchGrossMismatchM,\"gpsAccuracyRejectM\":$gpsAccuracyRejectM}"
-    private fun reportJson(id: Long, courseId: Long, sessionId: Long, source: String, params: String, stops: List<StopResultRecord>, deviations: List<DetectedDeviationSegment>): String = buildString {
-        append("{\"schemaVersion\":1,\"comparisonId\":$id,\"courseId\":$courseId,\"candidateSessionId\":$sessionId,\"baselineSource\":\"$source\",\"params\":$params,\"stopResults\":[")
-        append(stops.joinToString(",") { "{\"sequenceIndex\":${it.sequenceIndex},\"stopCardId\":${it.stopCardId},\"status\":\"${it.result.status}\",\"positionErrorM\":${it.result.positionErrorM ?: "null"},\"matchedPointSeq\":${it.result.matchedPointSeq ?: "null"},\"nearestApproachM\":${it.result.nearestApproachM ?: "null"}}" })
-        append("],\"deviationSegments\":[")
-        append(deviations.joinToString(",") { "{\"startChainageM\":${it.startChainageM},\"endChainageM\":${it.endChainageM},\"startPointSeq\":${it.startPointSeq},\"endPointSeq\":${it.endPointSeq},\"maxLateralOffsetM\":${it.maxLateralOffsetM},\"meanLateralOffsetM\":${it.meanLateralOffsetM},\"durationSec\":${it.durationSec}}" })
-        append("]}")
-    }
 }

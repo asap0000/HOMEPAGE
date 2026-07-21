@@ -350,34 +350,6 @@ interface GpsPointDao {
     suspend fun getBySessionInRange(sessionId: Long, startMs: Long, endMs: Long): List<GpsPointEntity>
 }
 
-/** 試走比較結果の保存・参照。子テーブルは親削除時にCASCADEする。 */
-@Dao
-interface TestRunComparisonDao {
-    @Insert
-    suspend fun insert(comparison: TestRunComparisonEntity): Long
-
-    @Insert
-    suspend fun insertStopDiffs(diffs: List<TestRunComparisonStopDiffEntity>)
-
-    @Insert
-    suspend fun insertDeviationSegments(segments: List<TestRunComparisonDeviationSegmentEntity>)
-
-    @Query("SELECT * FROM test_run_comparison_stop_diff WHERE comparison_id = :comparisonId ORDER BY sequence_index")
-    suspend fun getStopDiffs(comparisonId: Long): List<TestRunComparisonStopDiffEntity>
-
-    @Query("SELECT * FROM test_run_comparison_deviation_segment WHERE comparison_id = :comparisonId ORDER BY start_point_seq")
-    suspend fun getDeviationSegments(comparisonId: Long): List<TestRunComparisonDeviationSegmentEntity>
-
-    @Query("SELECT * FROM test_run_comparison WHERE course_id = :courseId ORDER BY computed_at_epoch_ms DESC, id DESC")
-    suspend fun getForCourse(courseId: Long): List<TestRunComparisonEntity>
-
-    @Query("UPDATE test_run_comparison_stop_diff SET cause = :cause WHERE id = :id")
-    suspend fun updateCauseById(id: Long, cause: String)
-
-    @Query("DELETE FROM test_run_comparison WHERE id = :comparisonId")
-    suspend fun deleteById(comparisonId: Long)
-}
-
 /** `stop_visit_event`（停留所通過イベント）の操作（設計書§3.5）。 */
 @Dao
 interface StopVisitEventDao {

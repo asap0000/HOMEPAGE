@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *
  * version 1 はフェーズ1〜2（記録・編成）スコープのテーブルのみ:
  * - bus_stop_card は D5 の案内用3列（approach_radius_m 等）を含まない（フェーズ4で ALTER TABLE、§3.5）
- * - test_run_comparison 系（フェーズ5）・map_data_package（フェーズ3）は未作成
+ * - フェーズ5の試走比較系・map_data_package（フェーズ3）は未作成
  *
  * version 2（2026-07-10）: bus_stop_card に rider_count 列を追加（乗車人数・定員警告用）。
  * 実車実測で既に本番データが端末上に存在するため、破壊的マイグレーションではなく
@@ -81,6 +81,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * version 13（2026-07-19、フェーズ5 Step 5a）: bus_stop_card にD5の到着判定パラメータ3列を追加し、
  * 試走比較のサマリ・停留所差分・逸脱区間テーブルを新設する（[MIGRATION_12_13]）。いずれも既存データを
  * 保持するADD COLUMN／CREATE TABLEのみで、比較の子行は親比較行の削除時にCASCADEする。
+ *
+ * version 14（2026-07-22）: フェーズ5aの試走比較永続層を退役し、比較の子テーブルから親テーブルの順に
+ * 3テーブルを削除する（[MIGRATION_13_14]）。bus_stop_card のD5到着判定パラメータ3列は保持する。
  */
 @Database(
     entities = [
@@ -97,11 +100,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ShockEventEntity::class,
         WorkLogEntity::class,
         MapDataPackageEntity::class,
-        TestRunComparisonEntity::class,
-        TestRunComparisonStopDiffEntity::class,
-        TestRunComparisonDeviationSegmentEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -118,7 +118,6 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun shockEventDao(): ShockEventDao
     abstract fun workLogDao(): WorkLogDao
     abstract fun mapDataPackageDao(): MapDataPackageDao
-    abstract fun testRunComparisonDao(): TestRunComparisonDao
 
     companion object {
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
@@ -140,6 +139,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_10_11,
                 MIGRATION_11_12,
                 MIGRATION_12_13,
+                MIGRATION_13_14,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -369,6 +369,15 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_stop_diff_comparison_id ON test_run_comparison_stop_diff (comparison_id)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison_deviation_segment (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, comparison_id INTEGER NOT NULL, start_chainage_m REAL NOT NULL, end_chainage_m REAL NOT NULL, start_point_seq INTEGER NOT NULL, end_point_seq INTEGER NOT NULL, max_lateral_offset_m REAL NOT NULL, mean_lateral_offset_m REAL NOT NULL, duration_sec INTEGER NOT NULL, FOREIGN KEY(comparison_id) REFERENCES test_run_comparison(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_deviation_segment_comparison_id ON test_run_comparison_deviation_segment (comparison_id)")
+            }
+        }
+
+        /** フェーズ5a試走比較の永続層を退役する。D5案内半径3列は保持する。 */
+        val MIGRATION_13_14 = object : androidx.room.migration.Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison_stop_diff")
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison_deviation_segment")
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison")
             }
         }
     }

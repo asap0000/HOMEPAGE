@@ -21,7 +21,6 @@ object BusCourseStorage {
     const val DIR_SESSIONS = "sessions"          // sessions/{sessionId}/meta.json, gps_raw.jsonl, frames/
     const val DIR_SEGMENTS = "segments"          // segments/{fromId}_{toId}.gpx
     const val DIR_COMPARISONS = "comparisons"    // comparisons/{comparisonId}/overlay.gpx（フェーズ5）
-    const val DIR_TRIAL_REPORTS = "trial_reports" // trial_reports/{comparisonId}.json（フェーズ5）
     const val DIR_MAPS = "maps"                  // maps/{regionId}/tiles/, style/（フェーズ3）
     const val DIR_EXPORTS = "exports"            // exports/{courseId}_{yyyyMMdd_HHmmss}.gpx
 
