@@ -460,3 +460,41 @@ interface WorkLogDao {
     )
     suspend fun pruneOld(keep: Int = 2000)
 }
+
+/** `.isnavi` から取り込むナビ用マップ分離モデル6表の操作。 */
+@Dao
+interface NaviMapDao {
+    @Insert suspend fun insertMap(map: NaviMapEntity): Long
+    @Insert suspend fun insertBranches(branches: List<NaviBranchEntity>)
+    @Insert suspend fun insertSegments(segments: List<NaviSegmentEntity>)
+    @Insert suspend fun insertTrackPoints(points: List<NaviTrackPointEntity>)
+    @Insert suspend fun insertEvents(events: List<NaviEventEntity>)
+    @Insert suspend fun insertOutputs(outputs: List<NaviEventOutputEntity>)
+
+    @Query("SELECT * FROM navi_map WHERE id = :id")
+    suspend fun getMapById(id: Long): NaviMapEntity?
+
+    @Query("SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year ORDER BY id")
+    suspend fun findMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    @Query("SELECT * FROM navi_segment WHERE navi_map_id = :mapId ORDER BY seq")
+    suspend fun getSegments(mapId: Long): List<NaviSegmentEntity>
+
+    @Query("SELECT * FROM navi_event WHERE navi_map_id = :mapId ORDER BY id")
+    suspend fun getEvents(mapId: Long): List<NaviEventEntity>
+
+    @Query("SELECT * FROM navi_branch WHERE navi_map_id = :mapId ORDER BY id")
+    suspend fun getBranches(mapId: Long): List<NaviBranchEntity>
+
+    @Query("SELECT * FROM navi_track_point WHERE segment_id = :segmentId ORDER BY seq")
+    suspend fun getTrackPoints(segmentId: Long): List<NaviTrackPointEntity>
+
+    @Query("SELECT * FROM navi_event_output WHERE event_id = :eventId ORDER BY id")
+    suspend fun getOutputs(eventId: Long): List<NaviEventOutputEntity>
+
+    @Query("UPDATE navi_map SET archived_at = :archivedAt WHERE id = :id")
+    suspend fun archiveMap(id: Long, archivedAt: Long)
+
+    @Query("DELETE FROM navi_map WHERE id = :id")
+    suspend fun deleteMap(id: Long)
+}

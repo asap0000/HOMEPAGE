@@ -87,6 +87,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *
  * version 15（2026-07-22）: course に業務キー3列を nullable 追加＋部分ユニーク相当の unique index。
  * 既存行は NULL 据え置き（案A）。
+ *
+ * version 16（2026-07-22）: ナビ用マップ消費の分離モデル6表を純増。既存テーブルは無変更。
  */
 @Database(
     entities = [
@@ -103,8 +105,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ShockEventEntity::class,
         WorkLogEntity::class,
         MapDataPackageEntity::class,
+        NaviMapEntity::class,
+        NaviBranchEntity::class,
+        NaviSegmentEntity::class,
+        NaviTrackPointEntity::class,
+        NaviEventEntity::class,
+        NaviEventOutputEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -121,6 +129,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun shockEventDao(): ShockEventDao
     abstract fun workLogDao(): WorkLogDao
     abstract fun mapDataPackageDao(): MapDataPackageDao
+    abstract fun naviMapDao(): NaviMapDao
 
     companion object {
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
@@ -144,6 +153,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_12_13,
                 MIGRATION_13_14,
                 MIGRATION_14_15,
+                MIGRATION_15_16,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -392,6 +402,26 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE course ADD COLUMN course_no INTEGER")
                 db.execSQL("ALTER TABLE course ADD COLUMN year INTEGER")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_course_identity ON course (bus_id, course_no, year)")
+            }
+        }
+
+        /** ナビ用マップ消費の分離モデル6表を純増する。既存テーブルは変更しない。 */
+        val MIGRATION_15_16 = object : androidx.room.migration.Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_map` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `schema_version` TEXT NOT NULL, `profile` TEXT NOT NULL, `bus_id` TEXT NOT NULL, `course_no` INTEGER NOT NULL, `year` INTEGER NOT NULL, `title` TEXT NOT NULL, `chainage_step_m` INTEGER NOT NULL DEFAULT 6, `display_orientation` TEXT NOT NULL, `display_pitch_deg` REAL NOT NULL, `media_mode` TEXT NOT NULL, `media_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `archived_at` INTEGER DEFAULT NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_map_bus_id_course_no_year` ON `navi_map` (`bus_id`, `course_no`, `year`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_branch` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `parent_chainage_m` REAL NOT NULL, `label` TEXT NOT NULL, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_branch_navi_map_id` ON `navi_branch` (`navi_map_id`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_segment` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `seq` INTEGER NOT NULL, `kind` TEXT NOT NULL, `gap_kind` TEXT, `chainage_start_m` REAL NOT NULL, `chainage_end_m` REAL NOT NULL, `session_id` INTEGER, `base_epoch_ms` INTEGER, `branch_id` INTEGER, `clip_in_m` REAL, `clip_out_m` REAL, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_segment_navi_map_id` ON `navi_segment` (`navi_map_id`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_navi_segment_navi_map_id_seq` ON `navi_segment` (`navi_map_id`, `seq`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_track_point` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `segment_id` INTEGER NOT NULL, `seq` INTEGER NOT NULL, `chainage_m` REAL NOT NULL, `t_rel_s` REAL NOT NULL, `lat` REAL NOT NULL, `lon` REAL NOT NULL, FOREIGN KEY(`segment_id`) REFERENCES `navi_segment`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_track_point_segment_id` ON `navi_track_point` (`segment_id`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_navi_track_point_segment_id_seq` ON `navi_track_point` (`segment_id`, `seq`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_event` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `template_id` TEXT NOT NULL, `category` TEXT NOT NULL, `anchor_type` TEXT NOT NULL, `scope` TEXT NOT NULL, `priority` TEXT NOT NULL, `chainage_start_m` REAL, `chainage_end_m` REAL, `stop_card_id` INTEGER, `branch_id` INTEGER, `condition` TEXT, `variables_json` TEXT NOT NULL DEFAULT '{}', `valid_from` INTEGER, `valid_until` INTEGER, `repeat_policy` TEXT, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_navi_map_id` ON `navi_event` (`navi_map_id`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_event_output` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event_id` INTEGER NOT NULL, `output_kind` TEXT NOT NULL, `payload_json` TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(`event_id`) REFERENCES `navi_event`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_output_event_id` ON `navi_event_output` (`event_id`)")
             }
         }
     }
