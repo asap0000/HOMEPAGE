@@ -12,6 +12,9 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "course",
+    indices = [
+        Index(value = ["bus_id", "course_no", "year"], unique = true, name = "index_course_identity"),
+    ],
     foreignKeys = [
         ForeignKey(
             entity = CourseEntity::class, parentColumns = ["id"],
@@ -36,7 +39,20 @@ data class CourseEntity(
      * `is_hub`・`stop_card_id` 列と同様、単純な ALTER TABLE ADD COLUMN に留める方針、§3.5）。
      */
     @ColumnInfo(name = "source_session_id") val sourceSessionId: Long? = null,
+    @ColumnInfo(name = "bus_id") val busId: String? = null,
+    @ColumnInfo(name = "course_no") val courseNo: Int? = null,
+    /** 年度（4月始まり）。2026 = 2026-04-01〜2027-03-31。 */
+    @ColumnInfo(name = "year") val year: Int? = null,
 )
+
+data class CourseIdentity(val busId: String, val courseNo: Int, val year: Int)
+
+fun CourseEntity.identityOrNull(): CourseIdentity? {
+    val identityBusId = busId ?: return null
+    val identityCourseNo = courseNo ?: return null
+    val identityYear = year ?: return null
+    return CourseIdentity(identityBusId, identityCourseNo, identityYear)
+}
 
 /**
  * `course_stop`（コース内の停留所順列。設計書§3.5）。企画原則の「順列」部分そのもの。

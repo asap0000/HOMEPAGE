@@ -84,6 +84,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *
  * version 14（2026-07-22）: フェーズ5aの試走比較永続層を退役し、比較の子テーブルから親テーブルの順に
  * 3テーブルを削除する（[MIGRATION_13_14]）。bus_stop_card のD5到着判定パラメータ3列は保持する。
+ *
+ * version 15（2026-07-22）: course に業務キー3列を nullable 追加＋部分ユニーク相当の unique index。
+ * 既存行は NULL 据え置き（案A）。
  */
 @Database(
     entities = [
@@ -101,7 +104,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WorkLogEntity::class,
         MapDataPackageEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -140,6 +143,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_11_12,
                 MIGRATION_12_13,
                 MIGRATION_13_14,
+                MIGRATION_14_15,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -378,6 +382,16 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("DROP TABLE IF EXISTS test_run_comparison_stop_diff")
                 db.execSQL("DROP TABLE IF EXISTS test_run_comparison_deviation_segment")
                 db.execSQL("DROP TABLE IF EXISTS test_run_comparison")
+            }
+        }
+
+        /** course に nullable な業務キー3列と、その完全一致を制約する unique index を追加する。 */
+        val MIGRATION_14_15 = object : androidx.room.migration.Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE course ADD COLUMN bus_id TEXT")
+                db.execSQL("ALTER TABLE course ADD COLUMN course_no INTEGER")
+                db.execSQL("ALTER TABLE course ADD COLUMN year INTEGER")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_course_identity ON course (bus_id, course_no, year)")
             }
         }
     }

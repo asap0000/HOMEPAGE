@@ -746,9 +746,17 @@ class CourseRepository(
         CourseEditDetails(course = course, stops = views)
     }
 
-    suspend fun createCourse(name: String, kind: CourseKind, baseCourseId: Long? = null): Long {
+    suspend fun createCourse(
+        name: String,
+        kind: CourseKind,
+        baseCourseId: Long? = null,
+        busId: String? = null,
+        courseNo: Int? = null,
+        year: Int? = null,
+    ): Long {
         val now = System.currentTimeMillis()
-        return courseDao.upsert(
+        // 新規作成は insert（ABORT）を使い、重複 identity を例外化する（upsert だと無言の -1 返却・v15 F-01）。
+        return courseDao.insert(
             CourseEntity(
                 name = name,
                 description = null,
@@ -756,6 +764,9 @@ class CourseRepository(
                 baseCourseId = baseCourseId,
                 createdAt = now,
                 updatedAt = now,
+                busId = busId,
+                courseNo = courseNo,
+                year = year,
             )
         )
     }

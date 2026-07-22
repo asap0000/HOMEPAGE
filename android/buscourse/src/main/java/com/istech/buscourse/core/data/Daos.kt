@@ -80,8 +80,29 @@ interface CourseDao {
     @Upsert
     suspend fun upsert(course: CourseEntity): Long
 
+    /**
+     * 新規コースの作成専用。`@Insert`（既定 onConflict = ABORT）のため、`(bus_id, course_no, year)` の
+     * unique index に反する重複 identity は**例外（SQLiteConstraintException）で弾く**。
+     * `upsert`（@Upsert）は新規行(PK=0)の unique 衝突を IGNORE→PK不一致UPDATE空振りで**無言の -1 返却**にしてしまい、
+     * 業務キーの機械的担保が主要書込経路で成立しない（v15 敵対的レビュー F-01）。createCourse はこちらを使う。
+     */
+    @Insert
+    suspend fun insert(course: CourseEntity): Long
+
     @Query("SELECT * FROM course WHERE id = :id")
     suspend fun getById(id: Long): CourseEntity?
+
+    @Query("SELECT * FROM course WHERE bus_id = :busId AND course_no = :courseNo AND year = :year LIMIT 1")
+    suspend fun findByIdentity(busId: String, courseNo: Int, year: Int): CourseEntity?
+
+    @Query("UPDATE course SET bus_id = :busId, course_no = :courseNo, year = :year, updated_at = :updatedAt WHERE id = :courseId")
+    suspend fun updateIdentity(
+        courseId: Long,
+        busId: String?,
+        courseNo: Int?,
+        year: Int?,
+        updatedAt: Long,
+    )
 
     @Query("SELECT * FROM course ORDER BY name")
     suspend fun getAll(): List<CourseEntity>
