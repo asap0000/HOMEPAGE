@@ -477,6 +477,32 @@ interface NaviMapDao {
     @Query("SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year ORDER BY id")
     suspend fun findMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
 
+    /** 非アーカイブのみ・ex_full優先・新しいid優先で返す。 */
+    @Query(
+        "SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year " +
+            "AND archived_at IS NULL ORDER BY (profile = 'ex_full') DESC, id DESC"
+    )
+    suspend fun getActiveMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    /** 同一identityのアクティブなapp_simpleだけをアーカイブする。 */
+    @Query(
+        "UPDATE navi_map SET archived_at = :archivedAt WHERE bus_id = :busId AND course_no = :courseNo " +
+            "AND year = :year AND profile = 'app_simple' AND archived_at IS NULL"
+    )
+    suspend fun archiveSupersededAppSimple(
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        archivedAt: Long,
+    ): Int
+
+    /** 保管退避された同一identityのマップを古い順に返す。 */
+    @Query(
+        "SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year " +
+            "AND archived_at IS NOT NULL ORDER BY id"
+    )
+    suspend fun getArchivedMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
     @Query("SELECT * FROM navi_segment WHERE navi_map_id = :mapId ORDER BY seq")
     suspend fun getSegments(mapId: Long): List<NaviSegmentEntity>
 
