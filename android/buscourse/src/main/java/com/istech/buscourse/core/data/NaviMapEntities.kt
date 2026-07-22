@@ -26,6 +26,12 @@ data class NaviMapEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,
     @ColumnInfo(name = "archived_at", defaultValue = "NULL") val archivedAt: Long? = null,
+    /**
+     * コース単位 app_settings（増分6契約・schema 1.1 の manifest.app_settings 相乗り値）を生 JSON で保持する。
+     * `variables_json`/`payload_json` と同じく TEXT・パースは消費側の責務。`.isnavi` が 1.0（app_settings 欠落）なら
+     * リーダーは既定 `"{}"` を入れる（App 自前既定へ degrade）。App Room 版は `.isnavi` schema とは別軸（正典 §9・増分6 Q3-2）。
+     */
+    @ColumnInfo(name = "app_settings_json", defaultValue = "'{}'") val appSettingsJson: String = "{}",
 )
 
 @Entity(

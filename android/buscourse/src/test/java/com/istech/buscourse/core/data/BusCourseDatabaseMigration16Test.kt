@@ -73,9 +73,13 @@ class BusCourseDatabaseMigration16Test {
         FrameworkSQLiteOpenHelperFactory().create(
             SupportSQLiteOpenHelper.Configuration.builder(context)
                 .name(name)
-                .callback(object : SupportSQLiteOpenHelper.Callback(16) {
+                // Room が生成する実ファイルの user_version（＝その時点の最新 DB 版）に依存しないよう、
+                // callback 版を大きく取り onDowngrade でも例外を投げない（この helper は版遷移でなく生SQL操作用）。
+                // 直後にテストが PRAGMA user_version を明示設定するため、ここで付く版番号は意味を持たない。
+                .callback(object : SupportSQLiteOpenHelper.Callback(1_000) {
                     override fun onCreate(db: SupportSQLiteDatabase) = Unit
                     override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                    override fun onDowngrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
                 }).build(),
         ).also { it.writableDatabase }
 
@@ -87,7 +91,7 @@ class BusCourseDatabaseMigration16Test {
         BusCourseDatabase.MIGRATION_9_10, BusCourseDatabase.MIGRATION_10_11,
         BusCourseDatabase.MIGRATION_11_12, BusCourseDatabase.MIGRATION_12_13,
         BusCourseDatabase.MIGRATION_13_14, BusCourseDatabase.MIGRATION_14_15,
-        BusCourseDatabase.MIGRATION_15_16,
+        BusCourseDatabase.MIGRATION_15_16, BusCourseDatabase.MIGRATION_16_17,
     )
 
     private fun tableExists(db: SupportSQLiteDatabase, table: String): Boolean =

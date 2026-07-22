@@ -89,6 +89,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 既存行は NULL 据え置き（案A）。
  *
  * version 16（2026-07-22）: ナビ用マップ消費の分離モデル6表を純増。既存テーブルは無変更。
+ *
+ * version 17（2026-07-23）: navi_map に app_settings_json（コース単位 app_settings・増分6契約 schema 1.1 相乗り）を
+ * nullable でない TEXT DEFAULT '{}' で追加（[MIGRATION_16_17]）。既存行は '{}' で埋まる。App Room 版は
+ * `.isnavi` schema（EX 主導）とは別軸（正典 §9・増分6 Q3-2）。zip リーダー増分の前提スキーマ。
  */
 @Database(
     entities = [
@@ -112,7 +116,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         NaviEventEntity::class,
         NaviEventOutputEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -154,6 +158,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_13_14,
                 MIGRATION_14_15,
                 MIGRATION_15_16,
+                MIGRATION_16_17,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -422,6 +427,13 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_navi_map_id` ON `navi_event` (`navi_map_id`)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS `navi_event_output` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event_id` INTEGER NOT NULL, `output_kind` TEXT NOT NULL, `payload_json` TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(`event_id`) REFERENCES `navi_event`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_output_event_id` ON `navi_event_output` (`event_id`)")
+            }
+        }
+
+        /** navi_map にコース単位 app_settings（増分6 schema 1.1 相乗り）の保存列を追加する。既存行は '{}'。 */
+        val MIGRATION_16_17 = object : androidx.room.migration.Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `navi_map` ADD COLUMN `app_settings_json` TEXT NOT NULL DEFAULT '{}'")
             }
         }
     }
