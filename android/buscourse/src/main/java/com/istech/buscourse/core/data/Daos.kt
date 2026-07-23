@@ -465,6 +465,12 @@ interface WorkLogDao {
 @Dao
 interface NaviMapDao {
     @Insert suspend fun insertMap(map: NaviMapEntity): Long
+    // `.isnavi` のファイル内IDを Room の自動採番IDへ翻訳するインポータ用。
+    @Insert suspend fun insertBranch(branch: NaviBranchEntity): Long
+    @Insert suspend fun insertSegment(segment: NaviSegmentEntity): Long
+    @Insert suspend fun insertTrackPoint(point: NaviTrackPointEntity): Long
+    @Insert suspend fun insertEvent(event: NaviEventEntity): Long
+    @Insert suspend fun insertOutput(output: NaviEventOutputEntity): Long
     @Insert suspend fun insertBranches(branches: List<NaviBranchEntity>)
     @Insert suspend fun insertSegments(segments: List<NaviSegmentEntity>)
     @Insert suspend fun insertTrackPoints(points: List<NaviTrackPointEntity>)
