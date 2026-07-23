@@ -1,6 +1,17 @@
 {
   "permissions": {
+    "additionalDirectories": [
+      "C:\\Users\\ishix\\dev\\istech\\teams\\android",
+      "C:\\Users\\ishix\\dev\\istech\\docs"
+    ],
     "allow": [
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(bash android/tools/test-buscourse.sh)",
       "Bash(./gradlew :buscourse:assembleDebug*)",
       "Bash(export JAVA_HOME=*)",
       "Bash(./gradlew :buscourse:dependencies*)",
