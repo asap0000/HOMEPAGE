@@ -1,6 +1,7 @@
 package com.istech.buscourse.core.geo
 
 import android.location.Location
+import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -31,6 +32,30 @@ object GeoMath {
             cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sinHalfDLon * sinHalfDLon
         val c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
         return EARTH_RADIUS_M * c
+    }
+
+    /**
+     * 2点間の forward azimuth（初期方位）。北=0・時計回り・範囲 [0, 360)。
+     * EX（designer playback.bearing_deg）と同一式で両系統の見え方を一致させる。
+     * 平面近似は使わないため、高緯度・経度180度またぎでも正しい方位を返す。
+     *
+     * θ = atan2(sinΔλ * cosφ2, cosφ1 * sinφ2 − sinφ1 * cosφ2 * cosΔλ)
+     *
+     * 同一座標では方位は定義できないため [Double.NaN] を返す。
+     */
+    fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        if (lat1 == lat2 && lon1 == lon2) return Double.NaN
+
+        val radiansPerDegree = PI / 180.0
+        val phi1 = lat1 * radiansPerDegree
+        val phi2 = lat2 * radiansPerDegree
+        val deltaLambda = (lon2 - lon1) * radiansPerDegree
+        val theta = atan2(
+            sin(deltaLambda) * cos(phi2),
+            cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(deltaLambda),
+        )
+        val degrees = theta / radiansPerDegree
+        return (degrees % 360.0 + 360.0) % 360.0
     }
 
     /** [Location] と緯度経度の組との距離（メートル）。 */
