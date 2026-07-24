@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.North
@@ -344,10 +346,10 @@ private fun NaviMapContent(
     var maxChainageM by remember { mutableFloatStateOf(0f) }
     var chainageM by remember { mutableFloatStateOf(0f) }
 
-    // プログラムからのカメラ設定ズームは地図パッケージのmaxzoomを超えない（超えると
-    // setMaxZoomPreferenceに無告知でクランプされ「100%品質実測」が歪む）。より詳細な
-    // 100%品質はユーザーのピンチ操作でmaxzoomまで寄って確認する（第一目的の担保）。
-    val naviZoom = remember(pkg.maxzoom) { minOf(DEFAULT_NAVI_ZOOM, pkg.maxzoom.toDouble()) }
+    // 初期/スクラブ時のカメラズーム。タイルは MVT（ベクタ）なので maxzoom を超える overzoom でも
+    // 線・ラベルは鮮明なまま拡大でき、停留所ピン（画面ピクセル固定）に対して地図が相対的に大きくなり
+    // 死角が減る（オーナー要望 2026-07-24）。maxzoom で切り下げず既定値をそのまま使う。
+    val naviZoom = DEFAULT_NAVI_ZOOM
 
     val map = mapLibreMap
     LaunchedEffect(map, pkg.regionId, mapId) {
@@ -359,7 +361,9 @@ private fun NaviMapContent(
                 .include(LatLng(pkg.boundsNorth, pkg.boundsEast))
                 .build()
             map.setLatLngBoundsForCameraTarget(packageBounds)
-            map.setMaxZoomPreference(pkg.maxzoom.toDouble())
+            // ピンチ上限は maxzoom でなく overzoom 上限まで許す（MVT ゆえ拡大しても鮮明・ピンの死角低減）。
+            // maxzoom が既に上限を超える高精細パッケージではその maxzoom を優先する。
+            map.setMaxZoomPreference(maxOf(pkg.maxzoom.toDouble(), NAVI_OVERZOOM_CEILING))
 
             scope.launch {
                 val dao = database.naviMapDao()
@@ -519,22 +523,37 @@ private fun NaviMapContent(
                         "chainage: ${chainageM.toInt()}m / ${maxChainageM.toInt()}m",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    IconButton(
-                        onClick = {
-                            orientation = when (orientation) {
-                                NaviOrientation.HEADING_UP -> NaviOrientation.NORTH_UP
-                                NaviOrientation.NORTH_UP -> NaviOrientation.HEADING_UP
-                            }
-                        },
-                    ) {
-                        Icon(
-                            if (orientation == NaviOrientation.HEADING_UP) Icons.Filled.Explore else Icons.Filled.North,
-                            contentDescription = if (orientation == NaviOrientation.HEADING_UP) {
-                                "進行方向上（heading_up）。タップで北向き固定に切替"
-                            } else {
-                                "北向き固定（north_up）。タップで進行方向上に切替"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // カメラの傾き（pitch）を上下ボタンで無段階に調整（0=真上／60=最も寝かせた鳥瞰）。
+                        // App ローカルの表示状態のみで .isnavi／Room へ焼き戻さない（orientation と同じ扱い）。
+                        Text("傾き ${basePitchDeg.toInt()}°", style = MaterialTheme.typography.bodySmall)
+                        IconButton(
+                            onClick = { basePitchDeg = (basePitchDeg + PITCH_STEP_DEG).coerceIn(0.0, 60.0) },
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "カメラを寝かせる（傾きを強める）")
+                        }
+                        IconButton(
+                            onClick = { basePitchDeg = (basePitchDeg - PITCH_STEP_DEG).coerceIn(0.0, 60.0) },
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "カメラを立てる（傾きを弱める）")
+                        }
+                        IconButton(
+                            onClick = {
+                                orientation = when (orientation) {
+                                    NaviOrientation.HEADING_UP -> NaviOrientation.NORTH_UP
+                                    NaviOrientation.NORTH_UP -> NaviOrientation.HEADING_UP
+                                }
                             },
-                        )
+                        ) {
+                            Icon(
+                                if (orientation == NaviOrientation.HEADING_UP) Icons.Filled.Explore else Icons.Filled.North,
+                                contentDescription = if (orientation == NaviOrientation.HEADING_UP) {
+                                    "進行方向上（heading_up）。タップで北向き固定に切替"
+                                } else {
+                                    "北向き固定（north_up）。タップで進行方向上に切替"
+                                },
+                            )
+                        }
                     }
                 }
                 Slider(
@@ -547,8 +566,19 @@ private fun NaviMapContent(
     }
 }
 
-/** プログラムからのカメラ設定に使う既定ズーム（pkg.maxzoomと`minOf`でクランプして使う）。 */
+/** カメラ傾き（pitch）の上下ボタン1回あたりの変化量。無段階（細かい刻み）で立て/寝かせできる。 */
+private const val PITCH_STEP_DEG = 5.0
+
+/** 初期/スクラブ時のカメラズーム（maxzoom を超える overzoom を許容。MVT ゆえ拡大しても鮮明）。 */
 private const val DEFAULT_NAVI_ZOOM = 16.0
+
+/**
+ * ピンチズームの上限（overzoom 天井）。タイル maxzoom（例 14）を超えても MVT を鮮明に拡大でき、
+ * 停留所ピンに対して地図を相対的に大きくして死角を減らす（オーナー要望 2026-07-24）。
+ * overzoom は「同一 maxzoom の地物を拡大する」動作で、細街路・ラベルが新たに増えるわけではない
+ * （地物の詳細度の天井は生成側 maxzoom。さらなる詳細化はタイル生成側=Windows の領分）。
+ */
+private const val NAVI_OVERZOOM_CEILING = 18.0
 
 /**
  * イベントのchainageを[NaviCamera.positionAtChainageM]で座標解決し、[StopSymbolPoint]へ変換する。
