@@ -16,6 +16,7 @@ import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.LineString
+import org.maplibre.geojson.MultiLineString
 import org.maplibre.geojson.Point
 
 /**
@@ -66,6 +67,39 @@ class RouteTrackOverlay(
         if (points.size < 2) return
         val lngLats = points.map { (lat, lon) -> Point.fromLngLat(lon, lat) }
         val feature = Feature.fromGeometry(LineString.fromLngLats(lngLats))
+        withContext(Dispatchers.Main) {
+            (style.getSourceAs<GeoJsonSource>(ROUTE_LINE_SOURCE_ID)
+                ?: GeoJsonSource(ROUTE_LINE_SOURCE_ID).also { style.addSource(it) })
+                .setGeoJson(feature)
+            if (style.getLayer(ROUTE_LINE_LAYER_ID) == null) {
+                style.addLayer(
+                    LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
+                        PropertyFactory.lineColor(Color.parseColor(colorHex)),
+                        PropertyFactory.lineWidth(4f),
+                        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * 複数の連続ポリライン（[lines]、各要素は起点→終点順`(lat, lon)`列）を、GAP で分断したまま
+     * 1つの `MultiLineString` として描画する（[showRouteLine] と同じ専用source/layerを使う）。
+     *
+     * ナビ用マップの本線は TRACK セグメントが GAP を挟んで並ぶことがある。全 TRACK 点を単純連結して
+     * 1本の [LineString] にすると、GAP を跨ぐ TRACK 終端どうしが直線で結ばれ「地図の穴」が線で
+     * 埋まってしまう。呼び出し側で GAP ごとに区切った点列リストを渡し、本メソッドで各区間を独立した
+     * ラインとして描く（区間間には線を引かない）。2点未満の区間は無視する。全区間が空なら何もしない。
+     */
+    suspend fun showRouteMultiLine(lines: List<List<Pair<Double, Double>>>, colorHex: String) {
+        val usableLines = lines.filter { it.size >= 2 }
+        if (usableLines.isEmpty()) return
+        val lineStrings = usableLines.map { line ->
+            line.map { (lat, lon) -> Point.fromLngLat(lon, lat) }
+        }
+        val feature = Feature.fromGeometry(MultiLineString.fromLngLats(lineStrings))
         withContext(Dispatchers.Main) {
             (style.getSourceAs<GeoJsonSource>(ROUTE_LINE_SOURCE_ID)
                 ?: GeoJsonSource(ROUTE_LINE_SOURCE_ID).also { style.addSource(it) })

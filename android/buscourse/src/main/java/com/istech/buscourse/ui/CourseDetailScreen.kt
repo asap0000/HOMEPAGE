@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -135,6 +136,7 @@ fun CourseDetailScreen(
     courseId: Long,
     onBack: () -> Unit,
     onOpenMap: () -> Unit,
+    onOpenNavi: () -> Unit,
 ) {
     val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -328,6 +330,9 @@ fun CourseDetailScreen(
                 actions = {
                     IconButton(onClick = onOpenMap) {
                         Icon(Icons.Filled.Map, contentDescription = "地図表示")
+                    }
+                    IconButton(onClick = onOpenNavi) {
+                        Icon(Icons.Filled.Explore, contentDescription = "ナビ確認")
                     }
                     IconButton(onClick = { exportCourse() }, enabled = !busy && details != null) {
                         Icon(Icons.Filled.FileUpload, contentDescription = "GPXエクスポート")

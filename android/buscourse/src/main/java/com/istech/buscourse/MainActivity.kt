@@ -18,6 +18,7 @@ import com.istech.buscourse.ui.CourseDetailScreen
 import com.istech.buscourse.ui.CourseListScreen
 import com.istech.buscourse.ui.HomeScreen
 import com.istech.buscourse.ui.MapImportScreen
+import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.RecordingScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
@@ -66,6 +67,8 @@ private object Routes {
     const val COURSES = "courses"
     const val COURSE_DETAIL = "courses/{id}"
     const val COURSE_MAP = "courses/{id}/map"
+    // ナビ確認（(c2-b)、実.iscmap上でナビ用マップのchainageスライダー検証、2026-07-24追加）
+    const val COURSE_NAVI = "courses/{id}/navi"
     // コース創設（トップダウン、S4、2026-07-14追加。設計書は docs/00_ファクトブック_バス運行実態.md 参照）
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
@@ -77,6 +80,7 @@ private object Routes {
     fun stopCardRetake(id: Long) = "stopcards/$id/retake"
     fun courseDetail(id: Long) = "courses/$id"
     fun courseMap(id: Long) = "courses/$id/map"
+    fun courseNavi(id: Long) = "courses/$id/navi"
     fun speedMap(sessionId: Long) = "sessions/$sessionId/speedmap"
 }
 
@@ -167,6 +171,7 @@ private fun AppNavHost() {
                     courseId = id,
                     onBack = { navController.popBackStack() },
                     onOpenMap = { navController.navigate(Routes.courseMap(id)) },
+                    onOpenNavi = { navController.navigate(Routes.courseNavi(id)) },
                 )
             }
         }
@@ -174,6 +179,17 @@ private fun AppNavHost() {
             val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
             if (id != null) {
                 RouteMapScreen(
+                    viewModel = viewModel,
+                    courseId = id,
+                    onBack = { navController.popBackStack() },
+                    onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+                )
+            }
+        }
+        composable(Routes.COURSE_NAVI) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                NaviScreen(
                     viewModel = viewModel,
                     courseId = id,
                     onBack = { navController.popBackStack() },
