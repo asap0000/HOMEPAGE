@@ -1054,4 +1054,93 @@ class CourseRepositoryTest {
         assertThat(db.courseDao().getById(courseId)?.sourceSessionId).isNull()
         assertThat(db.courseStopDao().getOrderedStops(courseId)).hasSize(1)
     }
+
+    // ------------------------------------------------------------------
+    // updateCourseIdentity（(e) コース identity設定UI、2026-07-24追加）
+    // ------------------------------------------------------------------
+
+    /** 未設定コースへの正常設定はSuccessを返し、DBに反映される。 */
+    @Test
+    fun updateCourseIdentity_setsOnUnsetCourse_returnsSuccessAndPersists() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.Success)
+        val course = db.courseDao().getById(courseId)
+        assertThat(course?.busId).isEqualTo("バスA")
+        assertThat(course?.courseNo).isEqualTo(1)
+        assertThat(course?.year).isEqualTo(2026)
+    }
+
+    /** 別コースが同一identityを既に持つ場合はDuplicateIdentityを返し、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_duplicateOnAnotherCourse_returnsDuplicateAndDoesNotChangeDb() = runTest {
+        val courseA = repository.createCourse("コースA", CourseKind.STANDARD)
+        val courseB = repository.createCourse("コースB", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseA, busId = "バスA", courseNo = 1, year = 2026)
+
+        val result = repository.updateCourseIdentity(courseB, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.DuplicateIdentity)
+        val course = db.courseDao().getById(courseB)
+        assertThat(course?.busId).isNull()
+        assertThat(course?.courseNo).isNull()
+        assertThat(course?.year).isNull()
+    }
+
+    /** 同じコースへ同じidentityを再設定するのは自己重複として扱わず、Successになる。 */
+    @Test
+    fun updateCourseIdentity_reapplySameIdentityOnSameCourse_returnsSuccess() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.Success)
+        val course = db.courseDao().getById(courseId)
+        assertThat(course?.busId).isEqualTo("バスA")
+    }
+
+    /** busIdが空白のみ→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_blankBusId_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "   ", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.busId).isNull()
+    }
+
+    /** courseNo<=0→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_courseNoZero_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 0, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.courseNo).isNull()
+    }
+
+    /** yearが範囲外（1999）→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_yearOutOfRange_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 1999)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.year).isNull()
+    }
+
+    /** 存在しないcourseIdを渡すとCourseNotFoundを返す。 */
+    @Test
+    fun updateCourseIdentity_nonexistentCourse_returnsCourseNotFound() = runTest {
+        val result = repository.updateCourseIdentity(courseId = 999_999L, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.CourseNotFound)
+    }
+
 }

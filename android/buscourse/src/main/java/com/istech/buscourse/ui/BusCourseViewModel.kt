@@ -17,6 +17,7 @@ import com.istech.buscourse.course.CourseStopEdit
 import com.istech.buscourse.course.DuplicateFrameCandidate
 import com.istech.buscourse.course.FindOrCreateCandidate
 import com.istech.buscourse.course.SegmentExtractionResult
+import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
 import kotlinx.coroutines.launch
@@ -439,6 +440,29 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.deleteCourse(courseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの削除") {
                 "コース『${courseName ?: "ID:$courseId"}』を削除"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * コース identity（`bus_id`/`course_no`/`year`）の設定・編集（CourseDetailScreen 編集ダイアログ
+     * 「保存」、(e) コース identity設定UI、2026-07-24追加）。[UpdateIdentityResult] は `Result<T>` では
+     * ないため、`logOutcome`（`Result`前提）は使わず、成功判定を `== UpdateIdentityResult.Success` で
+     * 直接行う。ログ本文には identity の3値のみを載せ、停留所名・園児名等の PII は含めない。
+     * 失敗（Duplicate/Invalid/NotFound）は [onResult] でUIへ返すのみでログは記録しない。
+     */
+    fun updateCourseIdentity(
+        courseId: Long,
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        onResult: (UpdateIdentityResult) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateCourseIdentity(courseId, busId, courseNo, year)
+            if (result == UpdateIdentityResult.Success) {
+                repository.logWork(WorkLogCategory.COURSE, "識別情報を設定（${year}年 ${busId}${courseNo}）")
             }
             onResult(result)
         }

@@ -1,6 +1,7 @@
 package com.istech.buscourse.course
 
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
@@ -49,6 +50,26 @@ enum class CourseKind { STANDARD, TEMPORARY }
 
 /** `course_segment.status` の許容値（設計書§3.5）。 */
 enum class CourseSegmentStatus { CONFIRMED, PENDING }
+
+/**
+ * コース identity（`bus_id`/`course_no`/`year`）の設定・編集結果（(e) コース identity設定UI、
+ * 2026-07-24追加）。[CourseRepository.updateCourseIdentity] の戻り値。呼び出し側（
+ * [com.istech.buscourse.ui.BusCourseViewModel]・[com.istech.buscourse.ui.CourseDetailScreen]）が
+ * エラー種別ごとに表示文言を分けるため、`Result<T>` ではなく専用の sealed interface で返す。
+ */
+sealed interface UpdateIdentityResult {
+    /** 設定・更新に成功した。 */
+    object Success : UpdateIdentityResult
+
+    /** busId が空白のみ／courseNo が 0 以下／year が許容範囲外（[CourseRepository.IDENTITY_YEAR_RANGE]）。 */
+    object InvalidInput : UpdateIdentityResult
+
+    /** 同一 identity（bus_id/course_no/year）を持つ別コースが既に存在する（`index_course_identity`）。 */
+    object DuplicateIdentity : UpdateIdentityResult
+
+    /** 対象コースが存在しない。 */
+    object CourseNotFound : UpdateIdentityResult
+}
 
 /** ジオフェンス半径内で一致しなかった停留所（気づきにくい抽出失敗の可視化、2026-07-11追加）。 */
 data class UnmatchedStop(
@@ -769,6 +790,46 @@ class CourseRepository(
                 year = year,
             )
         )
+    }
+
+    /**
+     * コース identity（`bus_id`/`course_no`/`year`）の設定・編集（(e) コース identity設定UI、
+     * [com.istech.buscourse.ui.CourseDetailScreen] 編集ダイアログ「保存」、2026-07-24追加）。
+     * ナビ用マップ（navi_map）生成には identity が必須（[com.istech.buscourse.core.data.CourseEntity.identityOrNull]）
+     * だが、実機の既存コースは全て identity 未設定のため、詳細画面から後付けで設定できるようにする。
+     *
+     * 判定順（[UpdateIdentityResult]のKDoc参照）: バリデーション→対象存在→重複チェック→更新。
+     * 重複チェックは「自分自身の再設定」を除外する（同一コースへ同じ identity を再設定しても
+     * [UpdateIdentityResult.DuplicateIdentity] にはならない）。`updateIdentity` 自体も
+     * `SQLiteConstraintException` を捕捉して [UpdateIdentityResult.DuplicateIdentity] に倒す
+     * （二重防御。⑤の教訓＝unique index を張っただけでは書込経路が実際に例外化するか担保できない）。
+     * `logWork` はここでは呼ばない（呼び出し側 ViewModel の役割、既存の更新系と同じ役割分担）。
+     */
+    suspend fun updateCourseIdentity(
+        courseId: Long,
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        now: Long = System.currentTimeMillis(),
+    ): UpdateIdentityResult {
+        val trimmedBusId = busId.trim()
+        if (trimmedBusId.isEmpty() || courseNo <= 0 || year !in IDENTITY_YEAR_RANGE) {
+            return UpdateIdentityResult.InvalidInput
+        }
+
+        courseDao.getById(courseId) ?: return UpdateIdentityResult.CourseNotFound
+
+        val existing = courseDao.findByIdentity(trimmedBusId, courseNo, year)
+        if (existing != null && existing.id != courseId) {
+            return UpdateIdentityResult.DuplicateIdentity
+        }
+
+        return try {
+            courseDao.updateIdentity(courseId, trimmedBusId, courseNo, year, now)
+            UpdateIdentityResult.Success
+        } catch (e: SQLiteConstraintException) {
+            UpdateIdentityResult.DuplicateIdentity
+        }
     }
 
     /**
@@ -2387,6 +2448,9 @@ class CourseRepository(
         /** サムネイル仕様（§3.3: 長辺320px, JPEG q80）。 */
         private const val THUMB_LONG_EDGE_PX = 320
         private const val THUMB_JPEG_QUALITY = 80
+
+        /** コース identity の年度として許容する範囲（[updateCourseIdentity] のバリデーション、指示書§2.1）。 */
+        private val IDENTITY_YEAR_RANGE = 2000..2100
 
         /**
          * セッション解析レポート（フェーズA-1）のダブり検出しきい値。同一停留所への連続マーカーの

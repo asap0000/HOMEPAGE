@@ -14,12 +14,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -43,6 +45,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,12 +64,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
+import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.course.CourseEditDetails
 import com.istech.buscourse.course.CourseStopEdit
+import com.istech.buscourse.course.UpdateIdentityResult
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -149,6 +155,12 @@ fun CourseDetailScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    // identity（bus_id/course_no/year）設定ダイアログの状態（(e) コース identity設定UI、2026-07-24追加）
+    var showIdentityDialog by remember { mutableStateOf(false) }
+    var identityBusIdInput by remember { mutableStateOf("") }
+    var identityCourseNoInput by remember { mutableStateOf("") }
+    var identityYearInput by remember { mutableStateOf("") }
+    var identityError by remember { mutableStateOf<String?>(null) }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
     var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var unusedOnlyFilter by remember { mutableStateOf(false) }
@@ -359,6 +371,34 @@ fun CourseDetailScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    // identity（bus_id/course_no/year）表示・編集導線（(e) コース identity設定UI、
+                    // 2026-07-24追加）。ナビ用マップ生成には identity が必須のため、未設定コースを
+                    // ここから後付けで設定できるようにする（トップバーは変更しない）。
+                    val identity = details?.course?.identityOrNull()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            identity?.let { "識別情報: ${it.year}年 ${it.busId}${it.courseNo}コース" } ?: "識別情報: 未設定",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                identityBusIdInput = identity?.busId ?: ""
+                                identityCourseNoInput = identity?.courseNo?.toString() ?: ""
+                                identityYearInput = identity?.year?.toString() ?: ""
+                                identityError = null
+                                showIdentityDialog = true
+                            },
+                            enabled = !busy && details != null,
+                        ) {
+                            Text(if (identity != null) "編集" else "設定")
+                        }
+                    }
                 }
             }
 
@@ -597,6 +637,79 @@ fun CourseDetailScreen(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showAddDialog = false }) { Text("閉じる") }
+            },
+        )
+    }
+
+    if (showIdentityDialog) {
+        AlertDialog(
+            onDismissRequest = { showIdentityDialog = false },
+            title = { Text("識別情報の設定") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = identityBusIdInput,
+                        onValueChange = { identityBusIdInput = it },
+                        label = { Text("バス識別子") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = identityCourseNoInput,
+                        onValueChange = { identityCourseNoInput = it },
+                        label = { Text("コース番号") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = identityYearInput,
+                        onValueChange = { identityYearInput = it },
+                        label = { Text("年度") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    val error = identityError
+                    if (error != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val courseNo = identityCourseNoInput.toIntOrNull()
+                    val year = identityYearInput.toIntOrNull()
+                    if (courseNo == null || year == null) {
+                        identityError = "バス識別子・コース番号・年度を正しく入力してください"
+                        return@TextButton
+                    }
+                    viewModel.updateCourseIdentity(courseId, identityBusIdInput, courseNo, year) { result ->
+                        when (result) {
+                            UpdateIdentityResult.Success -> {
+                                showIdentityDialog = false
+                                refreshKey++
+                                Toast.makeText(context, "識別情報を設定しました", Toast.LENGTH_SHORT).show()
+                            }
+                            UpdateIdentityResult.DuplicateIdentity -> {
+                                identityError = "同じバス・コース番号・年度の別コースが既にあります"
+                            }
+                            UpdateIdentityResult.InvalidInput -> {
+                                identityError = "バス識別子・コース番号・年度を正しく入力してください"
+                            }
+                            UpdateIdentityResult.CourseNotFound -> {
+                                showIdentityDialog = false
+                                Toast.makeText(context, "コースが見つかりませんでした", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showIdentityDialog = false }) { Text("キャンセル") }
             },
         )
     }
