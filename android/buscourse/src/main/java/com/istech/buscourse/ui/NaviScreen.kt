@@ -3,17 +3,25 @@ package com.istech.buscourse.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Explore
@@ -22,6 +30,9 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.North
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -41,11 +52,16 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
@@ -69,11 +85,13 @@ import com.istech.buscourse.map.RouteTrackOverlay
 import com.istech.buscourse.map.StopSymbolOverlay
 import com.istech.buscourse.map.StopSymbolPoint
 import com.istech.buscourse.navimap.NaviCamera
+import com.istech.buscourse.navimap.NaviFrameResolver
 import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
 import com.istech.buscourse.navimap.NaviMapRepository
 import com.istech.buscourse.navimap.NaviOrientation
 import com.istech.buscourse.navimap.toCameraPosition
+import java.io.File
 import kotlin.math.max
 import kotlinx.coroutines.launch
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -89,6 +107,23 @@ import org.maplibre.android.maps.Style
 private const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
 
 private const val TRACK_KIND = "TRACK"
+
+/**
+ * NaviScreen本体の表示モード（(c3) 映像サーフェス）。SPLIT_*は地図/映像の上下2分割、
+ * MAP_ONLY/VIDEO_ONLYは全画面表示。[NaviMapContent]のstateとして保持し`.isnavi`/Roomへは焼き戻さない
+ * （orientation/basePitchDegと同じくApp実行時state限定）。
+ */
+private enum class NaviLayoutMode { SPLIT_MAP_TOP, SPLIT_VIDEO_TOP, MAP_ONLY, VIDEO_ONLY }
+
+/**
+ * 地図/映像の分割比率のクランプ範囲（地図側 20%〜80%）。相互に分け合い、上下交換とあわせて
+ * 地図・映像のどちらも主にできる（小さい側の最小＝2割。実機の見え方で 3割に上げる余地あり）。
+ */
+private const val MAP_RATIO_MIN = 0.2f
+private const val MAP_RATIO_MAX = 0.8f
+
+/** 分割ハンドルの当たり判定込みの見た目の高さ。 */
+private val SPLIT_HANDLE_HEIGHT = 20.dp
 
 /**
  * ナビ用マップ（app_simple、`navi_*`テーブル）を実`.iscmap`地図の上に描く新規画面（(c2-b)）。
@@ -346,6 +381,12 @@ private fun NaviMapContent(
     var maxChainageM by remember { mutableFloatStateOf(0f) }
     var chainageM by remember { mutableFloatStateOf(0f) }
 
+    // (c3) 表示モード・分割比率。App実行時state限定（orientation/basePitchDegと同じく永続化しない）。
+    var layoutMode by remember { mutableStateOf(NaviLayoutMode.SPLIT_MAP_TOP) }
+    var mapRatio by remember { mutableFloatStateOf(MAP_RATIO_MAX) }
+    // chainageに対応する映像フレームの実ファイル。nullは「この区間の映像はありません」。
+    var videoFrameFile by remember { mutableStateOf<File?>(null) }
+
     // 初期/スクラブ時のカメラズーム。タイルは MVT（ベクタ）なので maxzoom を超える overzoom でも
     // 線・ラベルは鮮明なまま拡大でき、停留所ピン（画面ピクセル固定）に対して地図が相対的に大きくなり
     // 死角が減る（オーナー要望 2026-07-24）。maxzoom で切り下げず既定値をそのまま使う。
@@ -462,48 +503,81 @@ private fun NaviMapContent(
         )?.let { state -> currentMap.cameraPosition = state.toCameraPosition() }
     }
 
+    // (c3) chainageスクラブに連動して映像フレームを解決する。cueが引けない（route_point由来の
+    // コース＝映像なし等）場合はnullにし、映像面は「この区間の映像はありません」プレースホルダを出す。
+    // chainageMが変わるたびに前回のsuspendはLaunchedEffectのcancel-and-relaunchで打ち切られるため、
+    // 連続スクラブでの過剰なDB問い合わせ（throttle）はこの単一経路で自然に満たされる。
+    LaunchedEffect(chainageM, segments, trackPointsBySegmentId) {
+        if (segments.isEmpty()) {
+            videoFrameFile = null
+            return@LaunchedEffect
+        }
+        val cue = NaviFrameResolver.frameCueAtChainageM(segments, trackPointsBySegmentId, chainageM.toDouble())
+        videoFrameFile = if (cue == null) {
+            null
+        } else {
+            database.timelapseFrameDao()
+                .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
+                ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+        }
+    }
+
+    // VIDEO_ONLYでは地図操作子（現在地FAB・停留所番号バッジ）を隠す（地図が見えていないため）。
+    val mapVisible = layoutMode != NaviLayoutMode.VIDEO_ONLY
+
     Box(modifier = modifier.fillMaxSize()) {
-        AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView })
+        SplitVideoMapArea(
+            modifier = Modifier.fillMaxSize(),
+            layoutMode = layoutMode,
+            mapRatio = mapRatio,
+            onMapRatioChange = { mapRatio = it.coerceIn(MAP_RATIO_MIN, MAP_RATIO_MAX) },
+            mapContent = { AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView }) },
+            videoContent = { NaviVideoSurface(file = videoFrameFile, modifier = Modifier.fillMaxSize()) },
+        )
 
         // 現在地ジャンプFAB（スクラブUIの上に重ねる）。位置未許可・測位未完了はToastで穏当に。
-        FloatingActionButton(
-            onClick = {
-                if (!locationGranted) {
-                    Toast.makeText(context, "位置情報の許可が必要です", Toast.LENGTH_SHORT).show()
-                } else {
-                    val currentMap = mapLibreMap
-                    val locationComponent = currentMap?.locationComponent
-                    val lastLocation =
-                        if (locationComponent?.isLocationComponentActivated == true) {
-                            locationComponent.lastKnownLocation
-                        } else {
-                            null
-                        }
-                    if (currentMap != null && lastLocation != null) {
-                        currentMap.animateCamera(
-                            CameraUpdateFactory.newLatLngZoom(
-                                LatLng(lastLocation.latitude, lastLocation.longitude),
-                                max(currentMap.cameraPosition.zoom, naviZoom),
-                            )
-                        )
+        if (mapVisible) {
+            FloatingActionButton(
+                onClick = {
+                    if (!locationGranted) {
+                        Toast.makeText(context, "位置情報の許可が必要です", Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(
-                            context, "現在地を取得できませんでした（測位中）", Toast.LENGTH_SHORT
-                        ).show()
+                        val currentMap = mapLibreMap
+                        val locationComponent = currentMap?.locationComponent
+                        val lastLocation =
+                            if (locationComponent?.isLocationComponentActivated == true) {
+                                locationComponent.lastKnownLocation
+                            } else {
+                                null
+                            }
+                        if (currentMap != null && lastLocation != null) {
+                            currentMap.animateCamera(
+                                CameraUpdateFactory.newLatLngZoom(
+                                    LatLng(lastLocation.latitude, lastLocation.longitude),
+                                    max(currentMap.cameraPosition.zoom, naviZoom),
+                                )
+                            )
+                        } else {
+                            Toast.makeText(
+                                context, "現在地を取得できませんでした（測位中）", Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
-                }
-            },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 96.dp),
-        ) {
-            Icon(Icons.Filled.MyLocation, contentDescription = "現在地へ移動")
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 96.dp),
+            ) {
+                Icon(Icons.Filled.MyLocation, contentDescription = "現在地へ移動")
+            }
         }
 
-        tappedStopNumber?.let { number ->
-            Surface(
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
-            ) {
-                TextButton(onClick = { tappedStopNumber = null }) {
-                    Text(number.toString(), style = MaterialTheme.typography.titleMedium)
+        if (mapVisible) {
+            tappedStopNumber?.let { number ->
+                Surface(
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
+                ) {
+                    TextButton(onClick = { tappedStopNumber = null }) {
+                        Text(number.toString(), style = MaterialTheme.typography.titleMedium)
+                    }
                 }
             }
         }
@@ -554,6 +628,41 @@ private fun NaviMapContent(
                                 },
                             )
                         }
+                        // (c3) 表示モード循環（分割→地図のみ→映像のみ→分割…）。
+                        IconButton(
+                            onClick = {
+                                layoutMode = when (layoutMode) {
+                                    NaviLayoutMode.SPLIT_MAP_TOP, NaviLayoutMode.SPLIT_VIDEO_TOP ->
+                                        NaviLayoutMode.MAP_ONLY
+                                    NaviLayoutMode.MAP_ONLY -> NaviLayoutMode.VIDEO_ONLY
+                                    NaviLayoutMode.VIDEO_ONLY -> NaviLayoutMode.SPLIT_MAP_TOP
+                                }
+                            },
+                        ) {
+                            Icon(
+                                when (layoutMode) {
+                                    NaviLayoutMode.SPLIT_MAP_TOP, NaviLayoutMode.SPLIT_VIDEO_TOP -> Icons.Filled.ViewAgenda
+                                    NaviLayoutMode.MAP_ONLY -> Icons.Filled.Map
+                                    NaviLayoutMode.VIDEO_ONLY -> Icons.Filled.Videocam
+                                },
+                                contentDescription = "表示モード切替（分割/地図のみ/映像のみ）",
+                            )
+                        }
+                        // (c3) 分割時の上下入替（SPLIT_MAP_TOP⇔SPLIT_VIDEO_TOP）。分割時のみ有効。
+                        val isSplit = layoutMode == NaviLayoutMode.SPLIT_MAP_TOP ||
+                            layoutMode == NaviLayoutMode.SPLIT_VIDEO_TOP
+                        IconButton(
+                            enabled = isSplit,
+                            onClick = {
+                                layoutMode = when (layoutMode) {
+                                    NaviLayoutMode.SPLIT_MAP_TOP -> NaviLayoutMode.SPLIT_VIDEO_TOP
+                                    NaviLayoutMode.SPLIT_VIDEO_TOP -> NaviLayoutMode.SPLIT_MAP_TOP
+                                    else -> layoutMode
+                                }
+                            },
+                        ) {
+                            Icon(Icons.Filled.SwapVert, contentDescription = "地図/映像の上下を入替")
+                        }
                     }
                 }
                 Slider(
@@ -562,6 +671,117 @@ private fun NaviMapContent(
                     valueRange = 0f..maxOf(maxChainageM, 0f),
                 )
             }
+        }
+    }
+}
+
+/**
+ * 地図/映像の表示エリア（(c3)）。[layoutMode]に応じて[mapContent]/[videoContent]を出し入れするだけで、
+ * `MapView`本体（[mapContent]内の`remember`済みインスタンス）は再生成しない
+ * （モード往復・比率変更のたびに地図タイルを作り直すと重い。指示書§2.3「MapViewのライフサイクル」）。
+ * SPLIT_*時は境界にドラッグハンドルを置き、[mapRatio]（地図側 0.7〜0.8 にクランプ）を可変にする。
+ */
+@Composable
+private fun SplitVideoMapArea(
+    modifier: Modifier,
+    layoutMode: NaviLayoutMode,
+    mapRatio: Float,
+    onMapRatioChange: (Float) -> Unit,
+    mapContent: @Composable () -> Unit,
+    videoContent: @Composable () -> Unit,
+) {
+    when (layoutMode) {
+        NaviLayoutMode.MAP_ONLY -> Box(modifier) { mapContent() }
+        NaviLayoutMode.VIDEO_ONLY -> Box(modifier) { videoContent() }
+        NaviLayoutMode.SPLIT_MAP_TOP, NaviLayoutMode.SPLIT_VIDEO_TOP -> {
+            BoxWithConstraints(modifier) {
+                val totalHeightPx = constraints.maxHeight.toFloat()
+                val topIsMap = layoutMode == NaviLayoutMode.SPLIT_MAP_TOP
+                val topWeight = if (topIsMap) mapRatio else 1f - mapRatio
+                val bottomWeight = 1f - topWeight
+
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(topWeight).fillMaxWidth()) {
+                        if (topIsMap) mapContent() else videoContent()
+                    }
+                    SplitDragHandle(
+                        modifier = Modifier.fillMaxWidth().height(SPLIT_HANDLE_HEIGHT),
+                        onDrag = { dragDeltaYPx ->
+                            if (totalHeightPx > 0f) {
+                                val deltaRatio = dragDeltaYPx / totalHeightPx
+                                // ハンドルが下がる(dragDeltaY>0)と「上側」の比率が増える。上側が地図か
+                                // 映像かでmapRatioへの符号を合わせる。
+                                val deltaMapRatio = if (topIsMap) deltaRatio else -deltaRatio
+                                onMapRatioChange(mapRatio + deltaMapRatio)
+                            }
+                        },
+                    )
+                    Box(Modifier.weight(bottomWeight).fillMaxWidth()) {
+                        if (topIsMap) videoContent() else mapContent()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 分割比率変更用のドラッグハンドル（横バー）。縦ドラッグの累計量[onDrag]（px）を呼び出し側へ渡す。 */
+@Composable
+private fun SplitDragHandle(modifier: Modifier, onDrag: (Float) -> Unit) {
+    Box(
+        modifier = modifier
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    onDrag(dragAmount.y)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .width(40.dp)
+                .height(4.dp)
+                .background(MaterialTheme.colorScheme.outline),
+        )
+    }
+}
+
+/**
+ * 映像フレーム表示（(c3)）。[UiCommon.StopCardThumbnail]と同じ流儀
+ * （`produceState`＋`BitmapFactory.decodeFile`＋`asImageBitmap`＋`Image`、新規依存なし）。
+ * [file]が前回と同じパスなら`produceState`のkeyにより再デコードしない（連続スクラブ対策）。
+ * ファイルが無い／nullの場合は「この区間の映像はありません」プレースホルダを出す
+ * （映像なしコース＝chainageに対応するsession_id/base_epoch_msが無い、フレーム未解決、ファイル欠落の全ケース共通）。
+ */
+@Composable
+private fun NaviVideoSurface(file: File?, modifier: Modifier = Modifier) {
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = file?.path) {
+        value = if (file != null && file.exists()) {
+            BitmapFactory.decodeFile(file.absolutePath)
+        } else {
+            null
+        }
+    }
+    Box(
+        modifier = modifier.background(Color.Black),
+        contentAlignment = Alignment.Center,
+    ) {
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text(
+                "この区間の映像はありません",
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
