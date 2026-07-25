@@ -816,6 +816,8 @@ private fun DrawScope.drawPreviewGroundGrid(
     val cellPx = worldUnitPx * PREVIEW_GRID_CELL_FRACTION
     val halfWidthCells = PREVIEW_GRID_HALF_WIDTH_CELLS
     val depthCells = PREVIEW_GRID_DEPTH_CELLS
+    val farDepthPx = depthCells * cellPx
+    val halfWidthPx = halfWidthCells * cellPx
 
     fun toScreen(lateralPx: Float, depthPx: Float): Offset {
         val yawed = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg)
@@ -823,19 +825,31 @@ private fun DrawScope.drawPreviewGroundGrid(
         return Offset(originPx.x + projected.x, originPx.y + projected.y)
     }
 
-    // 奥ほど透明にするフェード係数（ease-out。奥行きカットオフの手前で滑らかに0へ近づき、
-    // 有限の格子の「端」が硬い境界として見えないようにする＝合格条件1）。
-    fun fadeAlpha(depthIndex: Int): Float {
-        val t = (depthIndex.toFloat() / depthCells).coerceIn(0f, 1f)
+    // ★オーナー指摘（2026-07-26・地平線が傾く不具合）: [NaviRenderMath.previewGroundRotateYaw]は
+    // ヨー回転でlateralとdepthを混ぜる。以前はここのフェードを「回転前の行/列インデックス」だけで
+    // 決めていたため、ヘディングアップでヨーが掛かると、同じ行でも列（lateral）によって
+    // 「回転後に実際どれだけ奥か」が大きく変わってしまい（片側は実質手前・反対側は実質奥）、
+    // 本来なら消失点の手前で滑らかに透明になるはずの縁が、そのばらつきのぶんだけ斜めの
+    // 筋として可視化されていた（＝斜めの地平線に見えるバグの実体）。
+    //
+    // 対策: フェードの入力を「回転前のインデックス」ではなく、[toScreen]に実際渡っている
+    // **ヨー適用後の実効奥行き**（[effectiveDepthPx]）にする。これは頂点ごとに計算するため、
+    // 同じ行/列の中でもlateral位置による実効奥行きの違いを正しく反映し、画面へ実際に投影される
+    // 位置が奥（＝消失点/地平線に近い）ほど、ヨー角に関係なく一様に透明へ近づく。
+    fun fadeAlpha(effectiveDepthPx: Float): Float {
+        val t = (effectiveDepthPx.coerceAtLeast(0f) / farDepthPx).coerceIn(0f, 1f)
         val eased = (1f - t)
         return eased * eased
+    }
+
+    fun fadeAlphaAt(lateralPx: Float, depthPx: Float): Float {
+        val effectiveDepthPx = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg).y
+        return fadeAlpha(effectiveDepthPx)
     }
 
     // ★地面の塗り＝1枚のファン（扇形）ポリゴンをグラデーションで塗るだけ（二重構造を作らない）。
     // 左右の外周を「手前→奥→手前」の順にたどって1つの閉じたPathにする。
     val fillPath = Path()
-    val farDepthPx = depthCells * cellPx
-    val halfWidthPx = halfWidthCells * cellPx
     val edgeSamples = 24
     for (i in 0..edgeSamples) {
         val depth = farDepthPx * (i.toFloat() / edgeSamples)
@@ -849,12 +863,21 @@ private fun DrawScope.drawPreviewGroundGrid(
     }
     fillPath.close()
 
+    // ★塗りの奥フェードも同じ理由でヨーに配慮する: 中央だけでなく奥の縁の左右両端も採寸し、
+    // 「原点から見て最も奥に見えていない（＝もっとも手前寄りにズレた）候補」を終端に使う。
+    // ヨーで非対称になっても、縁のどこか一点が半端に不透明のまま残ることがないようにするため
+    // （合格条件1「有限の板の端が見えてはいけない」を塗り側でも保証する）。
+    val farLeft = toScreen(-halfWidthPx, farDepthPx)
     val farCenter = toScreen(0f, farDepthPx)
-    // ★傾き90°付近ではyPrime(=depth*cos θ)が0へ潰れ、farCenter.yがoriginPx.yと一致しうる
+    val farRight = toScreen(halfWidthPx, farDepthPx)
+    // ★傾き90°付近ではyPrime(=depth*cos θ)が0へ潰れ、farXxx.yがoriginPx.yと一致しうる
     // （地面が水平線へ収束する合格条件5どおりの挙動）。startY==endYだとグラデーション生成が
     // 不正になりうるため、最低1pxの差を強制してクラッシュを防ぐ（非有限もここで弾く）。
-    val gradientEndY = if (farCenter.y.isFinite() && kotlin.math.abs(farCenter.y - originPx.y) >= 1f) {
-        farCenter.y
+    val nearestFarY = listOf(farLeft.y, farCenter.y, farRight.y)
+        .filter { it.isFinite() }
+        .minByOrNull { kotlin.math.abs(it - originPx.y) }
+    val gradientEndY = if (nearestFarY != null && kotlin.math.abs(nearestFarY - originPx.y) >= 1f) {
+        nearestFarY
     } else {
         originPx.y - 1f
     }
@@ -868,36 +891,49 @@ private fun DrawScope.drawPreviewGroundGrid(
     )
 
     // 縦線（lateral方向の各列）: 奥行きに沿ってポリラインで描く（透視で曲がって収束する）。
+    // フェードは区間（前後の頂点）の実効奥行きの平均で決める＝頂点ごとの急変を滑らかに繋ぐ。
     for (col in -halfWidthCells..halfWidthCells) {
         val lateralPx = col * cellPx
-        var prev: Offset? = null
+        var prevPoint: Offset? = null
+        var prevAlpha = 0f
         for (i in 0..depthCells) {
             val depthPx = i * cellPx
-            val alpha = fadeAlpha(i)
+            val alpha = fadeAlphaAt(lateralPx, depthPx)
             val screen = toScreen(lateralPx, depthPx)
-            val p = prev
-            if (p != null && alpha > 0.02f) {
-                drawLine(lineColor.copy(alpha = lineColor.alpha * alpha), p, screen, strokeWidth = 1.5f)
+            val p = prevPoint
+            if (p != null) {
+                val segmentAlpha = (prevAlpha + alpha) * 0.5f
+                if (segmentAlpha > 0.02f) {
+                    drawLine(lineColor.copy(alpha = lineColor.alpha * segmentAlpha), p, screen, strokeWidth = 1.5f)
+                }
             }
-            prev = screen
+            prevPoint = screen
+            prevAlpha = alpha
         }
     }
 
     // 横線（depth方向の各行）: 手前から奥へ、行ごとに左右を複数分割して描く。
+    // ★以前は行1本につきフェードを1回だけ（回転前のdepthPxのみから）決めていたため、
+    // ヨーが掛かると同じ行でも列によって実効奥行きが大きく違うのに同じ濃さで描かれ、
+    // それが斜めの筋として見えていた。ここも頂点ごとに実効奥行きを見る。
     val lateralSteps = 10
     for (row in 0..depthCells) {
         val depthPx = row * cellPx
-        val alpha = fadeAlpha(row)
-        if (alpha <= 0.02f) continue
-        var prev: Offset? = null
+        var prevPoint: Offset? = null
+        var prevAlpha = 0f
         for (s in 0..lateralSteps) {
             val lateralPx = -halfWidthPx + (2f * halfWidthPx) * (s.toFloat() / lateralSteps)
+            val alpha = fadeAlphaAt(lateralPx, depthPx)
             val screen = toScreen(lateralPx, depthPx)
-            val p = prev
+            val p = prevPoint
             if (p != null) {
-                drawLine(lineColor.copy(alpha = lineColor.alpha * alpha), p, screen, strokeWidth = 1.5f)
+                val segmentAlpha = (prevAlpha + alpha) * 0.5f
+                if (segmentAlpha > 0.02f) {
+                    drawLine(lineColor.copy(alpha = lineColor.alpha * segmentAlpha), p, screen, strokeWidth = 1.5f)
+                }
             }
-            prev = screen
+            prevPoint = screen
+            prevAlpha = alpha
         }
     }
 }
@@ -1036,10 +1072,19 @@ private fun Density.pinTopLeftOffset(point: Offset): IntOffset {
     return IntOffset((point.x - sizePx / 2f).roundToInt(), (point.y - sizePx).roundToInt())
 }
 
-/** 自車マーカーの中心がscreen座標[point]に一致するような左上オフセット（center anchor）。 */
+/**
+ * 自車マーカーの接地点（足元）がscreen座標[point]に一致するような左上オフセット（bottom anchor）。
+ *
+ * ★オーナー指摘（2026-07-26）: 自車の黄色い丸の下半分が地面に埋まっていた。原因は本関数が
+ * マーカーを[point]（地面座標系の原点＝接地点）に**中心**で重ねていたため（中心アンカーだと
+ * マーカー高さの半分が[point]より下＝地面の下に潜る）。停留所ピン（[pinTopLeftOffset]）と同じ
+ * 「下端中央＝接地点」のアンカーに揃える。マーカー自体は円形（[NaviSelfCarMarker]の`CircleShape`）
+ * のため、進行方向の矢印回転（`Modifier.rotate`は円の中心を軸に回る）をこの下端アンカー配置に
+ * 変えても、円の外形（＝接地点の位置）はどの回転角でも変わらず、足元がズレる心配はない。
+ */
 private fun Density.selfCarTopLeftOffset(point: Offset): IntOffset {
     val sizePx = SELF_CAR_SIZE_DP.toPx()
-    return IntOffset((point.x - sizePx / 2f).roundToInt(), (point.y - sizePx / 2f).roundToInt())
+    return IntOffset((point.x - sizePx / 2f).roundToInt(), (point.y - sizePx).roundToInt())
 }
 
 /**
