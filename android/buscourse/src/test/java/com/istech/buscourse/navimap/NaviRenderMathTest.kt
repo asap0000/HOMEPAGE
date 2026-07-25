@@ -175,4 +175,85 @@ class NaviRenderMathTest {
         assertThat(NaviRenderMath.extraRotationXDeg(-10f)).isEqualTo(0f)
         assertThat(NaviRenderMath.skyAlpha(120f)).isEqualTo(1f)
     }
+
+    // --- 設定画面プレビュー（グリッド平面）専用の純関数 ---
+
+    @Test fun previewTiltRotationXDeg_passesThroughFull0to90Range() {
+        // グリッドはMapLibreのnative tilt上限(60°)に縛られないため、0-90°全域をそのまま渡す。
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(0f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(45f)).isEqualTo(45f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(75f)).isEqualTo(75f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(90f)).isEqualTo(90f)
+    }
+
+    @Test fun previewTiltRotationXDeg_clampsOutOfRangeAndNonFinite() {
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(-10f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(120f)).isEqualTo(90f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(Float.NaN)).isEqualTo(0f)
+        assertThat(NaviRenderMath.previewTiltRotationXDeg(Float.POSITIVE_INFINITY)).isEqualTo(0f)
+    }
+
+    @Test fun previewCameraPanPx_isZeroAtProductDefaults() {
+        // 既定値のときは平行移動量ゼロ＝固定サンプルがそのまま画面内に収まる基準レイアウトと一致する。
+        val pan = NaviRenderMath.previewCameraPanPx(
+            1000f, 2000f,
+            fwdBackPct = NaviSettingsDefaults.SELF_CAR_FWD_BACK_PCT,
+            lateralPct = NaviSettingsDefaults.SELF_CAR_LATERAL_PCT,
+        )
+        assertThat(pan.dx).isEqualTo(0f)
+        assertThat(pan.dy).isEqualTo(0f)
+    }
+
+    @Test fun previewCameraPanPx_movesOppositeDirectionOfAnchorShift() {
+        // 自車を画面右端(lateral=100)へ動かすと、周囲(グリッド・経路・ピン)は右へスライドして見える
+        // ＝アンカーのxFractionが増える分だけdxが正方向に増える。
+        val pan = NaviRenderMath.previewCameraPanPx(
+            1000f, 2000f,
+            fwdBackPct = NaviSettingsDefaults.SELF_CAR_FWD_BACK_PCT,
+            lateralPct = 100,
+        )
+        assertThat(pan.dx).isEqualTo(500f) // (1.0 - 0.5) * 1000
+    }
+
+    @Test fun previewCameraPanPx_verticalFollowsFwdBackShift() {
+        val pan = NaviRenderMath.previewCameraPanPx(
+            1000f, 2000f,
+            fwdBackPct = 0, // 自車を画面下端へ
+            lateralPct = NaviSettingsDefaults.SELF_CAR_LATERAL_PCT,
+        )
+        // yFraction: fwdBack=0→1.0、既定30→0.7。差分0.3 * 2000 = 600
+        assertThat(pan.dy).isEqualTo(600f)
+    }
+
+    @Test fun previewProjectPoint_noRotationJustAppliesPanFromFraction() {
+        val projected = NaviRenderMath.previewProjectPoint(
+            stageWidthPx = 1000f, stageHeightPx = 2000f,
+            baseXFraction = 0.5f, baseYFraction = 0.5f,
+            rotationZDeg = 0f, panDxPx = 30f, panDyPx = -40f,
+        )
+        // 回転0なら中心(500,1000)そのもの＋pan。
+        assertThat(projected.x).isWithin(1e-3f).of(530f)
+        assertThat(projected.y).isWithin(1e-3f).of(960f)
+    }
+
+    @Test fun previewProjectPoint_rotates90DegreesAroundCenter() {
+        // ステージ中心から見て真上(x=0.5,y=0)の点を90°回すと、中心から見て右(x方向)に移動する。
+        val projected = NaviRenderMath.previewProjectPoint(
+            stageWidthPx = 1000f, stageHeightPx = 1000f,
+            baseXFraction = 0.5f, baseYFraction = 0f,
+            rotationZDeg = 90f, panDxPx = 0f, panDyPx = 0f,
+        )
+        assertThat(projected.x).isWithin(1e-2f).of(1000f) // 中心(500,500)から相対(0,-500)を90°回すと(500,0)相対 → 絶対1000
+        assertThat(projected.y).isWithin(1e-2f).of(500f)
+    }
+
+    @Test fun previewProjectPoint_nonFinitePanFallsBackToZero() {
+        val projected = NaviRenderMath.previewProjectPoint(
+            stageWidthPx = 1000f, stageHeightPx = 1000f,
+            baseXFraction = 0.5f, baseYFraction = 0.5f,
+            rotationZDeg = Float.NaN, panDxPx = Float.NaN, panDyPx = Float.POSITIVE_INFINITY,
+        )
+        assertThat(projected.x).isWithin(1e-3f).of(500f)
+        assertThat(projected.y).isWithin(1e-3f).of(500f)
+    }
 }

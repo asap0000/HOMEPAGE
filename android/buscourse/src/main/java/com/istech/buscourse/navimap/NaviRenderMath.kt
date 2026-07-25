@@ -1,6 +1,8 @@
 package com.istech.buscourse.navimap
 
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * [NaviRenderer]が使う純計算だけを集めたobject（Android/Compose非依存・JVM上でRobolectric無しに
@@ -138,6 +140,79 @@ object NaviRenderMath {
             top = top.roundToInt(),
             right = right.roundToInt(),
             bottom = bottom.roundToInt(),
+        )
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 設定画面プレビュー（グリッド平面・DB/pkg非依存、istech `docs/2026-07-26` オーナー承認増分）
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * プレビューグリッドの傾き（0-90°）を`graphicsLayer.rotationX`にそのまま渡す分（全域）。
+     * グリッドはMapLibreではない（native tilt上限60°に縛られない）ため、[nativeTiltDeg]/
+     * [extraRotationXDeg]のような60°分割をせず、0-90°全域を単一の回転として扱ってよい。
+     */
+    fun previewTiltRotationXDeg(tiltDeg: Float): Float = tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f)
+
+    /** プレビューグリッドのカメラ平行移動量（px）。 */
+    data class PreviewPanPx(val dx: Float, val dy: Float)
+
+    /**
+     * 自車のD-pad操作（[fwdBackPct]/[lateralPct]）から、グリッド平面全体（経路線・停留所ピン・
+     * グリッド地面）を平行移動させる量を求める（設計「自車を動かすと経路線・ピン・グリッドが
+     * 共連れでスライドする」）。自車アイコン自身は常に[selfCarAnchorFraction]の画面位置に固定表示
+     * されるため、周囲が代わりに動く＝実MapLibreのカメラpadding（[selfCarCameraPadding]）と同じ
+     * 発想をComposeの平行移動で表現したもの。既定値（製品既定のfwdBack/lateral）のときは
+     * 平行移動量ゼロ＝プレビューの基準レイアウト（固定サンプルが必ず画面内に収まる配置）と一致する。
+     */
+    fun previewCameraPanPx(
+        stageWidthPx: Float,
+        stageHeightPx: Float,
+        fwdBackPct: Int,
+        lateralPct: Int,
+    ): PreviewPanPx {
+        val anchor = selfCarAnchorFraction(fwdBackPct, lateralPct)
+        val defaultAnchor = selfCarAnchorFraction(
+            NaviSettingsDefaults.SELF_CAR_FWD_BACK_PCT,
+            NaviSettingsDefaults.SELF_CAR_LATERAL_PCT,
+        )
+        return PreviewPanPx(
+            dx = stageWidthPx * (anchor.xFraction - defaultAnchor.xFraction),
+            dy = stageHeightPx * (anchor.yFraction - defaultAnchor.yFraction),
+        )
+    }
+
+    /** プレビューグリッド上の1点の最終スクリーン座標（px）。 */
+    data class PreviewPointPx(val x: Float, val y: Float)
+
+    /**
+     * プレビュー固定サンプル上の1点（[baseXFraction],[baseYFraction]、ステージ寸法に対する比率
+     * 0..1、原点はステージ左上）を、向き設定に伴う回転（[rotationZDeg]、ステージ中心を軸に回す＝
+     * 設計「グリッドor経路の回転で向きの違いが分かる」）と、自車オフセットに伴う平行移動
+     * （[panDxPx]/[panDyPx]、[previewCameraPanPx]参照）を適用した最終スクリーン座標へ変換する
+     * （停留所ピンの固定配置の計算に使う純関数）。
+     */
+    fun previewProjectPoint(
+        stageWidthPx: Float,
+        stageHeightPx: Float,
+        baseXFraction: Float,
+        baseYFraction: Float,
+        rotationZDeg: Float,
+        panDxPx: Float,
+        panDyPx: Float,
+    ): PreviewPointPx {
+        val centerX = stageWidthPx * 0.5f
+        val centerY = stageHeightPx * 0.5f
+        val relX = stageWidthPx * baseXFraction - centerX
+        val relY = stageHeightPx * baseYFraction - centerY
+        val radians = rotationZDeg.orZeroIfNonFinite() * (Math.PI.toFloat() / 180f)
+        val cosR = cos(radians)
+        val sinR = sin(radians)
+        val rotatedX = relX * cosR - relY * sinR
+        val rotatedY = relX * sinR + relY * cosR
+        return PreviewPointPx(
+            x = centerX + rotatedX + panDxPx.orZeroIfNonFinite(),
+            y = centerY + rotatedY + panDyPx.orZeroIfNonFinite(),
         )
     }
 }

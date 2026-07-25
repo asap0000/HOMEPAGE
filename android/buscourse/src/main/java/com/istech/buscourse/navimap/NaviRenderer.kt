@@ -34,12 +34,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -104,10 +109,12 @@ fun NaviRenderer(
     val pkg by mapRepository.selectedPackage.collectAsState(initial = null)
 
     var routeData by remember { mutableStateOf<NaviRouteData?>(null) }
-    LaunchedEffect(source, pkg?.regionId) {
+    // ★Previewはpkgに一切依存しない（設計オーナー承認・2026-07-26）ため、キーに`pkg?.regionId`を含めない。
+    // 含めると「.iscmap選択の切り替えでプレビューが再構築される」という不要な依存が復活してしまう。
+    LaunchedEffect(source) {
         routeData = when (source) {
             is NaviRenderSource.Real -> loadRealRouteData(database, source.naviMapId)
-            NaviRenderSource.Preview -> buildPreviewRouteData(pkg)
+            NaviRenderSource.Preview -> buildPreviewRouteData()
         }
     }
 
@@ -204,33 +211,34 @@ private suspend fun loadRealRouteData(database: BusCourseDatabase, naviMapId: Lo
 private const val PREVIEW_ROUTE_LENGTH_M = 480.0
 private const val PREVIEW_SEGMENT_ID = 1L
 
-/** プレビュー用の合成データ（DB非依存）。選択中`.iscmap`のbbox中心があればそこを基準に、無ければ固定座標。 */
-private fun buildPreviewRouteData(pkg: MapDataPackageEntity?): NaviRouteData {
-    val centerLat = pkg?.let { (it.boundsSouth + it.boundsNorth) / 2.0 } ?: 35.681236
-    val centerLon = pkg?.let { (it.boundsWest + it.boundsEast) / 2.0 } ?: 139.767125
-    val latSpan = pkg?.let { (it.boundsNorth - it.boundsSouth).coerceAtLeast(0.001) } ?: 0.01
-    val lonSpan = pkg?.let { (it.boundsEast - it.boundsWest).coerceAtLeast(0.001) } ?: 0.01
+/**
+ * プレビューの停留所ダミー名（PII非搭載の固定文字列。実カード名は一切参照しない）。
+ * [ResolvedStopPoint.stopCardId]には実DB IDではなく、この配列を引くためだけの合成ID(1始まり)を振る。
+ */
+private val PREVIEW_STOP_DUMMY_NAMES = listOf("停留所1", "停留所2", "停留所3", "停留所4")
 
-    // ゆるやかにカーブする合成経路（実データ非依存、5点）。
-    val fractionOffsets = listOf(
-        0.00 to (0.0 to -0.16),
-        0.25 to (-0.05 to -0.08),
-        0.50 to (0.0 to 0.0),
-        0.75 to (0.05 to 0.09),
-        1.00 to (0.02 to 0.18),
-    )
-    val trackPoints = fractionOffsets.mapIndexed { seq, (fraction, offset) ->
-        val (dLat, dLon) = offset
+/**
+ * プレビュー用の合成データ（**DB・pkg完全非依存**＝オーナー承認2026-07-26）。
+ *
+ * 従来は選択中`.iscmap`のbbox中心・spanを基準にlat/lonを合成していたが、地図パッケージの入れ替えで
+ * 合成経路のスケール・見え方が変わってしまう構造上の欠陥があった（このタスクの動機そのもの）。
+ * これを断つため、Previewはlat/lon・[NaviCamera]・pkgのbbox情報を一切使わない。実際の画面配置
+ * （画面比率の固定サンプル）は[NaviRendererPreviewGridStage]側の`PREVIEW_ROUTE_POINTS_FRACTION`/
+ * `PREVIEW_STOP_POINTS_FRACTION`が担う。ここで組み立てる`segments`/`trackPointsBySegmentId`の
+ * lat/lon値はRealと同じ形の構造互換のためのプレースホルダで、描画には使われない
+ * （[NaviRendererPreviewGridStage]は`NaviCamera`/`NaviHeading`を呼ばない）。
+ */
+private fun buildPreviewRouteData(): NaviRouteData {
+    val trackPoints = listOf(
         NaviTrackPointEntity(
-            id = seq.toLong(),
-            segmentId = PREVIEW_SEGMENT_ID,
-            seq = seq,
-            chainageM = fraction * PREVIEW_ROUTE_LENGTH_M,
-            tRelS = 0.0,
-            lat = centerLat + dLat * latSpan,
-            lon = centerLon + dLon * lonSpan,
-        )
-    }
+            id = 0, segmentId = PREVIEW_SEGMENT_ID, seq = 0,
+            chainageM = 0.0, tRelS = 0.0, lat = 0.0, lon = 0.0,
+        ),
+        NaviTrackPointEntity(
+            id = 1, segmentId = PREVIEW_SEGMENT_ID, seq = 1,
+            chainageM = PREVIEW_ROUTE_LENGTH_M, tRelS = 0.0, lat = 0.0, lon = 0.0,
+        ),
+    )
     val segment = NaviSegmentEntity(
         id = PREVIEW_SEGMENT_ID,
         naviMapId = 0,
@@ -242,20 +250,18 @@ private fun buildPreviewRouteData(pkg: MapDataPackageEntity?): NaviRouteData {
     val segments = listOf(segment)
     val trackPointsBySegmentId = mapOf(PREVIEW_SEGMENT_ID to trackPoints)
 
-    val stopFractions = listOf(0.12, 0.38, 0.62, 0.88)
-    val stopPoints = stopFractions.mapIndexed { index, fraction ->
-        val chainage = fraction * PREVIEW_ROUTE_LENGTH_M
-        val position = NaviCamera.positionAtChainageM(segments, trackPointsBySegmentId, chainage)
-            ?: (centerLat to centerLon)
-        // stopCardIdは常にnull（DB非依存＝実カードを参照しない）。表示は常に番号のみになる。
-        ResolvedStopPoint(stopCardId = null, sequenceIndex = index + 1, lat = position.first, lon = position.second)
+    // 停留所名表示ON時に「ダミー名」を出すため、実カードIDではない合成ID(1..N)をローカルに振り、
+    // nameByStopCardIdへは固定文字列のみを詰める（DBを一切引かない＝PII非搭載）。
+    val stopPoints = PREVIEW_STOP_DUMMY_NAMES.indices.map { index ->
+        ResolvedStopPoint(stopCardId = (index + 1).toLong(), sequenceIndex = index + 1, lat = 0.0, lon = 0.0)
     }
+    val nameByStopCardId = PREVIEW_STOP_DUMMY_NAMES.mapIndexed { index, name -> (index + 1).toLong() to name }.toMap()
 
     return NaviRouteData(
         segments = segments,
         trackPointsBySegmentId = trackPointsBySegmentId,
         stopPoints = stopPoints,
-        nameByStopCardId = emptyMap(),
+        nameByStopCardId = nameByStopCardId,
         maxChainageM = PREVIEW_ROUTE_LENGTH_M.toFloat(),
         isPreview = true,
     )
@@ -298,7 +304,18 @@ private fun NaviRendererBody(
             val stageWidthPx = with(localDensity) { maxWidth.toPx() }
             val stageHeightPx = with(localDensity) { maxHeight.toPx() }
 
-            if (pkg == null) {
+            if (routeData.isPreview) {
+                // ★設定画面プレビューは常にグリッド平面（DB/pkgに一切依存しない・オーナー承認2026-07-26）。
+                // 実地図（.iscmap）が選択されていても、削除されていても見え方は変わらない。
+                NaviRendererPreviewGridStage(
+                    routeData = routeData,
+                    settings = settings,
+                    naviOrientation = naviOrientation,
+                    stageWidthPx = stageWidthPx,
+                    stageHeightPx = stageHeightPx,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (pkg == null) {
                 NaviRendererFallbackStage(
                     routeData = routeData,
                     chainageM = chainageM,
@@ -623,6 +640,182 @@ private fun NaviRendererFallbackStage(
             modifier = Modifier.fillMaxSize(),
         )
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 設定画面プレビュー専用のグリッド平面ステージ（DB/pkg完全非依存・オーナー承認2026-07-26）
+// ---------------------------------------------------------------------------------------------
+
+/** プレビューの固定合成経路（画面比率、x=0..1が左〜右・y=0..1が奥/上〜手前/下）。緩やかなS字。 */
+private val PREVIEW_ROUTE_POINTS_FRACTION = listOf(
+    0.50f to 0.92f,
+    0.40f to 0.72f,
+    0.50f to 0.50f,
+    0.62f to 0.30f,
+    0.55f to 0.10f,
+)
+
+/** プレビューの停留所の固定位置（画面比率）。[PREVIEW_ROUTE_POINTS_FRACTION]に沿わせた4点。 */
+private val PREVIEW_STOP_POINTS_FRACTION = listOf(
+    0.46f to 0.80f,
+    0.44f to 0.60f,
+    0.56f to 0.40f,
+    0.58f to 0.18f,
+)
+
+/** プレビュー専用の合成トゥルーヘディング（実データ非依存の固定値。向き設定の効果を見せるためだけの値）。 */
+private const val PREVIEW_HEADING_DEG = 20.0
+
+/** グリッドの列・行数（拡張前、ステージ全体に対する基準密度）。 */
+private const val PREVIEW_GRID_COLS = 10
+private const val PREVIEW_GRID_ROWS = 14
+
+/**
+ * 設定画面プレビュー専用のグリッド平面ステージ。[NaviRenderSource.Preview]は常にこのステージを使う
+ * （地図パッケージの有無に関係なく＝タスクの動機そのもの）。実`.iscmap`・DBを一切参照せず、
+ * 画面比率の固定サンプル（[PREVIEW_ROUTE_POINTS_FRACTION]/[PREVIEW_STOP_POINTS_FRACTION]）だけで
+ * 全設定項目（傾き0-90°・停留所名表示・自車位置・向き・昼夜）の効果を再現する。
+ *
+ * - **傾き**: MapLibreのnative tilt上限(60°)に縛られないため、0-90°全域を`graphicsLayer.rotationX`
+ *   一本で表現する（[NaviRenderMath.previewTiltRotationXDeg]）。75°超の空は[NaviRendererBody]側の
+ *   共通`naviSkyBrush`がすでに担っている。
+ * - **自車**: 常に[NaviRenderMath.selfCarAnchorFraction]の画面固定位置に描き、代わりにグリッド・経路線・
+ *   ピンを[NaviRenderMath.previewCameraPanPx]分だけ平行移動させる（実MapLibreのカメラpaddingと同じ
+ *   発想）。既定値のときは平行移動量ゼロ＝下記の固定サンプルがそのまま画面内に収まるレイアウト。
+ * - **向き**: ヘディングアップ/ノースアップの違いを、経路線・グリッド（フロア全体）の回転
+ *   （[floorRotationZDeg]）と自車アイコンの回転で表現する（実装は[NaviRendererMapStage]/
+ *   [NaviRendererFallbackStage]と同じ「カメラ方位＝ヘディングアップ時のみtrueHeading」の型）。
+ * - **昼夜**: グリッド地面・線の配色を`settings.theme`で直接切り替える（Compose標準の
+ *   `MaterialTheme.colorScheme`はシステムのライト/ダークに従ってしまい、アプリ内の昼夜設定と
+ *   独立してしまうため使わない）。
+ */
+@Composable
+private fun NaviRendererPreviewGridStage(
+    routeData: NaviRouteData,
+    settings: NaviSettingsEffective,
+    naviOrientation: NaviOrientation,
+    stageWidthPx: Float,
+    stageHeightPx: Float,
+    modifier: Modifier = Modifier,
+) {
+    val groundColor = previewGridGroundColor(settings.theme)
+    val lineColor = previewGridLineColor(settings.theme)
+    val routeLineColor = previewGridRouteLineColor(settings.theme)
+
+    val pan = remember(stageWidthPx, stageHeightPx, settings.selfCarFwdBackPct, settings.selfCarLateralPct) {
+        NaviRenderMath.previewCameraPanPx(
+            stageWidthPx, stageHeightPx, settings.selfCarFwdBackPct, settings.selfCarLateralPct,
+        )
+    }
+    // ヘディングアップ時のみ合成トゥルーヘディングをカメラ方位として使う（実ステージと同じ型）。
+    val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) PREVIEW_HEADING_DEG else 0.0
+    val floorRotationZDeg = (-cameraBearingDeg).toFloat()
+    val selfCarRotationDeg = (PREVIEW_HEADING_DEG - cameraBearingDeg).toFloat()
+
+    val floorTiltDeg = NaviRenderMath.previewTiltRotationXDeg(settings.tiltDeg.toFloat())
+
+    val pinScreenPositions = remember(stageWidthPx, stageHeightPx, floorRotationZDeg, pan, routeData.stopPoints) {
+        routeData.stopPoints.mapIndexedNotNull { index, stop ->
+            val base = PREVIEW_STOP_POINTS_FRACTION.getOrNull(index) ?: return@mapIndexedNotNull null
+            val projected = NaviRenderMath.previewProjectPoint(
+                stageWidthPx = stageWidthPx,
+                stageHeightPx = stageHeightPx,
+                baseXFraction = base.first,
+                baseYFraction = base.second,
+                rotationZDeg = floorRotationZDeg,
+                panDxPx = pan.dx,
+                panDyPx = pan.dy,
+            )
+            stop.sequenceIndex to Offset(projected.x, projected.y)
+        }.toMap()
+    }
+
+    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
+
+    // ★プレビュー領域の外へ描画を漏らさない（実機で「グリッドが設定カードの裏まで広がる」現象）。
+    // 傾きの台形変形（rotationX）と自車パンで内容がステージ外へ張り出すため、明示的にクリップする。
+    // 実地図ステージは MapView 自身が矩形に収まるので不要だが、Compose 描画のグリッドには必要。
+    Box(modifier.clipToBounds()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    // 傾き（0-90°全域）。実地図ステージと同じ「下端中央を軸にした台形化」（設計§2）。
+                    rotationX = floorTiltDeg
+                    transformOrigin = TransformOrigin(0.5f, 1f)
+                    cameraDistance = 32f * density
+                },
+        ) {
+            Canvas(Modifier.fillMaxSize().background(groundColor)) {
+                translate(left = pan.dx, top = pan.dy) {
+                    rotate(degrees = floorRotationZDeg, pivot = Offset(size.width / 2f, size.height / 2f)) {
+                        drawPreviewGridLines(lineColor)
+                        drawPreviewRouteLine(routeLineColor)
+                    }
+                }
+            }
+
+            // billboardピン＋自車は台形変形の内側（実地図ステージと同じ理由・上のKDoc参照）。
+            NaviPinAndSelfCarOverlay(
+                stops = routeData.stopPoints,
+                pinScreenPositions = pinScreenPositions,
+                nameByStopCardId = routeData.nameByStopCardId,
+                stopNameVisible = settings.stopNameVisible,
+                selfCarAnchorPx = Offset(
+                    stageWidthPx * selfCarAnchor.xFraction,
+                    stageHeightPx * selfCarAnchor.yFraction,
+                ),
+                selfCarRotationDeg = selfCarRotationDeg,
+                theme = settings.theme,
+                counterRotationXDeg = floorTiltDeg,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+/**
+ * グリッド地面の罫線を描く。傾き分の余白確保のため、ステージ範囲より広めに（縦横それぞれの実寸1つ分
+ * ずつ左右/上下へ拡張）描き、[NaviRendererPreviewGridStage]の平行移動（`pan`）でステージ外へ出ても
+ * 端が透けて見えないようにする。
+ */
+private fun DrawScope.drawPreviewGridLines(color: Color) {
+    val stepX = size.width / PREVIEW_GRID_COLS
+    val stepY = size.height / PREVIEW_GRID_ROWS
+    for (i in -PREVIEW_GRID_COLS..(PREVIEW_GRID_COLS * 2)) {
+        val x = i * stepX
+        drawLine(color, Offset(x, -size.height), Offset(x, size.height * 2f), strokeWidth = 1.5f)
+    }
+    for (j in -PREVIEW_GRID_ROWS..(PREVIEW_GRID_ROWS * 2)) {
+        val y = j * stepY
+        drawLine(color, Offset(-size.width, y), Offset(size.width * 2f, y), strokeWidth = 1.5f)
+    }
+}
+
+/** 合成経路線（[PREVIEW_ROUTE_POINTS_FRACTION]）をCanvasに描く。 */
+private fun DrawScope.drawPreviewRouteLine(color: Color) {
+    val points = PREVIEW_ROUTE_POINTS_FRACTION.map { (fx, fy) -> Offset(size.width * fx, size.height * fy) }
+    for (i in 0 until points.size - 1) {
+        drawLine(color, points[i], points[i + 1], strokeWidth = 6f, cap = StrokeCap.Round)
+    }
+}
+
+/** グリッド地面色（昼夜設定に直接従う。設計上の理由は[NaviRendererPreviewGridStage]KDoc参照）。 */
+private fun previewGridGroundColor(theme: NaviTheme): Color = when (theme) {
+    NaviTheme.DAY -> Color(0xFFE7ECF5)
+    NaviTheme.NIGHT -> Color(0xFF14192A)
+}
+
+/** グリッド罫線色（昼夜設定に直接従う）。 */
+private fun previewGridLineColor(theme: NaviTheme): Color = when (theme) {
+    NaviTheme.DAY -> Color(0xFFB9C4D6)
+    NaviTheme.NIGHT -> Color(0xFF3A4568)
+}
+
+/** 合成経路線色（ブランド青を基調に、昼夜でコントラストを調整）。 */
+private fun previewGridRouteLineColor(theme: NaviTheme): Color = when (theme) {
+    NaviTheme.DAY -> Color(0xFF3366FF)
+    NaviTheme.NIGHT -> Color(0xFF6E8CFF)
 }
 
 // ---------------------------------------------------------------------------------------------
