@@ -497,25 +497,33 @@ private fun NaviRendererMapStage(
                 },
         ) {
             AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView })
+
+            // ★billboardピン＋自車は台形変形の**内側**に置く（F② M1 の修正・2026-07-25）。
+            // 外側に置くと `toScreenLocation` の素のスクリーン座標のままになり、60-90°で
+            // 台形変形された地図と**アンカーがズレる**（ピボットから遠い停留所ほど乖離が拡大し、
+            // 「ピンが地図上の正しい場所を指さない」）。設計§2-1が求めるのは「未変形座標に同じ変換を
+            // 適用したアンカー位置」＝それを射影計算で再現する代わりに、**同じ graphicsLayer の内側に
+            // 入れて親の変換をそのまま受けさせ**、ピン自身に**逆回転**を掛けて絵だけ立てる
+            // （P1 POCのHTMLモック `.stop { rotateX(calc(-1 * --rot)) }` と同一原理。
+            // Compose/RenderNode が透視投影を正確に行うので自前の射影計算が不要になる）。
+            val trueHeadingDeg = remember(routeData, chainageM) {
+                NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
+            } ?: 0.0
+            val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
+            val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
+
+            NaviPinAndSelfCarOverlay(
+                stops = routeData.stopPoints,
+                pinScreenPositions = pinScreenPositions,
+                nameByStopCardId = routeData.nameByStopCardId,
+                stopNameVisible = settings.stopNameVisible,
+                selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
+                selfCarRotationDeg = selfCarRotationDeg,
+                theme = settings.theme,
+                counterRotationXDeg = extraRotationXDeg,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
-
-        // billboardピン＋自車：graphicsLayerの**外側**＝常に垂直（設計§2-1「(b)全域Compose投影統一」）。
-        val trueHeadingDeg = remember(routeData, chainageM) {
-            NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
-        } ?: 0.0
-        val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
-        val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
-
-        NaviPinAndSelfCarOverlay(
-            stops = routeData.stopPoints,
-            pinScreenPositions = pinScreenPositions,
-            nameByStopCardId = routeData.nameByStopCardId,
-            stopNameVisible = settings.stopNameVisible,
-            selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
-            selfCarRotationDeg = selfCarRotationDeg,
-            theme = settings.theme,
-            modifier = Modifier.fillMaxSize(),
-        )
     }
 }
 
@@ -571,6 +579,8 @@ private fun NaviRendererFallbackStage(
             selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
             selfCarRotationDeg = (trueHeadingDeg - cameraBearingDeg).toFloat(),
             theme = settings.theme,
+            // フォールバックは台形変形を掛けていない（グリッド地面もピンも素の平面）ため逆回転は不要。
+            counterRotationXDeg = 0f,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -592,6 +602,11 @@ private fun NaviPinAndSelfCarOverlay(
     selfCarAnchorPx: Offset,
     selfCarRotationDeg: Float,
     theme: NaviTheme,
+    /**
+     * 親（地図）に掛かっている台形変形 `rotationX` の角度。各マーカーに**その逆**を掛けて絵を立てる
+     * ＝billboard（F② M1 の修正・2026-07-25）。0f なら実質無変換。
+     */
+    counterRotationXDeg: Float,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier) {
@@ -606,16 +621,38 @@ private fun NaviPinAndSelfCarOverlay(
             NaviBillboardPin(
                 label = label,
                 theme = theme,
-                modifier = Modifier.offset { pinTopLeftOffset(point) },
+                modifier = Modifier
+                    .offset { pinTopLeftOffset(point) }
+                    .billboardCounterRotation(counterRotationXDeg),
             )
         }
         NaviSelfCarMarker(
             rotationDeg = selfCarRotationDeg,
             theme = theme,
-            modifier = Modifier.offset { selfCarTopLeftOffset(selfCarAnchorPx) },
+            modifier = Modifier
+                .offset { selfCarTopLeftOffset(selfCarAnchorPx) }
+                .billboardCounterRotation(counterRotationXDeg),
         )
     }
 }
+
+/**
+ * 親の台形変形を打ち消してマーカーを垂直に立てる（billboard）。
+ *
+ * アンカー（足元）は親の変形に従って地図と一緒に動き、**絵だけが立つ**。回転軸はマーカー下端中央
+ * ＝地図に接している足元なので、立てても接地点がズレない。遠くのマーカーが小さく描かれるのは
+ * 透視投影として正しい挙動（P1 POCモックと同じ見え方）。
+ */
+private fun Modifier.billboardCounterRotation(counterRotationXDeg: Float): Modifier =
+    if (counterRotationXDeg == 0f) {
+        this
+    } else {
+        this.graphicsLayer {
+            rotationX = -counterRotationXDeg
+            transformOrigin = TransformOrigin(0.5f, 1f)
+            cameraDistance = 32f * density
+        }
+    }
 
 /** ピンの中心x・下端yがscreen座標[point]に一致するような左上オフセット（bottom anchor）。 */
 private fun Density.pinTopLeftOffset(point: Offset): IntOffset {

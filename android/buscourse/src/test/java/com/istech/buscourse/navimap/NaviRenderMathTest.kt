@@ -155,4 +155,24 @@ class NaviRenderMathTest {
         assertThat(padding.left).isEqualTo(0)
         assertThat(padding.right).isEqualTo(0)
     }
+
+    // --- 非有限入力のガード（F② m1 の手当て・2026-07-25） ---
+    // Kotlinの coerceIn/coerceAtLeast は NaN を素通しするため、素の実装だと NaN が
+    // graphicsLayer.rotationX まで到達しうる。0 へ倒れることを実射で担保する。
+
+    @Test fun tiltDistribution_nonFiniteFallsBackToZero() {
+        for (bad in listOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY)) {
+            assertThat(NaviRenderMath.nativeTiltDeg(bad)).isEqualTo(0f)
+            assertThat(NaviRenderMath.extraRotationXDeg(bad)).isEqualTo(0f)
+            assertThat(NaviRenderMath.skyAlpha(bad)).isEqualTo(0f)
+        }
+    }
+
+    @Test fun tiltDistribution_finiteOutOfRangeStillClamps() {
+        // 非有限ガードを入れても、通常の範囲外クランプ挙動は変わらないこと。
+        assertThat(NaviRenderMath.nativeTiltDeg(-10f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.nativeTiltDeg(120f)).isEqualTo(NaviRenderMath.NATIVE_TILT_MAX_DEG)
+        assertThat(NaviRenderMath.extraRotationXDeg(-10f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.skyAlpha(120f)).isEqualTo(1f)
+    }
 }

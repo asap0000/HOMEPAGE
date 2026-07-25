@@ -20,20 +20,32 @@ object NaviRenderMath {
      * 0-90°の[tiltDeg]から、MapLibre native tiltへ渡す分（0-60にクランプ）を切り出す
      * （設計 §2「0-60°: MapLibre native tilt」）。
      */
-    fun nativeTiltDeg(tiltDeg: Float): Float = tiltDeg.coerceIn(0f, NATIVE_TILT_MAX_DEG)
+    fun nativeTiltDeg(tiltDeg: Float): Float = tiltDeg.orZeroIfNonFinite().coerceIn(0f, NATIVE_TILT_MAX_DEG)
 
     /**
      * 60°を超えた分だけを`graphicsLayer.rotationX`への追加回転として切り出す（下限0、設計 §2
      * 「60-90°: graphicsLayer.rotationXで地図を倒す」）。
      */
-    fun extraRotationXDeg(tiltDeg: Float): Float = (tiltDeg - NATIVE_TILT_MAX_DEG).coerceAtLeast(0f)
+    fun extraRotationXDeg(tiltDeg: Float): Float =
+        (tiltDeg.orZeroIfNonFinite() - NATIVE_TILT_MAX_DEG).coerceAtLeast(0f)
 
     /**
      * 75→90°で0→1に立ち上がる空の不透明度（設計 §2「75°超で空」・§3の空グラデーション用）。
      * 75°以下は0（不可視）、90°以上は1（全開）。
      */
     fun skyAlpha(tiltDeg: Float): Float =
-        ((tiltDeg - SKY_REVEAL_START_DEG) / (SKY_REVEAL_END_DEG - SKY_REVEAL_START_DEG)).coerceIn(0f, 1f)
+        ((tiltDeg.orZeroIfNonFinite() - SKY_REVEAL_START_DEG) / (SKY_REVEAL_END_DEG - SKY_REVEAL_START_DEG))
+            .coerceIn(0f, 1f)
+
+    /**
+     * 非有限（NaN/±Infinity）を0へ倒す（F② m1 の手当て・2026-07-25）。
+     *
+     * Kotlinの`coerceIn`/`coerceAtLeast`は**NaNを素通しする**（NaNとの比較が常にfalseのため）。
+     * 現状は`NaviDisplayResolver`側のクランプで非有限は到達しないが、本objectは
+     * 「Android非依存で単体テスト可能な純計算」として独立に使われうるため、自身で防御する
+     * （既存`NaviCamera.cameraStateAtChainageM`のNaN対策と同じ姿勢に揃える）。
+     */
+    private fun Float.orZeroIfNonFinite(): Float = if (isFinite()) this else 0f
 
     /** 縦映像9:16オーバーレイのピクセルサイズ。 */
     data class VideoOverlaySizePx(val widthPx: Float, val heightPx: Float)
