@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,6 +36,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun TopScreen(
     onOpenDesign: () -> Unit,
+    onOpenNavi: () -> Unit,
+    onOpenNaviSettings: () -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("BusCourse") }) },
@@ -53,18 +56,22 @@ fun TopScreen(
                 enabled = true,
                 onClick = onOpenDesign,
             )
+            // フェーズ4（映像ナビ本画面 P4）到達により 2026-07-25 に解禁（旧: グレーアウト）。
             TopMenuCard(
                 title = "ナビ",
-                description = "確定済みコースの案内表示（フェーズ4で提供予定）",
-                icon = {
-                    Icon(
-                        Icons.Filled.Navigation,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    )
-                },
-                enabled = false,
-                onClick = {},
+                description = "確定済みコースを映像付きで案内します（操作は距離スライダーのみ）",
+                icon = { Icon(Icons.Filled.Navigation, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                enabled = true,
+                onClick = onOpenNavi,
+            )
+            // ナビの見え方（傾き・映像量・自車位置・向き・昼夜・停留所名）はここで決める。
+            // 走行中はいじらない＝本画面はスライダーのみ、という設計（istech 設計ドラフト §1・§7-1）。
+            TopMenuCard(
+                title = "ナビ設定",
+                description = "ナビ画面の見え方（傾き・映像・自車位置・昼夜など）を調整します",
+                icon = { Icon(Icons.Filled.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                enabled = true,
+                onClick = onOpenNaviSettings,
             )
         }
     }
