@@ -388,6 +388,9 @@ private fun NaviRendererMapStage(
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var pinScreenPositions by remember { mutableStateOf<Map<Int, Offset>>(emptyMap()) }
+    // ★スタイル読み込み完了フラグ（増分P4b-3 バグ1修正）。理由は下のLaunchedEffect(map, pkg.regionId)の
+    // コメント参照。カメラ（tilt含む）を「スタイル読み込み完了後にもう一度」確実に当て直すためのトリガー。
+    var styleLoaded by remember { mutableStateOf(false) }
 
     val mapView = remember { MapView(context).apply { onCreate(null) } }
 
@@ -440,6 +443,19 @@ private fun NaviRendererMapStage(
             // Style.OnStyleLoadedコールバックはsuspendでないため、別途起動したscopeでDB非依存の
             // suspend関数を呼ぶ（[com.istech.buscourse.ui.NaviScreen]と同じ流儀）。
             scope.launch { overlay.showRouteMultiLine(trackLines, NAVI_ROUTE_LINE_COLOR_HEX) }
+
+            // ★バグ1修正（増分P4b-3）: 下のカメラ適用LaunchedEffectは`map`が出来た直後、
+            // つまりこのスタイル読み込み（非同期コールバック）が完了する**前**に一度走る
+            // （setStyle自体は即座に戻り、実際のスタイル読み込みは後続フレームで完了するため。
+            // Compose上、同一コンポジションで新規に起動したLaunchedEffectは宣言順に同期区間を
+            // 実行し切ってから次のフレームへ進むので、`setLatLngBoundsForCameraTarget`/
+            // `setMaxZoomPreference`はこの非同期コールバック内＝カメラ適用より後に実行される）。
+            // `setLatLngBoundsForCameraTarget`等がカメラのtilt/pitchに影響しうる場合、
+            // 先に当てたtiltが後から静かに失われうる（実機で「tiltDeg=45でも地図が平面のまま」＝
+            // 傾きだけが効かない症状と整合）。ここでstyleLoadedを立てて、
+            // カメラ適用LaunchedEffectをスタイル読み込み完了後にもう一度走らせ、
+            // 現在のtiltを含むカメラ状態を最後に勝たせる（同じ値の再適用は無害・冪等）。
+            styleLoaded = true
         }
     }
 
@@ -466,7 +482,10 @@ private fun NaviRendererMapStage(
         }
     }
 
-    LaunchedEffect(map, cameraState, cameraPadding) {
+    // ★`styleLoaded`をキーに含める（バグ1修正・増分P4b-3）: スタイル読み込み完了後にもう一度
+    // このブロックを走らせ、`setLatLngBoundsForCameraTarget`/`setMaxZoomPreference`より後にtilt込みの
+    // カメラを最終適用として当て直す（値が同じなら単なる再適用で無害）。
+    LaunchedEffect(map, cameraState, cameraPadding, styleLoaded) {
         if (map == null) return@LaunchedEffect
         map.setPadding(cameraPadding.left, cameraPadding.top, cameraPadding.right, cameraPadding.bottom)
         cameraState?.let { map.cameraPosition = it.toCameraPosition() }
