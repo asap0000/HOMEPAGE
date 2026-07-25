@@ -39,12 +39,11 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -646,45 +645,71 @@ private fun NaviRendererFallbackStage(
 // 設定画面プレビュー専用のグリッド平面ステージ（DB/pkg完全非依存・オーナー承認2026-07-26）
 // ---------------------------------------------------------------------------------------------
 
-/** プレビューの固定合成経路（画面比率、x=0..1が左〜右・y=0..1が奥/上〜手前/下）。緩やかなS字。 */
-private val PREVIEW_ROUTE_POINTS_FRACTION = listOf(
-    0.50f to 0.92f,
-    0.40f to 0.72f,
-    0.50f to 0.50f,
-    0.62f to 0.30f,
-    0.55f to 0.10f,
+/**
+ * プレビューの固定合成経路（**世界座標**。原点＝自車接地点、単位は[NaviRendererPreviewGridStage]の
+ * `worldUnitPx`＝ステージ高さの倍数。lateral: 負=左／正=右、depth: 0=自車直近／大きいほど奥）。
+ * 緩やかなS字で、奥（消失点付近）まで十分伸ばす（合格条件1「有限の板の端が見えてはいけない」）。
+ */
+private val PREVIEW_ROUTE_POINTS_WORLD = listOf(
+    0.00f to 0.05f,
+    -0.10f to 0.40f,
+    -0.16f to 0.95f,
+    0.10f to 1.60f,
+    0.18f to 2.40f,
+    0.10f to 3.40f,
 )
 
-/** プレビューの停留所の固定位置（画面比率）。[PREVIEW_ROUTE_POINTS_FRACTION]に沿わせた4点。 */
-private val PREVIEW_STOP_POINTS_FRACTION = listOf(
-    0.46f to 0.80f,
-    0.44f to 0.60f,
-    0.56f to 0.40f,
-    0.58f to 0.18f,
+/** プレビューの停留所の固定位置（世界座標）。[PREVIEW_ROUTE_POINTS_WORLD]に沿わせた4点
+ * （停留所1が最も手前＝depth小、停留所4が最も奥＝depth大）。互いに間隔を空ける（合格条件6）。 */
+private val PREVIEW_STOP_POINTS_WORLD = listOf(
+    -0.08f to 0.40f,
+    -0.14f to 0.95f,
+    0.12f to 1.60f,
+    0.16f to 2.40f,
 )
 
 /** プレビュー専用の合成トゥルーヘディング（実データ非依存の固定値。向き設定の効果を見せるためだけの値）。 */
 private const val PREVIEW_HEADING_DEG = 20.0
 
-/** グリッドの列・行数（拡張前、ステージ全体に対する基準密度）。 */
-private const val PREVIEW_GRID_COLS = 10
-private const val PREVIEW_GRID_ROWS = 14
+/** 地面グリッドの1マスの世界サイズ（[worldUnitPx]に対する比率）。 */
+private const val PREVIEW_GRID_CELL_FRACTION = 0.10f
+
+/** グリッドの奥行き方向のマス数（これを超えた先は描かない＝フェードで見えなくする）。 */
+private const val PREVIEW_GRID_DEPTH_CELLS = 46
+
+/**
+ * グリッドの左右方向の半幅マス数（片側）。奥で透視収束しても画面四隅まで地面が届くよう、
+ * 十分大きめに取る（合格条件1「有限の板の端が見えてはいけない」＝地面の"横"の端も含む）。
+ */
+private const val PREVIEW_GRID_HALF_WIDTH_CELLS = 70
 
 /**
  * 設定画面プレビュー専用のグリッド平面ステージ。[NaviRenderSource.Preview]は常にこのステージを使う
  * （地図パッケージの有無に関係なく＝タスクの動機そのもの）。実`.iscmap`・DBを一切参照せず、
- * 画面比率の固定サンプル（[PREVIEW_ROUTE_POINTS_FRACTION]/[PREVIEW_STOP_POINTS_FRACTION]）だけで
+ * 世界座標の固定サンプル（[PREVIEW_ROUTE_POINTS_WORLD]/[PREVIEW_STOP_POINTS_WORLD]）だけで
  * 全設定項目（傾き0-90°・停留所名表示・自車位置・向き・昼夜）の効果を再現する。
  *
- * - **傾き**: MapLibreのnative tilt上限(60°)に縛られないため、0-90°全域を`graphicsLayer.rotationX`
- *   一本で表現する（[NaviRenderMath.previewTiltRotationXDeg]）。75°超の空は[NaviRendererBody]側の
- *   共通`naviSkyBrush`がすでに担っている。
- * - **自車**: 常に[NaviRenderMath.selfCarAnchorFraction]の画面固定位置に描き、代わりにグリッド・経路線・
- *   ピンを[NaviRenderMath.previewCameraPanPx]分だけ平行移動させる（実MapLibreのカメラpaddingと同じ
- *   発想）。既定値のときは平行移動量ゼロ＝下記の固定サンプルがそのまま画面内に収まるレイアウト。
- * - **向き**: ヘディングアップ/ノースアップの違いを、経路線・グリッド（フロア全体）の回転
- *   （[floorRotationZDeg]）と自車アイコンの回転で表現する（実装は[NaviRendererMapStage]/
- *   [NaviRendererFallbackStage]と同じ「カメラ方位＝ヘディングアップ時のみtrueHeading」の型）。
+ * **方式転換（istech 2026-07-26 差し戻し増分）**: 旧実装は地面を`graphicsLayer.rotationX`で
+ * 台形化し、その**子**にピンを置いて逆回転で立てていた（billboard）。Composeの`graphicsLayer`は
+ * CSSの`preserve-3d`と違い子の変換を親が正しく打ち消さないため、この方式は停留所名が歪む
+ * （実機で確認済みのバグ）。そこで「地図平面と共有するのは自車の接地点1点だけ」という方式に
+ * 転換する: 地面（グリッド・経路線）は[NaviRenderMath.previewGroundProject]による自前の
+ * rotateX＋透視投影でCanvasに直接描き、ピン・自車マーカーは**一切変形を受けないComposeレイヤ**
+ * として、同じ投影関数で求めたスクリーン座標に置くだけにする。これにより:
+ * - 地面の格子は奥へ行くほど自然に詰まって消失点へ収束する（合格条件3）。
+ * - ピン・自車は傾きに関係なく常に正面を向く（billboard、合格条件4）。90°でも消えない（合格条件5）。
+ *
+ * - **傾き**: `tiltDeg`（0-90°全域、MapLibreのnative tilt上限60°に縛られない）を
+ *   [NaviRenderMath.previewGroundProject]のθへそのまま渡す。75°超の空は[NaviRendererBody]側の
+ *   共通`naviSkyBrush`がすでに担っている（本ステージの地面自体も消失点付近でフェードし、
+ *   その空と自然に溶け合う＝合格条件1）。
+ * - **自車**: 常に[NaviRenderMath.selfCarAnchorFraction]の画面固定位置＝地面座標系の原点
+ *   （depth=0, lateral=0）に置く。停留所ピン・グリッド・経路線はこの原点からの相対座標として
+ *   投影されるため、自車位置設定を変えると周囲が自然に動いて見える。
+ * - **向き**: ヘディングアップ/ノースアップの違いを、地面座標のヨー回転（[yawDeg]、
+ *   [NaviRenderMath.previewGroundRotateYaw]）と自車アイコン自身の回転で表現する（実装は
+ *   [NaviRendererMapStage]/[NaviRendererFallbackStage]と同じ「カメラ方位＝ヘディングアップ時のみ
+ *   trueHeading」の型）。
  * - **昼夜**: グリッド地面・線の配色を`settings.theme`で直接切り替える（Compose標準の
  *   `MaterialTheme.colorScheme`はシステムのライト/ダークに従ってしまい、アプリ内の昼夜設定と
  *   独立してしまうため使わない）。
@@ -702,99 +727,191 @@ private fun NaviRendererPreviewGridStage(
     val lineColor = previewGridLineColor(settings.theme)
     val routeLineColor = previewGridRouteLineColor(settings.theme)
 
-    val pan = remember(stageWidthPx, stageHeightPx, settings.selfCarFwdBackPct, settings.selfCarLateralPct) {
-        NaviRenderMath.previewCameraPanPx(
-            stageWidthPx, stageHeightPx, settings.selfCarFwdBackPct, settings.selfCarLateralPct,
-        )
-    }
     // ヘディングアップ時のみ合成トゥルーヘディングをカメラ方位として使う（実ステージと同じ型）。
     val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) PREVIEW_HEADING_DEG else 0.0
-    val floorRotationZDeg = (-cameraBearingDeg).toFloat()
+    val yawDeg = (-cameraBearingDeg).toFloat()
     val selfCarRotationDeg = (PREVIEW_HEADING_DEG - cameraBearingDeg).toFloat()
 
-    val floorTiltDeg = NaviRenderMath.previewTiltRotationXDeg(settings.tiltDeg.toFloat())
+    val tiltDeg = NaviRenderMath.previewTiltRotationXDeg(settings.tiltDeg.toFloat())
 
-    val pinScreenPositions = remember(stageWidthPx, stageHeightPx, floorRotationZDeg, pan, routeData.stopPoints) {
+    // 世界単位＝ステージ高さに比例させる（デバイスサイズが変わっても見え方の縮尺感が揃う）。
+    val worldUnitPx = stageHeightPx
+
+    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
+    val originPx = remember(stageWidthPx, stageHeightPx, selfCarAnchor) {
+        Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
+    }
+
+    /** 世界座標（lateralFraction, depthFraction。[worldUnitPx]に対する比率）→スクリーン座標＋縮小率。 */
+    fun projectWorld(lateralFraction: Float, depthFraction: Float): NaviRenderMath.PreviewGroundPointPx {
+        val yawed = NaviRenderMath.previewGroundRotateYaw(
+            lateralFraction * worldUnitPx, depthFraction * worldUnitPx, yawDeg,
+        )
+        return NaviRenderMath.previewGroundProject(yawed.x, yawed.y, tiltDeg)
+    }
+
+    val pinPlacements = remember(worldUnitPx, yawDeg, tiltDeg, originPx, routeData.stopPoints) {
         routeData.stopPoints.mapIndexedNotNull { index, stop ->
-            val base = PREVIEW_STOP_POINTS_FRACTION.getOrNull(index) ?: return@mapIndexedNotNull null
-            val projected = NaviRenderMath.previewProjectPoint(
-                stageWidthPx = stageWidthPx,
-                stageHeightPx = stageHeightPx,
-                baseXFraction = base.first,
-                baseYFraction = base.second,
-                rotationZDeg = floorRotationZDeg,
-                panDxPx = pan.dx,
-                panDyPx = pan.dy,
+            val base = PREVIEW_STOP_POINTS_WORLD.getOrNull(index) ?: return@mapIndexedNotNull null
+            val projected = projectWorld(base.first, base.second)
+            stop.sequenceIndex to PinPlacement(
+                point = Offset(originPx.x + projected.x, originPx.y + projected.y),
+                scale = projected.scale,
             )
-            stop.sequenceIndex to Offset(projected.x, projected.y)
         }.toMap()
     }
 
-    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
-
     // ★プレビュー領域の外へ描画を漏らさない（実機で「グリッドが設定カードの裏まで広がる」現象）。
-    // 傾きの台形変形（rotationX）と自車パンで内容がステージ外へ張り出すため、明示的にクリップする。
-    // 実地図ステージは MapView 自身が矩形に収まるので不要だが、Compose 描画のグリッドには必要。
     Box(modifier.clipToBounds()) {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    // 傾き（0-90°全域）。実地図ステージと同じ「下端中央を軸にした台形化」（設計§2）。
-                    rotationX = floorTiltDeg
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    cameraDistance = 32f * density
-                },
-        ) {
-            Canvas(Modifier.fillMaxSize().background(groundColor)) {
-                translate(left = pan.dx, top = pan.dy) {
-                    rotate(degrees = floorRotationZDeg, pivot = Offset(size.width / 2f, size.height / 2f)) {
-                        drawPreviewGridLines(lineColor)
-                        drawPreviewRouteLine(routeLineColor)
-                    }
-                }
-            }
-
-            // billboardピン＋自車は台形変形の内側（実地図ステージと同じ理由・上のKDoc参照）。
-            NaviPinAndSelfCarOverlay(
-                stops = routeData.stopPoints,
-                pinScreenPositions = pinScreenPositions,
-                nameByStopCardId = routeData.nameByStopCardId,
-                stopNameVisible = settings.stopNameVisible,
-                selfCarAnchorPx = Offset(
-                    stageWidthPx * selfCarAnchor.xFraction,
-                    stageHeightPx * selfCarAnchor.yFraction,
-                ),
-                selfCarRotationDeg = selfCarRotationDeg,
-                theme = settings.theme,
-                counterRotationXDeg = floorTiltDeg,
-                modifier = Modifier.fillMaxSize(),
+        Canvas(Modifier.fillMaxSize()) {
+            drawPreviewGroundGrid(
+                groundColor = groundColor,
+                lineColor = lineColor,
+                originPx = originPx,
+                yawDeg = yawDeg,
+                tiltDeg = tiltDeg,
+                worldUnitPx = worldUnitPx,
             )
+            drawPreviewRouteLine(routeLineColor, originPx, ::projectWorld)
+        }
+
+        // billboardピン＋自車は変形を一切受けないComposeレイヤ（上のKDoc参照）。角度に関係なく
+        // 常に正面を向き、90°でも消えない（合格条件4・5）。
+        NaviPinAndSelfCarOverlay(
+            stops = routeData.stopPoints,
+            pinScreenPositions = pinPlacements.mapValues { it.value.point },
+            nameByStopCardId = routeData.nameByStopCardId,
+            stopNameVisible = settings.stopNameVisible,
+            selfCarAnchorPx = originPx,
+            selfCarRotationDeg = selfCarRotationDeg,
+            theme = settings.theme,
+            // 地面の変形はもうグラフィックレイヤーではなく自前の射影計算なので、打ち消す逆回転は不要。
+            counterRotationXDeg = 0f,
+            pinScale = { sequenceIndex -> pinPlacements[sequenceIndex]?.scale?.coerceIn(0.45f, 1f) ?: 1f },
+            // 自車は常にdepth=0（原点）に固定されるため、遠近縮小の対象にならない（scale=1固定）。
+            selfCarScale = 1f,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** [NaviRendererPreviewGridStage]の停留所ピン配置（スクリーン座標＋距離に応じた縮小率）。 */
+private data class PinPlacement(val point: Offset, val scale: Float)
+
+/**
+ * グリッド地面を1枚だけ描く（合格条件2）。[NaviRenderMath.previewGroundProject]で各格子線を
+ * 直接スクリーン座標へ投影するため、傾きが増すほど格子が自然に詰まって消失点へ収束し（合格条件3）、
+ * 奥は透明度を落として空と溶け合わせる（合格条件1・「有限の板の端が見えてはいけない」）。
+ * 地面の塗り自体も同じ投影で作った台形（ファン）1枚をグラデーション塗りするだけで、
+ * 「地面矩形＋外側の背景グリッド」のような二重構造を作らない。
+ */
+private fun DrawScope.drawPreviewGroundGrid(
+    groundColor: Color,
+    lineColor: Color,
+    originPx: Offset,
+    yawDeg: Float,
+    tiltDeg: Float,
+    worldUnitPx: Float,
+) {
+    val cellPx = worldUnitPx * PREVIEW_GRID_CELL_FRACTION
+    val halfWidthCells = PREVIEW_GRID_HALF_WIDTH_CELLS
+    val depthCells = PREVIEW_GRID_DEPTH_CELLS
+
+    fun toScreen(lateralPx: Float, depthPx: Float): Offset {
+        val yawed = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg)
+        val projected = NaviRenderMath.previewGroundProject(yawed.x, yawed.y, tiltDeg)
+        return Offset(originPx.x + projected.x, originPx.y + projected.y)
+    }
+
+    // 奥ほど透明にするフェード係数（ease-out。奥行きカットオフの手前で滑らかに0へ近づき、
+    // 有限の格子の「端」が硬い境界として見えないようにする＝合格条件1）。
+    fun fadeAlpha(depthIndex: Int): Float {
+        val t = (depthIndex.toFloat() / depthCells).coerceIn(0f, 1f)
+        val eased = (1f - t)
+        return eased * eased
+    }
+
+    // ★地面の塗り＝1枚のファン（扇形）ポリゴンをグラデーションで塗るだけ（二重構造を作らない）。
+    // 左右の外周を「手前→奥→手前」の順にたどって1つの閉じたPathにする。
+    val fillPath = Path()
+    val farDepthPx = depthCells * cellPx
+    val halfWidthPx = halfWidthCells * cellPx
+    val edgeSamples = 24
+    for (i in 0..edgeSamples) {
+        val depth = farDepthPx * (i.toFloat() / edgeSamples)
+        val p = toScreen(-halfWidthPx, depth)
+        if (i == 0) fillPath.moveTo(p.x, p.y) else fillPath.lineTo(p.x, p.y)
+    }
+    for (i in edgeSamples downTo 0) {
+        val depth = farDepthPx * (i.toFloat() / edgeSamples)
+        val p = toScreen(halfWidthPx, depth)
+        fillPath.lineTo(p.x, p.y)
+    }
+    fillPath.close()
+
+    val farCenter = toScreen(0f, farDepthPx)
+    // ★傾き90°付近ではyPrime(=depth*cos θ)が0へ潰れ、farCenter.yがoriginPx.yと一致しうる
+    // （地面が水平線へ収束する合格条件5どおりの挙動）。startY==endYだとグラデーション生成が
+    // 不正になりうるため、最低1pxの差を強制してクラッシュを防ぐ（非有限もここで弾く）。
+    val gradientEndY = if (farCenter.y.isFinite() && kotlin.math.abs(farCenter.y - originPx.y) >= 1f) {
+        farCenter.y
+    } else {
+        originPx.y - 1f
+    }
+    drawPath(
+        path = fillPath,
+        brush = Brush.verticalGradient(
+            colors = listOf(groundColor, groundColor.copy(alpha = 0f)),
+            startY = originPx.y,
+            endY = gradientEndY,
+        ),
+    )
+
+    // 縦線（lateral方向の各列）: 奥行きに沿ってポリラインで描く（透視で曲がって収束する）。
+    for (col in -halfWidthCells..halfWidthCells) {
+        val lateralPx = col * cellPx
+        var prev: Offset? = null
+        for (i in 0..depthCells) {
+            val depthPx = i * cellPx
+            val alpha = fadeAlpha(i)
+            val screen = toScreen(lateralPx, depthPx)
+            val p = prev
+            if (p != null && alpha > 0.02f) {
+                drawLine(lineColor.copy(alpha = lineColor.alpha * alpha), p, screen, strokeWidth = 1.5f)
+            }
+            prev = screen
+        }
+    }
+
+    // 横線（depth方向の各行）: 手前から奥へ、行ごとに左右を複数分割して描く。
+    val lateralSteps = 10
+    for (row in 0..depthCells) {
+        val depthPx = row * cellPx
+        val alpha = fadeAlpha(row)
+        if (alpha <= 0.02f) continue
+        var prev: Offset? = null
+        for (s in 0..lateralSteps) {
+            val lateralPx = -halfWidthPx + (2f * halfWidthPx) * (s.toFloat() / lateralSteps)
+            val screen = toScreen(lateralPx, depthPx)
+            val p = prev
+            if (p != null) {
+                drawLine(lineColor.copy(alpha = lineColor.alpha * alpha), p, screen, strokeWidth = 1.5f)
+            }
+            prev = screen
         }
     }
 }
 
-/**
- * グリッド地面の罫線を描く。傾き分の余白確保のため、ステージ範囲より広めに（縦横それぞれの実寸1つ分
- * ずつ左右/上下へ拡張）描き、[NaviRendererPreviewGridStage]の平行移動（`pan`）でステージ外へ出ても
- * 端が透けて見えないようにする。
- */
-private fun DrawScope.drawPreviewGridLines(color: Color) {
-    val stepX = size.width / PREVIEW_GRID_COLS
-    val stepY = size.height / PREVIEW_GRID_ROWS
-    for (i in -PREVIEW_GRID_COLS..(PREVIEW_GRID_COLS * 2)) {
-        val x = i * stepX
-        drawLine(color, Offset(x, -size.height), Offset(x, size.height * 2f), strokeWidth = 1.5f)
+/** 合成経路線（[PREVIEW_ROUTE_POINTS_WORLD]）を、地面と同じ投影関数でCanvasに描く。 */
+private fun DrawScope.drawPreviewRouteLine(
+    color: Color,
+    originPx: Offset,
+    projectWorld: (lateralFraction: Float, depthFraction: Float) -> NaviRenderMath.PreviewGroundPointPx,
+) {
+    val points = PREVIEW_ROUTE_POINTS_WORLD.map { (lateralFraction, depthFraction) ->
+        val projected = projectWorld(lateralFraction, depthFraction)
+        Offset(originPx.x + projected.x, originPx.y + projected.y)
     }
-    for (j in -PREVIEW_GRID_ROWS..(PREVIEW_GRID_ROWS * 2)) {
-        val y = j * stepY
-        drawLine(color, Offset(-size.width, y), Offset(size.width * 2f, y), strokeWidth = 1.5f)
-    }
-}
-
-/** 合成経路線（[PREVIEW_ROUTE_POINTS_FRACTION]）をCanvasに描く。 */
-private fun DrawScope.drawPreviewRouteLine(color: Color) {
-    val points = PREVIEW_ROUTE_POINTS_FRACTION.map { (fx, fy) -> Offset(size.width * fx, size.height * fy) }
     for (i in 0 until points.size - 1) {
         drawLine(color, points[i], points[i + 1], strokeWidth = 6f, cap = StrokeCap.Round)
     }
@@ -836,10 +953,19 @@ private fun NaviPinAndSelfCarOverlay(
     theme: NaviTheme,
     /**
      * 親（地図）に掛かっている台形変形 `rotationX` の角度。各マーカーに**その逆**を掛けて絵を立てる
-     * ＝billboard（F② M1 の修正・2026-07-25）。0f なら実質無変換。
+     * ＝billboard（F② M1 の修正・2026-07-25。実地図/フォールバックステージ用。プレビューグリッド
+     * ステージはもう地面をgraphicsLayerで変形しない＝自前射影のため常に0fを渡す）。0f なら実質無変換。
      */
     counterRotationXDeg: Float,
     modifier: Modifier = Modifier,
+    /**
+     * 停留所[sequenceIndex]ごとの表示縮小率（0..1）。プレビューグリッドステージが
+     * [NaviRenderMath.previewGroundProject]の`scale`（奥ほど小さい＝合格条件6）を渡すために追加。
+     * 実地図/フォールバックステージは指定せず、既定の等倍のまま。
+     */
+    pinScale: (Int) -> Float = { 1f },
+    /** 自車マーカーの表示縮小率。プレビューは自車が常に原点（depth=0）のため常に1f。 */
+    selfCarScale: Float = 1f,
 ) {
     Box(modifier) {
         stops.forEach { stop ->
@@ -855,6 +981,7 @@ private fun NaviPinAndSelfCarOverlay(
                 theme = theme,
                 modifier = Modifier
                     .offset { pinTopLeftOffset(point) }
+                    .billboardScale(pinScale(stop.sequenceIndex))
                     .billboardCounterRotation(counterRotationXDeg),
             )
         }
@@ -863,6 +990,7 @@ private fun NaviPinAndSelfCarOverlay(
             theme = theme,
             modifier = Modifier
                 .offset { selfCarTopLeftOffset(selfCarAnchorPx) }
+                .billboardScale(selfCarScale)
                 .billboardCounterRotation(counterRotationXDeg),
         )
     }
@@ -883,6 +1011,22 @@ private fun Modifier.billboardCounterRotation(counterRotationXDeg: Float): Modif
             rotationX = -counterRotationXDeg
             transformOrigin = TransformOrigin(0.5f, 1f)
             cameraDistance = 32f * density
+        }
+    }
+
+/**
+ * マーカーを足元（下端中央）を軸に等倍縮小する（プレビューグリッドステージの「奥ほど小さく」
+ * ＝合格条件6の表現に使う。実地図/フォールバックステージは[scale]=1fで常に無変換）。
+ * 軸をマーカー下端中央にすることで、縮小しても接地点（投影済みスクリーン座標）がズレない。
+ */
+private fun Modifier.billboardScale(scale: Float): Modifier =
+    if (scale == 1f) {
+        this
+    } else {
+        this.graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+            transformOrigin = TransformOrigin(0.5f, 1f)
         }
     }
 

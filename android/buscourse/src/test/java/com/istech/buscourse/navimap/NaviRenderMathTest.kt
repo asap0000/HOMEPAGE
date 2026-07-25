@@ -256,4 +256,96 @@ class NaviRenderMathTest {
         assertThat(projected.x).isWithin(1e-3f).of(500f)
         assertThat(projected.y).isWithin(1e-3f).of(500f)
     }
+
+    // --- プレビュー地面の自前rotateX＋透視投影（[NaviRenderMath.previewGroundProject]） ---
+    // istech 2026-07-26 差し戻し増分: 「地面平面と共有するのは接地点1点だけ」方式の中核。
+
+    @Test fun previewGroundProject_zeroTiltIsOrthographicNoPerspective() {
+        // θ=0（真上から見た地図）は遠近感なし＝そのままの縮尺で位置が決まる。
+        val near = NaviRenderMath.previewGroundProject(lateralPx = 100f, depthPx = 200f, tiltDeg = 0f)
+        val far = NaviRenderMath.previewGroundProject(lateralPx = 100f, depthPx = 2000f, tiltDeg = 0f)
+        assertThat(near.scale).isWithin(1e-4f).of(1f)
+        assertThat(far.scale).isWithin(1e-4f).of(1f)
+        assertThat(near.x).isWithin(1e-3f).of(100f)
+        assertThat(near.y).isWithin(1e-3f).of(-200f)
+        assertThat(far.y).isWithin(1e-3f).of(-2000f)
+    }
+
+    @Test fun previewGroundProject_scaleShrinksMonotonicallyWithDepthWhenTilted() {
+        // 奥ほどscaleが小さくなる＝正方格子が奥で詰まって消失点へ収束する（合格条件3）。
+        val theta = 60f
+        val depths = listOf(0f, 100f, 500f, 2000f, 10000f)
+        val scales = depths.map { NaviRenderMath.previewGroundProject(0f, it, theta).scale }
+        for (i in 0 until scales.size - 1) {
+            assertThat(scales[i + 1]).isLessThan(scales[i])
+        }
+        assertThat(scales.first()).isWithin(1e-4f).of(1f) // depth=0（自車接地点）は常にscale=1
+        assertThat(scales.last()).isGreaterThan(0f) // 消失点へ近づくが0を割ったりしない
+    }
+
+    @Test fun previewGroundProject_90DegreesCollapsesAllDepthsToHorizonLine() {
+        // 傾き90°では地面が視線と平行になり、奥行きによらず全点がy=0（水平線）へ収束する
+        // ＝地図として機能しなくなるが、座標としては有限のまま残る（合格条件5の前提）。
+        for (depth in listOf(0f, 50f, 500f, 5000f)) {
+            val projected = NaviRenderMath.previewGroundProject(lateralPx = 30f, depthPx = depth, tiltDeg = 90f)
+            assertThat(projected.y).isWithin(1e-3f).of(0f)
+            assertThat(projected.x.isFinite()).isTrue()
+            assertThat(projected.scale.isFinite()).isTrue()
+        }
+    }
+
+    @Test fun previewGroundProject_originIsAlwaysUnscaledRegardlessOfTilt() {
+        // 自車の接地点（depth=0, lateral=0）は傾きに関係なく常にscale=1・オフセット0
+        // ＝自車は常に原点として振る舞う（billboardが縮小されない＝合格条件4の一部）。
+        for (tilt in listOf(0f, 30f, 60f, 90f)) {
+            val origin = NaviRenderMath.previewGroundProject(lateralPx = 0f, depthPx = 0f, tiltDeg = tilt)
+            assertThat(origin.scale).isWithin(1e-4f).of(1f)
+            assertThat(origin.x).isWithin(1e-4f).of(0f)
+            assertThat(origin.y).isWithin(1e-4f).of(0f)
+        }
+    }
+
+    @Test fun previewGroundProject_nonFiniteAndOutOfRangeInputsAreGuarded() {
+        val fromNaNTilt = NaviRenderMath.previewGroundProject(10f, 100f, Float.NaN)
+        assertThat(fromNaNTilt.x.isFinite()).isTrue()
+        assertThat(fromNaNTilt.y.isFinite()).isTrue()
+        assertThat(fromNaNTilt.scale.isFinite()).isTrue()
+
+        val fromInfiniteDepth = NaviRenderMath.previewGroundProject(10f, Float.POSITIVE_INFINITY, 45f)
+        assertThat(fromInfiniteDepth.x.isFinite()).isTrue()
+        assertThat(fromInfiniteDepth.y.isFinite()).isTrue()
+        assertThat(fromInfiniteDepth.scale.isFinite()).isTrue()
+
+        val fromOutOfRangeTilt = NaviRenderMath.previewGroundProject(10f, 100f, 180f)
+        val fromClampedTilt = NaviRenderMath.previewGroundProject(10f, 100f, 90f)
+        assertThat(fromOutOfRangeTilt.y).isWithin(1e-3f).of(fromClampedTilt.y)
+
+        val fromNegativeDepth = NaviRenderMath.previewGroundProject(10f, -500f, 45f)
+        val fromZeroDepth = NaviRenderMath.previewGroundProject(10f, 0f, 45f)
+        // 負の奥行き（カメラの後ろ）はdepth=0にクランプする。
+        assertThat(fromNegativeDepth.y).isWithin(1e-4f).of(fromZeroDepth.y)
+        assertThat(fromNegativeDepth.scale).isWithin(1e-4f).of(fromZeroDepth.scale)
+    }
+
+    // --- プレビュー地面のヨー回転（[NaviRenderMath.previewGroundRotateYaw]） ---
+
+    @Test fun previewGroundRotateYaw_zeroDegreesPassesThrough() {
+        val rotated = NaviRenderMath.previewGroundRotateYaw(lateralPx = 40f, depthPx = 120f, yawDeg = 0f)
+        assertThat(rotated.x).isWithin(1e-3f).of(40f)
+        assertThat(rotated.y).isWithin(1e-3f).of(120f)
+    }
+
+    @Test fun previewGroundRotateYaw_90DegreesSwapsAxes() {
+        // 回転方向自体は実装内の約束事（後段の[NaviRendererPreviewGridStage]がyawDegの符号を
+        // 一貫して使えばよい）。ここでは「奥行き軸が丸ごと左右軸へ移る」ことだけを固定する。
+        val rotated = NaviRenderMath.previewGroundRotateYaw(lateralPx = 0f, depthPx = 100f, yawDeg = 90f)
+        assertThat(rotated.x).isWithin(1e-2f).of(-100f)
+        assertThat(rotated.y).isWithin(1e-2f).of(0f)
+    }
+
+    @Test fun previewGroundRotateYaw_nonFiniteFallsBackToZero() {
+        val rotated = NaviRenderMath.previewGroundRotateYaw(Float.NaN, Float.POSITIVE_INFINITY, Float.NaN)
+        assertThat(rotated.x).isWithin(1e-3f).of(0f)
+        assertThat(rotated.y).isWithin(1e-3f).of(0f)
+    }
 }

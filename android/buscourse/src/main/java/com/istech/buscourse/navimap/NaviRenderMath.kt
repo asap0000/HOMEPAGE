@@ -191,6 +191,10 @@ object NaviRenderMath {
      * 設計「グリッドor経路の回転で向きの違いが分かる」）と、自車オフセットに伴う平行移動
      * （[panDxPx]/[panDyPx]、[previewCameraPanPx]参照）を適用した最終スクリーン座標へ変換する
      * （停留所ピンの固定配置の計算に使う純関数）。
+     *
+     * ※現在の[NaviRendererPreviewGridStage]は`graphicsLayer.rotationX`の子にピンを置く旧方式
+     * （billboardが歪む）を廃し、[previewGroundProject]による自前投影方式に置き換え済みだが、
+     * この関数自体は既存テスト([NaviRenderMathTest])が緑のまま残る独立ユーティリティとして保持する。
      */
     fun previewProjectPoint(
         stageWidthPx: Float,
@@ -213,6 +217,80 @@ object NaviRenderMath {
         return PreviewPointPx(
             x = centerX + rotatedX + panDxPx.orZeroIfNonFinite(),
             y = centerY + rotatedY + panDyPx.orZeroIfNonFinite(),
+        )
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // プレビューグリッドの自前rotateX＋透視投影（istech 2026-07-26 差し戻し増分）
+    //
+    // 従来案（[previewProjectPoint]＋`graphicsLayer.rotationX`＋ピン側の逆回転）は、
+    // 「地面(graphicsLayerの子)にピンを入れ、ピンに逆回転を掛ける」実装だった。CSSなら
+    // `transform-style: preserve-3d` により親子の変換が正しく打ち消し合うが、Composeの
+    // `graphicsLayer`にはpreserve-3d相当が無く、子は親のレンダリング結果に対して変換される
+    // ため打ち消しきれず歪む（実機で停留所名が歪んだのが証拠）。
+    //
+    // そこで「地図平面と共有するのは接地点1点だけ」という方式に転換する: 地面上の点を
+    // このobjectの純関数でスクリーン座標へ直接写し、ピン・自車はその座標に**変形を一切
+    // 受けない**Composeレイヤとして置く（billboardは「常に無回転で描く」ことで実現する。
+    // 打ち消す逆回転そのものが不要になる）。
+    // -----------------------------------------------------------------------------------------
+
+    /** 地面平面の透視投影に使うカメラ距離の既定値（px）。大きいほど遠近感が弱まる。 */
+    const val PREVIEW_GROUND_CAMERA_DISTANCE_PX = 640f
+
+    /** 地面平面上の1点をスクリーン座標へ投影した結果。[scale]は原点（自車接地点）からの
+     * 距離に応じた縮小率（1に近いほど手前＝原寸大、0に近いほど奥＝消失点付近）。 */
+    data class PreviewGroundPointPx(val x: Float, val y: Float, val scale: Float)
+
+    /**
+     * 地面平面上の点（原点＝自車の接地点、[lateralPx]＝左右オフセット、[depthPx]＝奥行き距離、
+     * ともに傾き0°のときの見た目そのままのpx）を、[tiltDeg]（0-90°）で自前のrotateX＋透視投影
+     * によりスクリーン座標（原点からのオフセット）へ変換する。
+     *
+     * 式: θ=[tiltDeg]、d=[cameraDistancePx]として
+     * `z = depthPx * sin(θ)`, `scale = d / (d + z)`, `y' = depthPx * cos(θ)`,
+     * `screenX = lateralPx * scale`, `screenY = -y' * scale`（画面上方向＝奥なので符号反転）。
+     *
+     * θ=0では z=0・scale=1（真上から見た地図＝遠近感なし、そのままの縮尺）。
+     * θ=90ではy'=0となり、[depthPx]によらず全点がscreenY=0（水平線）へ収束する
+     * ＝地面が視線と平行になり地図として機能しなくなる合格条件どおりの挙動。
+     * [depthPx]が大きいほどscaleが小さくなるため、正方格子は自然に消失点へ収束する。
+     */
+    fun previewGroundProject(
+        lateralPx: Float,
+        depthPx: Float,
+        tiltDeg: Float,
+        cameraDistancePx: Float = PREVIEW_GROUND_CAMERA_DISTANCE_PX,
+    ): PreviewGroundPointPx {
+        val theta = Math.toRadians(tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f).toDouble())
+        val depth = depthPx.orZeroIfNonFinite().coerceAtLeast(0f)
+        val d = cameraDistancePx.orZeroIfNonFinite().coerceAtLeast(1f)
+        val z = depth * sin(theta).toFloat()
+        val rawScale = d / (d + z)
+        val scale = if (rawScale.isFinite()) rawScale.coerceIn(0f, 1f) else 0f
+        val yPrime = depth * cos(theta).toFloat()
+        return PreviewGroundPointPx(
+            x = lateralPx.orZeroIfNonFinite() * scale,
+            y = -yPrime * scale,
+            scale = scale,
+        )
+    }
+
+    /**
+     * 地面平面上の点[lateralPx]/[depthPx]を、向き設定（ヘディングアップ時のカメラ方位）に応じて
+     * 原点（自車接地点）まわりにヨー回転させる（[previewGroundProject]の前段で使う）。
+     * ノースアップ時は[yawDeg]=0で呼べば無回転のまま通過する。
+     */
+    fun previewGroundRotateYaw(lateralPx: Float, depthPx: Float, yawDeg: Float): PreviewGroundPointPx {
+        val radians = yawDeg.orZeroIfNonFinite() * (Math.PI.toFloat() / 180f)
+        val cosR = cos(radians)
+        val sinR = sin(radians)
+        val lateral = lateralPx.orZeroIfNonFinite()
+        val depth = depthPx.orZeroIfNonFinite()
+        return PreviewGroundPointPx(
+            x = lateral * cosR - depth * sinR,
+            y = lateral * sinR + depth * cosR,
+            scale = 1f,
         )
     }
 }
