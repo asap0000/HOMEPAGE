@@ -417,7 +417,15 @@ private fun NaviRendererMapStage(
     LaunchedEffect(map, pkg.regionId) {
         if (map == null) return@LaunchedEffect
         // 傾きスライダー（settings.tiltDeg）が唯一のtilt操作元。二本指ジェスチャは止める（P1 POC踏襲）。
+        // ★地図の位置・向き・傾きは「設定と自車」だけが決める（設計 §5「自車＝地図の原点」）。
+        // 指で地図だけを動かせると自車マーカーが画面上に取り残され、**原点という不変条件が壊れる**
+        // （オーナー指摘 2026-07-26）。傾きジェスチャだけ塞いで平行移動を塞ぎ忘れていたのが不整合の実体
+        // ＝「その状態を動かす経路を網羅していない」という P4b(走行追従の欠落)と同型の穴。
+        // 先を見たいときは距離スライダー（プレビュー）、戻るのは現在地ボタン、という導線に一本化する。
         map.uiSettings.isTiltGesturesEnabled = false
+        map.uiSettings.isScrollGesturesEnabled = false
+        map.uiSettings.isRotateGesturesEnabled = false
+        // ズームは自車を中心とした拡大縮小で「自車＝原点」と両立するため残す（設定項目は現状なし）。
         val styleFile = BusCourseStorage.resolve(context, pkg.styleRelPath)
         map.setStyle(Style.Builder().fromUri("file://${styleFile.absolutePath}")) { style ->
             val bounds = LatLngBounds.Builder()
@@ -487,8 +495,20 @@ private fun NaviRendererMapStage(
     // カメラを最終適用として当て直す（値が同じなら単なる再適用で無害）。
     LaunchedEffect(map, cameraState, cameraPadding, styleLoaded) {
         if (map == null) return@LaunchedEffect
-        map.setPadding(cameraPadding.left, cameraPadding.top, cameraPadding.right, cameraPadding.bottom)
-        cameraState?.let { map.cameraPosition = it.toCameraPosition() }
+        // ★padding は CameraPosition に**同梱**する（2026-07-26 実機で判明）。
+        // 以前は `map.setPadding(...)` の直後に padding を持たない CameraPosition を代入しており、
+        // **後者が前者を毎回上書きして padding が消えていた**（＝自車だけ動いて地図が付いてこない＝
+        // オーナーが「簡易表現」と明示的に否定した挙動）。詳細は [toCameraPosition] の KDoc。
+        cameraState?.let {
+            map.cameraPosition = it.toCameraPosition(
+                NaviCameraPadding(
+                    cameraPadding.left,
+                    cameraPadding.top,
+                    cameraPadding.right,
+                    cameraPadding.bottom,
+                ),
+            )
+        }
         recomputePinScreenPositions()
     }
 
