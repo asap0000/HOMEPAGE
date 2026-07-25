@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +43,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -250,7 +256,9 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
 }
 
 /** プレビューが占める高さの割合（「画面の4〜5割程度」指示に沿う）。 */
-private const val PREVIEW_WEIGHT = 0.45f
+// 実機（OPPO・下部ナビゲーションバーあり）でレイアウトカードの十字キーが画面外に出たため
+// プレビューを少し詰めた（オーナー指摘「D-padは画面内に」2026-07-26）。
+private const val PREVIEW_WEIGHT = 0.36f
 
 /** 設定画面プレビューの固定chainage（合成本線480mの中間あたり）。 */
 private const val PREVIEW_CHAINAGE_M = 200f
@@ -335,6 +343,8 @@ private fun NaviLayoutCard(
                     onDown = onSelfCarDown,
                     onLeft = onSelfCarLeft,
                     onRight = onSelfCarRight,
+                    fwdBackPct = selfCarFwdBackPct,
+                    lateralPct = selfCarLateralPct,
                     centerLabel = NaviSettingsLabels.selfCarPositionLabel(selfCarFwdBackPct, selfCarLateralPct),
                 )
             }
@@ -350,40 +360,71 @@ private fun NaviSelfCarDPad(
     onDown: () -> Unit,
     onLeft: () -> Unit,
     onRight: () -> Unit,
-    /** キー中央に出す現在値（例「下気味・中央」）。スライダーを廃したので今どこかはここで分かる。 */
+    /** 現在の自車位置（前後・左右の％）。中央のミニ画面図に点で示す。 */
+    fwdBackPct: Int,
+    lateralPct: Int,
+    /** 読み上げ用の現在値（例「下気味・左寄り」）。図で示すので画面には文字を出さない。 */
     centerLabel: String,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        IconButton(onClick = onUp) {
-            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "自車位置を上気味へ")
+        IconButton(onClick = onUp, modifier = Modifier.size(D_PAD_KEY_SIZE)) {
+            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "自車位置を前へ（前方を広く）")
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onLeft) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "自車位置を左寄りへ")
+            IconButton(onClick = onLeft, modifier = Modifier.size(D_PAD_KEY_SIZE)) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "自車位置を左へ")
             }
-            // 中央は固定幅・1行固定（値が「中央」↔「下気味・左寄り」と伸び縮みしても
-            // キーの配置が動かない＝§3-2「文字でレイアウトを動かさない」）。
-            Box(Modifier.width(D_PAD_CENTER_WIDTH), contentAlignment = Alignment.Center) {
-                Text(
-                    centerLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
-            IconButton(onClick = onRight) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "自車位置を右寄りへ")
+            // ★中央は「下気味」等の文字ではなく**ミニ画面図＋自車の点**で示す
+            // （オーナー指摘 2026-07-26「下気味って何」＝語だけでは何が下気味か画面から読み取れない。
+            // 原指示の意図は「自車を下に置いて前方視界を広く取る」で、図なら前後・左右が一目で分かり
+            // 「下気味・左寄り」の併記も要らなくなる）。サイズ固定ゆえ §3-2 のレイアウト不動も満たす。
+            SelfCarPositionIndicator(
+                fwdBackPct = fwdBackPct,
+                lateralPct = lateralPct,
+                contentDescription = centerLabel,
+            )
+            IconButton(onClick = onRight, modifier = Modifier.size(D_PAD_KEY_SIZE)) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "自車位置を右へ")
             }
         }
-        IconButton(onClick = onDown) {
-            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "自車位置を下気味へ")
+        IconButton(onClick = onDown, modifier = Modifier.size(D_PAD_KEY_SIZE)) {
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "自車位置を後ろへ（前方は狭く）")
         }
     }
 }
 
-/** D-pad 中央の現在値ラベル幅（固定＝文字数でキー配置が動かないように）。 */
-private val D_PAD_CENTER_WIDTH = 96.dp
+/**
+ * ナビ画面を表す枠の中に、自車の置き位置を点で示すインジケータ。
+ * 前後[fwdBackPct]は大きいほど上（前方が狭く手前が広い）・左右[lateralPct]は大きいほど右。
+ */
+@Composable
+private fun SelfCarPositionIndicator(fwdBackPct: Int, lateralPct: Int, contentDescription: String) {
+    val frameColor = MaterialTheme.colorScheme.outline
+    val dotColor = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .size(width = D_PAD_INDICATOR_WIDTH, height = D_PAD_INDICATOR_HEIGHT)
+            .semantics { this.contentDescription = contentDescription },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            // 画面の枠
+            drawRoundRect(
+                color = frameColor,
+                cornerRadius = CornerRadius(6f, 6f),
+                style = Stroke(width = 2f),
+            )
+            // 自車の点（yFraction は上下反転＝％が大きいほど上）
+            val x = size.width * (lateralPct / 100f)
+            val y = size.height * (1f - fwdBackPct / 100f)
+            drawCircle(color = dotColor, radius = 6f, center = Offset(x, y))
+        }
+    }
+}
+
+private val D_PAD_KEY_SIZE = 40.dp
+private val D_PAD_INDICATOR_WIDTH = 44.dp
+private val D_PAD_INDICATOR_HEIGHT = 60.dp
 
 @Composable
 private fun NaviLabeledSlider(
