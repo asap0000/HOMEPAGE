@@ -315,28 +315,17 @@ private fun NaviLayoutCard(
             onValueChange = { onVideoLateralPctChange(it.toInt()) },
             onValueChangeFinished = onVideoLateralPctChangeFinished,
         )
-        NaviLabeledSlider(
-            caption = "自車の前後位置",
-            value = selfCarFwdBackPct.toFloat(),
-            valueRange = 0f..100f,
-            valueLabel = NaviSettingsLabels.selfCarFwdBackLabel(selfCarFwdBackPct),
-            onValueChange = { onSelfCarFwdBackPctChange(it.toInt()) },
-            onValueChangeFinished = onSelfCarFwdBackPctChangeFinished,
-        )
-        NaviLabeledSlider(
-            caption = "自車の左右位置",
-            value = selfCarLateralPct.toFloat(),
-            valueRange = 0f..100f,
-            valueLabel = NaviSettingsLabels.selfCarLateralLabel(selfCarLateralPct),
-            onValueChange = { onSelfCarLateralPctChange(it.toInt()) },
-            onValueChangeFinished = onSelfCarLateralPctChangeFinished,
-        )
-
-        Spacer(Modifier.size(4.dp))
+        // ★自車位置は十字キーに一本化（オーナー裁定 2026-07-25）。
+        // 以前は「自車の前後位置」「自車の左右位置」スライダー2本と十字キーが**同じ値**
+        // (selfCarFwdBackPct/selfCarLateralPct) を操作しており、画面上は関係が示されないまま
+        // 冗長だった。自車位置は「地図のどこに自分を置くか」という2次元の配置なので、前後・左右を
+        // 別々のスライダーで考えさせるより十字キーが直感的（設計 §5「十字キーで前後左右に移動」）。
+        // 現在値はキーの中央に出す（スライダーを消しても今どこかが分かるように）。
+        Spacer(Modifier.size(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    "自車位置（十字キー）",
+                    "自車位置",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -346,9 +335,11 @@ private fun NaviLayoutCard(
                     onDown = onSelfCarDown,
                     onLeft = onSelfCarLeft,
                     onRight = onSelfCarRight,
+                    centerLabel = NaviSettingsLabels.selfCarPositionLabel(selfCarFwdBackPct, selfCarLateralPct),
                 )
             }
         }
+        Spacer(Modifier.size(8.dp))
     }
 }
 
@@ -359,6 +350,8 @@ private fun NaviSelfCarDPad(
     onDown: () -> Unit,
     onLeft: () -> Unit,
     onRight: () -> Unit,
+    /** キー中央に出す現在値（例「下気味・中央」）。スライダーを廃したので今どこかはここで分かる。 */
+    centerLabel: String,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -369,7 +362,16 @@ private fun NaviSelfCarDPad(
             IconButton(onClick = onLeft) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "自車位置を左寄りへ")
             }
-            Spacer(Modifier.size(48.dp))
+            // 中央は固定幅・1行固定（値が「中央」↔「下気味・左寄り」と伸び縮みしても
+            // キーの配置が動かない＝§3-2「文字でレイアウトを動かさない」）。
+            Box(Modifier.width(D_PAD_CENTER_WIDTH), contentAlignment = Alignment.Center) {
+                Text(
+                    centerLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
             IconButton(onClick = onRight) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "自車位置を右寄りへ")
             }
@@ -379,6 +381,9 @@ private fun NaviSelfCarDPad(
         }
     }
 }
+
+/** D-pad 中央の現在値ラベル幅（固定＝文字数でキー配置が動かないように）。 */
+private val D_PAD_CENTER_WIDTH = 96.dp
 
 @Composable
 private fun NaviLabeledSlider(

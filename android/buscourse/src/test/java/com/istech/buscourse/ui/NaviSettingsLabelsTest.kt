@@ -51,4 +51,19 @@ class NaviSettingsLabelsTest {
         assertThat(NaviSettingsLabels.selfCarFwdBackLabel(61)).isEqualTo("上気味")
         assertThat(NaviSettingsLabels.selfCarFwdBackLabel(100)).isEqualTo("上気味")
     }
+
+    // 十字キー中央の複合ラベル（スライダー廃止後の唯一の現在値表示・2026-07-25）。
+    @Test fun selfCarPositionLabel_combinesAxesAndOmitsCenteredOnes() {
+        // 両軸とも中央 → 単に「中央」
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(50, 50)).isEqualTo("中央")
+        // 前後だけ動いている → その軸のみ
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(30, 50)).isEqualTo("下気味")
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(80, 50)).isEqualTo("上気味")
+        // 左右だけ動いている → その軸のみ
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(50, 20)).isEqualTo("左寄り")
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(50, 80)).isEqualTo("右寄り")
+        // 両軸とも動いている → 併記
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(30, 20)).isEqualTo("下気味・左寄り")
+        assertThat(NaviSettingsLabels.selfCarPositionLabel(80, 80)).isEqualTo("上気味・右寄り")
+    }
 }

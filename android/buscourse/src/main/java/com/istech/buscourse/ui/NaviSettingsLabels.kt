@@ -33,6 +33,25 @@ object NaviSettingsLabels {
     /** 自車の左右位置スライダーの値ラベル（"左寄り"/"中央"/"右寄り"）。 */
     fun selfCarLateralLabel(selfCarLateralPct: Int): String = lateralLabel(selfCarLateralPct)
 
+    /**
+     * 自車位置の十字キー中央に出す現在値（前後・左右の複合）。
+     *
+     * 自車位置はスライダーを廃して十字キーに一本化したため（オーナー裁定 2026-07-25・
+     * 同じ値を操作する UI が2つ並ぶ冗長の解消）、「今どこにあるか」はこのラベルが唯一の手掛かりになる。
+     * 前後・左右とも中央なら単に「中央」、片方だけ動いていればその軸のみ、両方動いていれば
+     * 「下気味・左寄り」のように併記する。
+     */
+    fun selfCarPositionLabel(selfCarFwdBackPct: Int, selfCarLateralPct: Int): String {
+        val fwd = selfCarFwdBackLabel(selfCarFwdBackPct)
+        val lat = selfCarLateralLabel(selfCarLateralPct)
+        return when {
+            fwd == "中央" && lat == "中央" -> "中央"
+            fwd == "中央" -> lat
+            lat == "中央" -> fwd
+            else -> "$fwd・$lat"
+        }
+    }
+
     private fun lateralLabel(pct: Int): String = when {
         pct == 50 -> "中央"
         pct < 50 -> "左寄り"
