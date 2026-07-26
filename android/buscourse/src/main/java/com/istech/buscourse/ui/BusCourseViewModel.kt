@@ -254,18 +254,6 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** コース全体のGPXエクスポート（CourseDetailScreen、§3.11.3）。 */
-    fun exportCourse(courseId: Long, onResult: (Result<File>) -> Unit = {}) {
-        viewModelScope.launch {
-            val result = runCatching { repository.exportCourse(courseId) }
-            logOutcome(result, WorkLogCategory.GPX, "GPXエクスポート") { file ->
-                val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
-                "コース『${courseName ?: "ID:$courseId"}』をGPXエクスポート（${file.name}）"
-            }
-            onResult(result)
-        }
-    }
-
     /** 試走ログからの区間自動抽出（ExtractionScreen、§3.9）。 */
     fun extractSegmentsFromSession(
         sessionId: Long,

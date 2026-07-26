@@ -81,25 +81,6 @@ data class GpxDocument(
     val tracks: List<GpxTrack>,
 )
 
-/** コース全体エクスポートの入力（設計書§3.11.1の構成要素を揃えたもの。`GpxCodec.writeCourse` が消費）。 */
-data class GpxCourseExport(
-    val courseName: String,
-    val exportedAtEpochMs: Long,
-    /** 停留所カード＝wpt（かつ rte の経由点。sequence_index 順）。 */
-    val stops: List<GpxWaypoint>,
-    /** CONFIRMED 区間＝trkseg（sequence_index 順。PENDING 区間は trkseg を持たない）。 */
-    val segments: List<GpxCourseSegmentExport>,
-)
-
-/** コースエクスポート内の1区間（trkseg 1つぶん）。 */
-data class GpxCourseSegmentExport(
-    val fromStopCardId: Long,
-    val toStopCardId: Long,
-    /** CONFIRMED / PENDING（設計書§3.5 course_segment.status） */
-    val status: String,
-    val points: List<GpxPoint>,
-)
-
 /**
  * GPX 1.1 読み書き（設計書§2.1・§3.11）。`android.util.Xml` の標準 XmlPullParser / XmlSerializer による
  * 自前実装とし、外部GPXライブラリは導入しない（オフライン方針監査対象を増やさない、§3.11.3）。
@@ -394,71 +375,8 @@ object GpxCodec {
         output.flush()
     }
 
-    /**
-     * コース全体エクスポート（§3.11.1・§3.11.3「コース全体エクスポート」）。
-     * 1ファイルに 停留所（wpt）・順列（rte）・実測軌跡（trk、CONFIRMED区間ぶんの trkseg）を全て含める。
-     */
-    fun writeCourse(output: OutputStream, course: GpxCourseExport) {
-        val serializer = Xml.newSerializer()
-        serializer.setOutput(output, "UTF-8")
-        serializer.startDocument("UTF-8", null)
-        serializer.setPrefix("", GPX_NAMESPACE)
-        serializer.setPrefix("bc", BC_NAMESPACE)
-        serializer.startTag(GPX_NAMESPACE, "gpx")
-        serializer.attribute(null, "version", "1.1")
-        serializer.attribute(null, "creator", CREATOR)
-
-        // <metadata>
-        serializer.startTag(GPX_NAMESPACE, "metadata")
-        writeTextElement(serializer, "name", course.courseName)
-        writeTextElement(serializer, "time", formatTime(course.exportedAtEpochMs))
-        serializer.endTag(GPX_NAMESPACE, "metadata")
-
-        // 停留所カード = wpt（wptType の子要素順: ele → name → desc → extensions）
-        for (stop in course.stops) {
-            serializer.startTag(GPX_NAMESPACE, "wpt")
-            serializer.attribute(null, "lat", formatCoord(stop.lat))
-            serializer.attribute(null, "lon", formatCoord(stop.lon))
-            if (stop.eleM != null) writeTextElement(serializer, "ele", formatDecimal(stop.eleM))
-            if (stop.name != null) writeTextElement(serializer, "name", stop.name)
-            if (stop.desc != null) writeTextElement(serializer, "desc", stop.desc)
-            if (stop.stopCardId != null) {
-                serializer.startTag(GPX_NAMESPACE, "extensions")
-                serializer.startTag(BC_NAMESPACE, "stopCard")
-                serializer.attribute(null, "id", stop.stopCardId.toString())
-                if (stop.photoRef != null) serializer.attribute(null, "photoRef", stop.photoRef)
-                serializer.endTag(BC_NAMESPACE, "stopCard")
-                serializer.endTag(GPX_NAMESPACE, "extensions")
-            }
-            serializer.endTag(GPX_NAMESPACE, "wpt")
-        }
-
-        // 順列 = rte（経由点の並びのみ）
-        serializer.startTag(GPX_NAMESPACE, "rte")
-        writeTextElement(serializer, "name", course.courseName)
-        for (stop in course.stops) {
-            serializer.startTag(GPX_NAMESPACE, "rtept")
-            serializer.attribute(null, "lat", formatCoord(stop.lat))
-            serializer.attribute(null, "lon", formatCoord(stop.lon))
-            if (stop.name != null) writeTextElement(serializer, "name", stop.name)
-            serializer.endTag(GPX_NAMESPACE, "rtept")
-        }
-        serializer.endTag(GPX_NAMESPACE, "rte")
-
-        // 区間軌跡 = trk（1コース1trk、区間数ぶんの trkseg。trksegの切れ目=停留所境界）
-        if (course.segments.isNotEmpty()) {
-            serializer.startTag(GPX_NAMESPACE, "trk")
-            writeTextElement(serializer, "name", "${course.courseName} 実測軌跡")
-            for (seg in course.segments) {
-                writeTrackSegment(serializer, seg.points, seg.fromStopCardId, seg.toStopCardId, seg.status)
-            }
-            serializer.endTag(GPX_NAMESPACE, "trk")
-        }
-
-        serializer.endTag(GPX_NAMESPACE, "gpx")
-        serializer.endDocument()
-        output.flush()
-    }
+    // ★コース全体エクスポート（旧 writeCourse）は 2026-07-26 に撤去した（オーナー裁定）。
+    //   [writeSegmentTrack]（区間軌跡の内部保存形式）と [readTrack] / [readDocument]（取り込み）は現役。
 
     private fun writeTrackSegment(
         serializer: org.xmlpull.v1.XmlSerializer,

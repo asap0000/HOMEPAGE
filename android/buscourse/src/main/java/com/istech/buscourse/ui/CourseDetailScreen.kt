@@ -1,10 +1,7 @@
 package com.istech.buscourse.ui
 
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,7 +26,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
-import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Map
@@ -255,25 +251,11 @@ fun CourseDetailScreen(
         persistDraft()
     }
 
-    // --- GPXエクスポート（SAF ACTION_CREATE_DOCUMENT、§3.11.3） ---
-    var pendingExportFile by remember { mutableStateOf<File?>(null) }
-    val createDocLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/gpx+xml")
-    ) { uri: Uri? ->
-        val file = pendingExportFile
-        if (uri != null && file != null) {
-            scope.launch {
-                try {
-                    repository.copyExportToUri(file, uri)
-                    Toast.makeText(context, "GPXを書き出しました", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "書き出しに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-        } else if (file != null) {
-            Toast.makeText(context, "アプリ内 exports/ には保存済みです（${file.name}）", Toast.LENGTH_SHORT).show()
-        }
-    }
+    // GPXエクスポート（コース全体の書き出し）は 2026-07-26 に撤去した。
+    // 旧仕様＝プランナーEXへのデータ提供口として企画したものだが、全量バックアップという
+    // 受領経路ができたため役目を終えた（オーナー裁定「ボタンもデータも押しただけの残骸」）。
+    // ※GPX の**取り込み**（importAsSegmentTrack）と、区間軌跡の内部保存形式としての GPX
+    //   （GpxCodec.writeSegmentTrack / readTrack・地図の経路描画が読む）は現役なので撤去しない。
 
     fun saveArrangement() {
         busy = true
@@ -287,20 +269,6 @@ fun CourseDetailScreen(
                 refreshKey++
             }.onFailure { e ->
                 Toast.makeText(context, "保存に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    fun exportCourse() {
-        busy = true
-        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
-        viewModel.exportCourse(courseId) { result ->
-            busy = false
-            result.onSuccess { file ->
-                pendingExportFile = file
-                createDocLauncher.launch(file.name)
-            }.onFailure { e ->
-                Toast.makeText(context, "エクスポートに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -345,9 +313,6 @@ fun CourseDetailScreen(
                     }
                     IconButton(onClick = onOpenNavi) {
                         Icon(Icons.Filled.Explore, contentDescription = "ナビ確認")
-                    }
-                    IconButton(onClick = { exportCourse() }, enabled = !busy && details != null) {
-                        Icon(Icons.Filled.FileUpload, contentDescription = "GPXエクスポート")
                     }
                     IconButton(onClick = { showDeleteConfirm = true }, enabled = !busy && details != null) {
                         Icon(Icons.Filled.Delete, contentDescription = "コースを削除")

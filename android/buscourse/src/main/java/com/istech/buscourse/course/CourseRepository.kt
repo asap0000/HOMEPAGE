@@ -24,11 +24,8 @@ import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.core.gpx.GpxCodec
-import com.istech.buscourse.core.gpx.GpxCourseExport
-import com.istech.buscourse.core.gpx.GpxCourseSegmentExport
 import com.istech.buscourse.core.gpx.GpxParseException
 import com.istech.buscourse.core.gpx.GpxPoint
-import com.istech.buscourse.core.gpx.GpxWaypoint
 import com.istech.buscourse.recording.FrameKind
 import com.istech.buscourse.recording.RecordingSessionStatus
 import com.istech.buscourse.recording.RecordingSessionType
@@ -39,9 +36,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -2330,76 +2324,14 @@ class CourseRepository(
     }
 
     // ------------------------------------------------------------------
-    // GPXエクスポート/インポート（§3.11.3）
+    // GPXインポート（§3.11.3）
+    //
+    // ★コース全体の GPX エクスポート（旧 exportCourse / copyExportToUri）は 2026-07-26 に撤去した。
+    //   プランナーEXへのデータ提供口として企画したものだが、全量バックアップという受領経路が
+    //   できたため役目を終えた（オーナー裁定「ボタンもデータも押しただけの残骸」）。
+    //   ※GPX の**取り込み**（[importAsSegmentTrack]）と、区間軌跡の内部保存形式としての GPX
+    //     （[GpxCodec.writeSegmentTrack] / [GpxCodec.readTrack]。地図の経路描画が読む）は現役。
     // ------------------------------------------------------------------
-
-    /**
-     * コース全体を `exports/{courseId}_{yyyyMMdd_HHmmss}.gpx` へ書き出す（§3.3・§3.11.3 `exportCourse`）。
-     * 停留所（wpt）・順列（rte）・CONFIRMED区間の実測軌跡（trkseg）を1ファイルに含める（§3.11.1）。
-     * 共有はユーザー操作の SAF（ACTION_CREATE_DOCUMENT）経由のみ（[copyExportToUri]）。
-     */
-    suspend fun exportCourse(courseId: Long): File = withContext(Dispatchers.IO) {
-        val details = courseDao.getWithDetails(courseId)
-            ?: throw IllegalArgumentException("コースが見つかりません: id=$courseId")
-        val orderedStops = details.stops.sortedBy { it.courseStop.sequenceIndex }
-        val orderedSegments = details.segments.sortedBy { it.sequenceIndex }
-
-        val waypoints = orderedStops.map { stopWithCard ->
-            val card = stopWithCard.requireCard
-            GpxWaypoint(
-                lat = card.latitude,
-                lon = card.longitude,
-                eleM = card.altitudeM,
-                name = card.name,
-                desc = card.notes,
-                stopCardId = card.id,
-                photoRef = "${BusCourseStorage.DIR_STOPCARDS}/${card.id}/${BusCourseStorage.FILE_STOPCARD_PHOTO_ORIG}",
-            )
-        }
-        val segmentExports = orderedSegments.mapNotNull { seg ->
-            if (seg.status != CourseSegmentStatus.CONFIRMED.name || seg.segmentTrackId == null) return@mapNotNull null
-            val track = segmentTrackDao.getById(seg.segmentTrackId) ?: return@mapNotNull null
-            val file = BusCourseStorage.resolve(context, track.trackFileRelPath)
-            if (!file.exists()) return@mapNotNull null
-            val gpxPoints = try {
-                GpxCodec.readTrack(file).points
-            } catch (e: GpxParseException) {
-                Log.w(TAG, "区間GPXを読めないためエクスポートから除外します: ${track.trackFileRelPath}", e)
-                return@mapNotNull null
-            }
-            GpxCourseSegmentExport(
-                fromStopCardId = seg.fromStopCardId,
-                toStopCardId = seg.toStopCardId,
-                status = seg.status,
-                points = gpxPoints,
-            )
-        }
-
-        val now = System.currentTimeMillis()
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(now))
-        val exportsDir = BusCourseStorage.resolve(context, BusCourseStorage.DIR_EXPORTS)
-        exportsDir.mkdirs()
-        val outFile = File(exportsDir, "${courseId}_$timestamp.gpx")
-        outFile.outputStream().buffered().use { out ->
-            GpxCodec.writeCourse(
-                out,
-                GpxCourseExport(
-                    courseName = details.course.name,
-                    exportedAtEpochMs = now,
-                    stops = waypoints,
-                    segments = segmentExports,
-                ),
-            )
-        }
-        outFile
-    }
-
-    /** エクスポート成果物を SAF（ACTION_CREATE_DOCUMENT）で選ばれた [target] へ複製する（§3.11.3）。 */
-    suspend fun copyExportToUri(exportFile: File, target: Uri) = withContext(Dispatchers.IO) {
-        context.contentResolver.openOutputStream(target)?.use { out ->
-            exportFile.inputStream().use { it.copyTo(out) }
-        } ?: throw IOException("書き出し先を開けませんでした: $target")
-    }
 
     /**
      * 他アプリ産GPXの区間取り込み（§3.11.3 `importAsSegmentTrack`）。信頼して取り込むのは

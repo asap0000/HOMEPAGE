@@ -22,7 +22,8 @@ object BusCourseStorage {
     const val DIR_SEGMENTS = "segments"          // segments/{fromId}_{toId}.gpx
     const val DIR_COMPARISONS = "comparisons"    // comparisons/{comparisonId}/overlay.gpx（フェーズ5）
     const val DIR_MAPS = "maps"                  // maps/{regionId}/tiles/, style/（フェーズ3）
-    const val DIR_EXPORTS = "exports"            // exports/{courseId}_{yyyyMMdd_HHmmss}.gpx
+    // exports/ は 2026-07-26 に廃止（コース全体GPXエクスポートの撤去に伴う）。既存端末に残っている
+    // 過去の書き出しは「押しただけの残骸」（オーナー裁定）なので、機種変更バックアップにも含めない。
 
     // §3.3 固定ファイル名
     const val FILE_STOPCARD_PHOTO_ORIG = "photo_orig.jpg"
