@@ -22,6 +22,7 @@ class NaviDisplayResolverTest {
                 tiltDeg = 75.0,
                 videoAmountPct = 70,
                 videoLateralPct = 20,
+                videoVerticalPct = 90,
                 selfCarFwdBackPct = 80,
                 selfCarLateralPct = 10,
                 orientation = NaviMapOrientation.HEADING_UP,
@@ -32,7 +33,7 @@ class NaviDisplayResolverTest {
         )
 
         assertThat(actual).isEqualTo(
-            NaviSettingsEffective(75.0, 70, 20, 80, 10, NaviMapOrientation.HEADING_UP, NaviTheme.DAY, false),
+            NaviSettingsEffective(75.0, 70, 20, 90, 80, 10, NaviMapOrientation.HEADING_UP, NaviTheme.DAY, false),
         )
     }
 
@@ -85,6 +86,7 @@ class NaviDisplayResolverTest {
         tiltDeg = NaviSettingsDefaults.TILT_DEG,
         videoAmountPct = NaviSettingsDefaults.VIDEO_AMOUNT_PCT,
         videoLateralPct = NaviSettingsDefaults.VIDEO_LATERAL_PCT,
+        videoVerticalPct = NaviSettingsDefaults.VIDEO_VERTICAL_PCT,
         selfCarFwdBackPct = NaviSettingsDefaults.SELF_CAR_FWD_BACK_PCT,
         selfCarLateralPct = NaviSettingsDefaults.SELF_CAR_LATERAL_PCT,
         orientation = NaviSettingsDefaults.ORIENTATION,
@@ -95,6 +97,7 @@ class NaviDisplayResolverTest {
     private fun assertProductDefaultsExceptOrientationAndTilt(actual: NaviSettingsEffective) {
         assertThat(actual.videoAmountPct).isEqualTo(NaviSettingsDefaults.VIDEO_AMOUNT_PCT)
         assertThat(actual.videoLateralPct).isEqualTo(NaviSettingsDefaults.VIDEO_LATERAL_PCT)
+        assertThat(actual.videoVerticalPct).isEqualTo(NaviSettingsDefaults.VIDEO_VERTICAL_PCT)
         assertThat(actual.selfCarFwdBackPct).isEqualTo(NaviSettingsDefaults.SELF_CAR_FWD_BACK_PCT)
         assertThat(actual.selfCarLateralPct).isEqualTo(NaviSettingsDefaults.SELF_CAR_LATERAL_PCT)
         assertThat(actual.theme).isEqualTo(NaviSettingsDefaults.THEME)

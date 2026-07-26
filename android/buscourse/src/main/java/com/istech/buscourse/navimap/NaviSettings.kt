@@ -54,6 +54,9 @@ object NaviSettingsDefaults {
     const val TILT_DEG = 45.0
     const val VIDEO_AMOUNT_PCT = 52
     const val VIDEO_LATERAL_PCT = 50
+
+    /** 映像の上下位置。0=上端（既定・現状の見え方を変えない）／100=下端（istech 第3ラウンド新設）。 */
+    const val VIDEO_VERTICAL_PCT = 0
     const val SELF_CAR_FWD_BACK_PCT = 30
     const val SELF_CAR_LATERAL_PCT = 50
     val ORIENTATION = NaviMapOrientation.HEADING_UP
@@ -67,6 +70,8 @@ object NaviSettingsDefaults {
 
     fun clampVideoLateralPct(value: Int): Int = value.coerceIn(0, 100)
 
+    fun clampVideoVerticalPct(value: Int): Int = value.coerceIn(0, 100)
+
     fun clampSelfCarFwdBackPct(value: Int): Int = value.coerceIn(0, 100)
 
     fun clampSelfCarLateralPct(value: Int): Int = value.coerceIn(0, 100)
@@ -77,6 +82,7 @@ data class NaviSettingsEffective(
     val tiltDeg: Double,
     val videoAmountPct: Int,
     val videoLateralPct: Int,
+    val videoVerticalPct: Int,
     val selfCarFwdBackPct: Int,
     val selfCarLateralPct: Int,
     val orientation: NaviMapOrientation,

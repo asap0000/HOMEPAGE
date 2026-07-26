@@ -21,6 +21,7 @@ class NaviSettingsRepository(private val context: Context) {
             tiltDeg = preferences[KEY_TILT_DEG],
             videoAmountPct = preferences[KEY_VIDEO_AMOUNT_PCT],
             videoLateralPct = preferences[KEY_VIDEO_LATERAL_PCT],
+            videoVerticalPct = preferences[KEY_VIDEO_VERTICAL_PCT],
             selfCarFwdBackPct = preferences[KEY_SELF_CAR_FWD_BACK_PCT],
             selfCarLateralPct = preferences[KEY_SELF_CAR_LATERAL_PCT],
             orientation = NaviMapOrientation.fromStorageValueOrNull(preferences[KEY_ORIENTATION]),
@@ -37,6 +38,10 @@ class NaviSettingsRepository(private val context: Context) {
 
     suspend fun setVideoLateralPct(value: Int) = edit {
         it[KEY_VIDEO_LATERAL_PCT] = NaviSettingsDefaults.clampVideoLateralPct(value)
+    }
+
+    suspend fun setVideoVerticalPct(value: Int) = edit {
+        it[KEY_VIDEO_VERTICAL_PCT] = NaviSettingsDefaults.clampVideoVerticalPct(value)
     }
 
     suspend fun setSelfCarFwdBackPct(value: Int) = edit {
@@ -61,6 +66,7 @@ class NaviSettingsRepository(private val context: Context) {
             NaviSettingsField.TILT_DEG -> preferences.remove(KEY_TILT_DEG)
             NaviSettingsField.VIDEO_AMOUNT_PCT -> preferences.remove(KEY_VIDEO_AMOUNT_PCT)
             NaviSettingsField.VIDEO_LATERAL_PCT -> preferences.remove(KEY_VIDEO_LATERAL_PCT)
+            NaviSettingsField.VIDEO_VERTICAL_PCT -> preferences.remove(KEY_VIDEO_VERTICAL_PCT)
             NaviSettingsField.SELF_CAR_FWD_BACK_PCT -> preferences.remove(KEY_SELF_CAR_FWD_BACK_PCT)
             NaviSettingsField.SELF_CAR_LATERAL_PCT -> preferences.remove(KEY_SELF_CAR_LATERAL_PCT)
             NaviSettingsField.ORIENTATION -> preferences.remove(KEY_ORIENTATION)
@@ -77,6 +83,7 @@ class NaviSettingsRepository(private val context: Context) {
         val KEY_TILT_DEG = doublePreferencesKey("tilt_deg")
         val KEY_VIDEO_AMOUNT_PCT = intPreferencesKey("video_amount_pct")
         val KEY_VIDEO_LATERAL_PCT = intPreferencesKey("video_lateral_pct")
+        val KEY_VIDEO_VERTICAL_PCT = intPreferencesKey("video_vertical_pct")
         val KEY_SELF_CAR_FWD_BACK_PCT = intPreferencesKey("self_car_fwd_back_pct")
         val KEY_SELF_CAR_LATERAL_PCT = intPreferencesKey("self_car_lateral_pct")
         val KEY_ORIENTATION = stringPreferencesKey("orientation")
@@ -90,6 +97,7 @@ enum class NaviSettingsField {
     TILT_DEG,
     VIDEO_AMOUNT_PCT,
     VIDEO_LATERAL_PCT,
+    VIDEO_VERTICAL_PCT,
     SELF_CAR_FWD_BACK_PCT,
     SELF_CAR_LATERAL_PCT,
     ORIENTATION,

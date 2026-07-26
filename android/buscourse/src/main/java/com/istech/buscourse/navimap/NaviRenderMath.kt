@@ -83,6 +83,16 @@ object NaviRenderMath {
         return travel * (lateralPct.coerceIn(0, 100) / 100f)
     }
 
+    /**
+     * 映像オーバーレイの左上y座標（px）を[verticalPct]（0=上端/50=中央/100=下端）から求める
+     * （istech 第3ラウンド増分「映像の上下位置」）。[videoOverlayOffsetXPx]と同型（同じ「travel×割合」の式）。
+     * オーバーレイ高さ[overlayHeightPx]を考慮してクランプする（travelが負にならない）。
+     */
+    fun videoOverlayOffsetYPx(stageHeightPx: Float, overlayHeightPx: Float, verticalPct: Int): Float {
+        val travel = (stageHeightPx - overlayHeightPx).coerceAtLeast(0f)
+        return travel * (verticalPct.coerceIn(0, 100) / 100f)
+    }
+
     /** 自車アイコンの固定スクリーン位置（ステージサイズに対する分数、0..1）。 */
     data class ScreenAnchorFraction(val xFraction: Float, val yFraction: Float)
 
@@ -235,11 +245,23 @@ object NaviRenderMath {
     // 打ち消す逆回転そのものが不要になる）。
     // -----------------------------------------------------------------------------------------
 
-    /** 地面平面の透視投影に使うカメラ距離の既定値（px）。大きいほど遠近感が弱まる。 */
+    /** 地面平面の透視投影に使うカメラ距離の既定値（px）。単体テストの既定引数としてのみ使う
+     * フォールバック値（大きいほど遠近感が弱まる）。実描画（[NaviRendererPreviewGridStage]）は
+     * これを直接使わず、必ず[previewGroundCameraDistancePx]でステージ寸法から動的に求める
+     * （★破綻1・原因B是正: 絶対px定数だとステージ寸法が変わると見かけの傾きが数値と合わなくなる）。 */
     const val PREVIEW_GROUND_CAMERA_DISTANCE_PX = 640f
 
+    /** カメラ距離＝ステージ高の何倍か（istech `navi_preview_target_v2.html`の`D = fh*0.45`と同じ比率）。 */
+    const val PREVIEW_CAMERA_DISTANCE_FRACTION = 0.45f
+
+    /** [stageHeightPx]（プレビュー枠＝実機ナビ画面枠の高さ）に比例したカメラ距離（px）を返す。
+     * 枠の寸法が変わっても「傾きθ°」の見かけが相似になる（★破綻1・原因B是正）。 */
+    fun previewGroundCameraDistancePx(stageHeightPx: Float): Float =
+        (stageHeightPx.orZeroIfNonFinite().coerceAtLeast(0f) * PREVIEW_CAMERA_DISTANCE_FRACTION).coerceAtLeast(1f)
+
     /** 地面平面上の1点をスクリーン座標へ投影した結果。[scale]は原点（自車接地点）からの
-     * 距離に応じた縮小率（1に近いほど手前＝原寸大、0に近いほど奥＝消失点付近）。 */
+     * 距離に応じた拡大縮小率（1が原寸大。1未満は奥＝縮小、1より大は自車より手前＝拡大。
+     * 常に有限だが、範囲はクランプしない＝★破綻1・原因A是正参照）。 */
     data class PreviewGroundPointPx(val x: Float, val y: Float, val scale: Float)
 
     /**
@@ -250,11 +272,21 @@ object NaviRenderMath {
      * 式: θ=[tiltDeg]、d=[cameraDistancePx]として
      * `z = depthPx * sin(θ)`, `scale = d / (d + z)`, `y' = depthPx * cos(θ)`,
      * `screenX = lateralPx * scale`, `screenY = -y' * scale`（画面上方向＝奥なので符号反転）。
+     * istech `navi_preview_target_v2.html`の`project()`と同一の式（一次資料）。
      *
      * θ=0では z=0・scale=1（真上から見た地図＝遠近感なし、そのままの縮尺）。
      * θ=90ではy'=0となり、[depthPx]によらず全点がscreenY=0（水平線）へ収束する
      * ＝地面が視線と平行になり地図として機能しなくなる合格条件どおりの挙動。
      * [depthPx]が大きいほどscaleが小さくなるため、正方格子は自然に消失点へ収束する。
+     *
+     * ★破綻1・原因A是正（2026-07-26）: [depthPx]が負（自車の後ろ）でも**0へ潰さない**。
+     * ヘディングアップではヨー回転（[previewGroundRotateYaw]、本関数の前段で適用する）が
+     * lateralとdepthを混ぜるため、グリッド右手前の広い領域が負の奥行きになりうる。これを
+     * 0にクランプすると同一の行にまとめて叩き潰され「折り目（崖）」に見える。正しい近接平面は
+     * `depth>=0`ではなく`d+z>0`（[previewGroundNearDepthPx]参照）で、その範囲内なら自車の後ろの
+     * 地面は足元の下に**拡大されて**続くのが正解（scaleが1を超えうる＝もはや0..1にクランプしない）。
+     * `d+z<=0`（近接平面より手前）の点は本関数を呼ぶ**前**に呼び出し側が線分ごと切ること
+     * （[previewGroundNearDepthPx]のKDoc参照。本関数自身は非有限へのフォールバックのみ行う）。
      */
     fun previewGroundProject(
         lateralPx: Float,
@@ -263,11 +295,11 @@ object NaviRenderMath {
         cameraDistancePx: Float = PREVIEW_GROUND_CAMERA_DISTANCE_PX,
     ): PreviewGroundPointPx {
         val theta = Math.toRadians(tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f).toDouble())
-        val depth = depthPx.orZeroIfNonFinite().coerceAtLeast(0f)
+        val depth = depthPx.orZeroIfNonFinite() // ★clampしない（原因A是正。上記KDoc参照）
         val d = cameraDistancePx.orZeroIfNonFinite().coerceAtLeast(1f)
         val z = depth * sin(theta).toFloat()
         val rawScale = d / (d + z)
-        val scale = if (rawScale.isFinite()) rawScale.coerceIn(0f, 1f) else 0f
+        val scale = if (rawScale.isFinite()) rawScale else 0f
         val yPrime = depth * cos(theta).toFloat()
         return PreviewGroundPointPx(
             x = lateralPx.orZeroIfNonFinite() * scale,
@@ -275,6 +307,59 @@ object NaviRenderMath {
             scale = scale,
         )
     }
+
+    /**
+     * 近接平面（`d+z<=0`となる[depthPx]の下限、[previewGroundProject]の`d+z>0`制約の実体）。
+     * θ≈0（水平面をほぼ真上から見ている）のときは`z`が常に0近傍で制約が意味を持たないため`null`
+     * （制限なし）を返す。θ>0のときは `depthMin = (-d + ε) / sin(θ)` （εは小さな正数、分母が
+     * ちょうど0になる特異点を避ける）。
+     *
+     * 呼び出し側（[NaviRendererPreviewGridStage]）は、線分の端点の一方がこの値より手前（小さい）
+     * なら、**頂点を単に捨てず**、`depth = depthMin`となる交点で線分を「切る」こと
+     * （潰す(clamp)と切る(clip)の違いは[previewGroundProject]のKDoc参照。単純に捨てるとジグザグの
+     * 端になる＝istechタスク指示書 破綻1 の直し方）。
+     */
+    fun previewGroundNearDepthPx(
+        tiltDeg: Float,
+        cameraDistancePx: Float = PREVIEW_GROUND_CAMERA_DISTANCE_PX,
+    ): Float? {
+        val theta = Math.toRadians(tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f).toDouble())
+        val sinTheta = sin(theta).toFloat()
+        if (sinTheta <= NEAR_PLANE_SIN_EPSILON) return null // θ≈0: zが常に0近傍＝制限なし
+        val d = cameraDistancePx.orZeroIfNonFinite().coerceAtLeast(1f)
+        val depthMin = (-d + NEAR_PLANE_EPSILON_PX) / sinTheta
+        return if (depthMin.isFinite()) depthMin else null
+    }
+
+    /**
+     * 地平線のスクリーンY座標（原点＝自車接地点からのオフセットpx、負が画面上方向）。
+     * `y_horizon = -d * cos(θ) / sin(θ)`（istech `navi_preview_target_v2.html`の
+     * `horizonY = oy - D/tan(theta)`と同式）。**ヨー角を引数に取らない＝地平線は常に水平**
+     * （★破綻1「地平線がヨーに依存しない」の担保そのもの。地平線は地面平面と視線ベクトルの
+     * 交線であり、視線を軸にした横回転（ヨー）では動かないため、この式自体がヨー非依存）。
+     * θ≈0（水平面をほぼ真上から見ている）のときは地平線が画面外（無限遠）にあり意味を持たないため
+     * `null`（地平線なし＝地面が画面全面）を返す。
+     */
+    fun previewGroundHorizonOffsetY(
+        tiltDeg: Float,
+        cameraDistancePx: Float = PREVIEW_GROUND_CAMERA_DISTANCE_PX,
+    ): Float? {
+        val theta = Math.toRadians(tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f).toDouble())
+        val sinTheta = sin(theta).toFloat()
+        if (sinTheta <= NEAR_PLANE_SIN_EPSILON) return null
+        val d = cameraDistancePx.orZeroIfNonFinite().coerceAtLeast(1f)
+        val cosTheta = cos(theta).toFloat()
+        val tanTheta = sinTheta / cosTheta
+        if (!tanTheta.isFinite() || tanTheta == 0f) return null
+        val offset = -d / tanTheta
+        return if (offset.isFinite()) offset else null
+    }
+
+    /** θ≈0とみなすsin(θ)の下限（[previewGroundNearDepthPx]/[previewGroundHorizonOffsetY]共通）。 */
+    private const val NEAR_PLANE_SIN_EPSILON = 1e-4f
+
+    /** 近接平面`d+z>0`の`>`を`>=ε`に置き換えるための小さな正の余裕px（0除算・発散を避ける）。 */
+    private const val NEAR_PLANE_EPSILON_PX = 2f
 
     /**
      * 地面平面上の点[lateralPx]/[depthPx]を、向き設定（ヘディングアップ時のカメラ方位）に応じて

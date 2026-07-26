@@ -11,6 +11,11 @@ package com.istech.buscourse.ui
  * オーナー確定モック（`navi_tilt_poc.html`）のしきい値をそのまま踏襲する:
  * - 左右系（映像の左右位置／自車の左右位置）: 50=中央、<50=左寄り、>50=右寄り。
  * - 自車の前後位置: <40=下気味、>60=上気味、それ以外=中央。
+ *
+ * ★第4ラウンド是正（istech 2026-07-26・確定不具合5）: 「左右は『右寄り』なのに上下は『上端』」
+ * という語彙の不統一があり、しかも左右は100%まで振り切っても「右寄り」のままで振り切ったことが
+ * 伝わらなかった（発注元の命名ミス）。**左右・上下を同じ5段階の語彙**（両端=端／途中=寄り／
+ * 中央=中央）に統一する（[edgeAwareLabel]参照）。
  */
 object NaviSettingsLabels {
 
@@ -20,8 +25,15 @@ object NaviSettingsLabels {
     /** 映像の大きさスライダーの値ラベル（例: "52%"）。 */
     fun videoAmountLabel(videoAmountPct: Int): String = "$videoAmountPct%"
 
-    /** 映像の左右位置スライダーの値ラベル（"左寄り"/"中央"/"右寄り"）。 */
+    /** 映像の左右位置スライダーの値ラベル（"左端"/"左寄り"/"中央"/"右寄り"/"右端"）。 */
     fun videoLateralLabel(videoLateralPct: Int): String = lateralLabel(videoLateralPct)
+
+    /**
+     * 映像の上下位置スライダーの値ラベル（"上端"/"上寄り"/"中央"/"下寄り"/"下端"）。
+     * istech 第3ラウンド新設・第4ラウンドで左右系と語彙・閾値を統一（[edgeAwareLabel]参照）。
+     */
+    fun videoVerticalLabel(videoVerticalPct: Int): String =
+        edgeAwareLabel(videoVerticalPct, "上端", "上寄り", "中央", "下寄り", "下端")
 
     /** 自車の前後位置スライダーの値ラベル（"下気味"/"中央"/"上気味"）。 */
     fun selfCarFwdBackLabel(selfCarFwdBackPct: Int): String = when {
@@ -52,9 +64,26 @@ object NaviSettingsLabels {
         }
     }
 
-    private fun lateralLabel(pct: Int): String = when {
-        pct == 50 -> "中央"
-        pct < 50 -> "左寄り"
-        else -> "右寄り"
+    private fun lateralLabel(pct: Int): String =
+        edgeAwareLabel(pct, "左端", "左寄り", "中央", "右寄り", "右端")
+
+    /**
+     * 「両端で端／途中で寄り／真ん中で中央」という5段階を、左右・上下どちらの軸にも同じ閾値で適用する
+     * 共通ヘルパ（★第4ラウンド是正・確定不具合5「両軸で語彙と閾値を揃えること」）。
+     * 0/100 ちょうどのときだけ「端」、50 ちょうどのときだけ「中央」、それ以外は「寄り」。
+     */
+    private fun edgeAwareLabel(
+        pct: Int,
+        startEdgeLabel: String,
+        startMidLabel: String,
+        centerLabel: String,
+        endMidLabel: String,
+        endEdgeLabel: String,
+    ): String = when {
+        pct <= 0 -> startEdgeLabel
+        pct >= 100 -> endEdgeLabel
+        pct == 50 -> centerLabel
+        pct < 50 -> startMidLabel
+        else -> endMidLabel
     }
 }

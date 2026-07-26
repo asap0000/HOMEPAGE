@@ -26,6 +26,7 @@ class NaviSettingsRepositoryTest {
         repository.setTiltDeg(95.0)
         repository.setVideoAmountPct(101)
         repository.setVideoLateralPct(-1)
+        repository.setVideoVerticalPct(101)
         repository.setSelfCarFwdBackPct(101)
         repository.setSelfCarLateralPct(-1)
         repository.setOrientation(NaviMapOrientation.NORTH_UP)
@@ -37,6 +38,7 @@ class NaviSettingsRepositoryTest {
                 tiltDeg = 90.0,
                 videoAmountPct = 100,
                 videoLateralPct = 0,
+                videoVerticalPct = 100,
                 selfCarFwdBackPct = 100,
                 selfCarLateralPct = 0,
                 orientation = NaviMapOrientation.NORTH_UP,

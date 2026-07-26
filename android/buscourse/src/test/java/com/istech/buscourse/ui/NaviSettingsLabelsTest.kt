@@ -23,22 +23,40 @@ class NaviSettingsLabelsTest {
         assertThat(NaviSettingsLabels.videoAmountLabel(100)).isEqualTo("100%")
     }
 
+    // ★第4ラウンド是正（istech 2026-07-26・確定不具合5）: 0/100ちょうどは「端」、
+    // その手前（1〜49/51〜99）は「寄り」、両軸で同じ閾値・語彙に統一。
     @Test
     fun videoLateralLabel_classifiesAroundCenter() {
-        assertThat(NaviSettingsLabels.videoLateralLabel(0)).isEqualTo("左寄り")
+        assertThat(NaviSettingsLabels.videoLateralLabel(0)).isEqualTo("左端")
+        assertThat(NaviSettingsLabels.videoLateralLabel(1)).isEqualTo("左寄り")
         assertThat(NaviSettingsLabels.videoLateralLabel(49)).isEqualTo("左寄り")
         assertThat(NaviSettingsLabels.videoLateralLabel(50)).isEqualTo("中央")
         assertThat(NaviSettingsLabels.videoLateralLabel(51)).isEqualTo("右寄り")
-        assertThat(NaviSettingsLabels.videoLateralLabel(100)).isEqualTo("右寄り")
+        assertThat(NaviSettingsLabels.videoLateralLabel(99)).isEqualTo("右寄り")
+        assertThat(NaviSettingsLabels.videoLateralLabel(100)).isEqualTo("右端")
+    }
+
+    // 第3ラウンド新設: 映像の上下位置（0=上端/100=下端）。第4ラウンドで左右系と語彙・閾値を統一。
+    @Test
+    fun videoVerticalLabel_classifiesAroundCenter() {
+        assertThat(NaviSettingsLabels.videoVerticalLabel(0)).isEqualTo("上端")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(1)).isEqualTo("上寄り")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(49)).isEqualTo("上寄り")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(50)).isEqualTo("中央")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(51)).isEqualTo("下寄り")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(99)).isEqualTo("下寄り")
+        assertThat(NaviSettingsLabels.videoVerticalLabel(100)).isEqualTo("下端")
     }
 
     @Test
     fun selfCarLateralLabel_classifiesAroundCenter() {
-        assertThat(NaviSettingsLabels.selfCarLateralLabel(0)).isEqualTo("左寄り")
+        assertThat(NaviSettingsLabels.selfCarLateralLabel(0)).isEqualTo("左端")
+        assertThat(NaviSettingsLabels.selfCarLateralLabel(1)).isEqualTo("左寄り")
         assertThat(NaviSettingsLabels.selfCarLateralLabel(49)).isEqualTo("左寄り")
         assertThat(NaviSettingsLabels.selfCarLateralLabel(50)).isEqualTo("中央")
         assertThat(NaviSettingsLabels.selfCarLateralLabel(51)).isEqualTo("右寄り")
-        assertThat(NaviSettingsLabels.selfCarLateralLabel(100)).isEqualTo("右寄り")
+        assertThat(NaviSettingsLabels.selfCarLateralLabel(99)).isEqualTo("右寄り")
+        assertThat(NaviSettingsLabels.selfCarLateralLabel(100)).isEqualTo("右端")
     }
 
     @Test

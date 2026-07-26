@@ -92,6 +92,27 @@ class NaviRenderMathTest {
         assertThat(NaviRenderMath.videoOverlayOffsetXPx(1000f, 200f, 150)).isEqualTo(800f)
     }
 
+    // --- video overlay vertical offset（istech 第3ラウンド新設「映像の上下位置」） ---
+
+    @Test fun videoOverlayOffsetYPx_topCenterBottom() {
+        // videoOverlayOffsetXPxと同型（0=上端/50=中央/100=下端）。
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 400f, 0)).isEqualTo(0f)
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 400f, 50)).isEqualTo(800f)
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 400f, 100)).isEqualTo(1600f)
+    }
+
+    @Test fun videoOverlayOffsetYPx_clampsOutOfRangePct() {
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 400f, -10)).isEqualTo(0f)
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 400f, 150)).isEqualTo(1600f)
+    }
+
+    @Test fun videoOverlayOffsetYPx_overlayHeightConsideredInClamp() {
+        // オーバーレイ高がステージ高と同じ（100%）なら travel=0 ⇒ どのverticalPctでも0。
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 2000f, 100)).isEqualTo(0f)
+        // オーバーレイ高がステージ高を超える異常値でも負のtravelにはならない（coerceAtLeast(0f)）。
+        assertThat(NaviRenderMath.videoOverlayOffsetYPx(2000f, 2500f, 100)).isEqualTo(0f)
+    }
+
     // --- self-car anchor fraction ---
 
     @Test fun selfCarAnchorFraction_defaultsMatchProductDefaults() {
@@ -319,12 +340,125 @@ class NaviRenderMathTest {
         val fromOutOfRangeTilt = NaviRenderMath.previewGroundProject(10f, 100f, 180f)
         val fromClampedTilt = NaviRenderMath.previewGroundProject(10f, 100f, 90f)
         assertThat(fromOutOfRangeTilt.y).isWithin(1e-3f).of(fromClampedTilt.y)
+    }
 
-        val fromNegativeDepth = NaviRenderMath.previewGroundProject(10f, -500f, 45f)
-        val fromZeroDepth = NaviRenderMath.previewGroundProject(10f, 0f, 45f)
-        // 負の奥行き（カメラの後ろ）はdepth=0にクランプする。
-        assertThat(fromNegativeDepth.y).isWithin(1e-4f).of(fromZeroDepth.y)
-        assertThat(fromNegativeDepth.scale).isWithin(1e-4f).of(fromZeroDepth.scale)
+    // --- 近接平面（d+z>0）と「潰さず切る」方式（istech 2026-07-26 差し戻し増分・破綻1原因A是正） ---
+
+    @Test fun previewGroundProject_negativeDepthWithinNearPlaneStaysFiniteAndGoesDownward() {
+        // 自車の後ろ（depthが負）でも、近接平面(d+z>0)の範囲内なら0へ潰さず、有限のまま
+        // 画面下方向(+y)に出る（合格条件4「自車の後ろの地面が足元の下に続く」）。
+        val cameraDistancePx = 640f
+        val tiltDeg = 44f
+        val projected = NaviRenderMath.previewGroundProject(
+            lateralPx = 10f, depthPx = -100f, tiltDeg = tiltDeg, cameraDistancePx = cameraDistancePx,
+        )
+        assertThat(projected.y.isFinite()).isTrue()
+        assertThat(projected.scale.isFinite()).isTrue()
+        assertThat(projected.y).isGreaterThan(0f) // 画面下方向＝+y
+    }
+
+    @Test fun previewGroundProject_noClampRegression_differentNegativeDepthsDoNotCollapseToSameY() {
+        // 破綻1の直接の回帰テスト: 以前は depth を 0 にクランプしていたため、異なる負の depth が
+        // すべて同じ y（depth=0の位置）に叩き潰されて「折り目（崖）」に見えていた。
+        // 潰さず切る方式では、近接平面の範囲内にある限り異なる負のdepthは異なるyになる。
+        val cameraDistancePx = 640f
+        val tiltDeg = 44f
+        val a = NaviRenderMath.previewGroundProject(0f, -50f, tiltDeg, cameraDistancePx)
+        val b = NaviRenderMath.previewGroundProject(0f, -150f, tiltDeg, cameraDistancePx)
+        val zero = NaviRenderMath.previewGroundProject(0f, 0f, tiltDeg, cameraDistancePx)
+        assertThat(a.y).isNotEqualTo(zero.y)
+        assertThat(b.y).isNotEqualTo(zero.y)
+        assertThat(a.y).isNotEqualTo(b.y)
+    }
+
+    @Test fun previewGroundNearDepthPx_isNullWhenTiltIsNearZero() {
+        // θ≈0では地面がほぼ真上から見えており、d+z>0の制約が意味を持たない＝制限なし。
+        assertThat(NaviRenderMath.previewGroundNearDepthPx(0f)).isNull()
+    }
+
+    @Test fun previewGroundNearDepthPx_isNegativeAndBoundsTheVisibleRange() {
+        val tiltDeg = 44f
+        val cameraDistancePx = 640f
+        val depthMin = NaviRenderMath.previewGroundNearDepthPx(tiltDeg, cameraDistancePx)
+        assertThat(depthMin).isNotNull()
+        assertThat(depthMin!!).isLessThan(0f) // 自車より手前（後ろ）側にある
+
+        // depthMin ちょうどでは d+z がほぼ0＝scaleが非常に大きいが有限、depthMinより奥(手前でない側)
+        // では通常の値域に戻る。
+        val atMin = NaviRenderMath.previewGroundProject(0f, depthMin, tiltDeg, cameraDistancePx)
+        assertThat(atMin.scale.isFinite()).isTrue()
+    }
+
+    // --- 地平線（[NaviRenderMath.previewGroundHorizonOffsetY]）はヨーに依存しない ---
+
+    @Test fun previewGroundHorizonOffsetY_hasNoYawParameter_soItCannotDependOnYaw() {
+        // 関数シグネチャ自体がyawDegを取らない＝ヨーに依存しないことが型で保証される
+        // （★破綻1「地平線が常に水平」の担保。以前のバグはフェード演出がヨーで斜めに見えていた
+        // だけで、地平線そのものの位置計算にヨーは元々関与していなかった）。
+        val a = NaviRenderMath.previewGroundHorizonOffsetY(44f, 640f)
+        val b = NaviRenderMath.previewGroundHorizonOffsetY(44f, 640f)
+        assertThat(a).isEqualTo(b)
+    }
+
+    @Test fun previewGroundHorizonOffsetY_isNullAtZeroTiltAndNegativeAboveZero() {
+        assertThat(NaviRenderMath.previewGroundHorizonOffsetY(0f)).isNull()
+        val horizon = NaviRenderMath.previewGroundHorizonOffsetY(44f, 640f)
+        assertThat(horizon).isNotNull()
+        assertThat(horizon!!).isLessThan(0f) // 自車接地点より画面上方向
+    }
+
+    @Test fun previewGroundHorizonOffsetY_matchesReferenceFormula() {
+        // istech `navi_preview_target_v2.html` の horizonY = oy - D/tan(theta) と同式であることの確認。
+        val tiltDeg = 44f
+        val d = 500f
+        val theta = Math.toRadians(tiltDeg.toDouble())
+        val expected = (-d / Math.tan(theta)).toFloat()
+        assertThat(NaviRenderMath.previewGroundHorizonOffsetY(tiltDeg, d)!!).isWithin(1e-2f).of(expected)
+    }
+
+    // --- 奥行きが増すほど格子間隔が単調に縮む ---
+
+    @Test fun previewGroundProject_gridSpacingShrinksMonotonicallyWithDepth() {
+        val tiltDeg = 44f
+        val cameraDistancePx = 640f
+        val cellPx = 40f
+        val depths = (0..10).map { it * cellPx }
+        val ys = depths.map { NaviRenderMath.previewGroundProject(0f, it, tiltDeg, cameraDistancePx).y }
+        val spacings = (0 until ys.size - 1).map { kotlin.math.abs(ys[it + 1] - ys[it]) }
+        for (i in 0 until spacings.size - 1) {
+            assertThat(spacings[i + 1]).isLessThan(spacings[i])
+        }
+    }
+
+    // --- カメラ距離がステージ高に比例する（[NaviRenderMath.previewGroundCameraDistancePx]） ---
+
+    @Test fun previewGroundCameraDistancePx_isProportionalToStageHeight() {
+        assertThat(NaviRenderMath.previewGroundCameraDistancePx(1000f))
+            .isWithin(1e-3f).of(1000f * NaviRenderMath.PREVIEW_CAMERA_DISTANCE_FRACTION)
+        assertThat(NaviRenderMath.previewGroundCameraDistancePx(2000f))
+            .isWithin(1e-3f).of(2000f * NaviRenderMath.PREVIEW_CAMERA_DISTANCE_FRACTION)
+    }
+
+    @Test fun previewGroundProject_similarAcrossStageSizesWhenCameraDistanceScalesWithHeight() {
+        // 同じtiltなら、ステージ寸法（＝worldUnitPx）を変えても、カメラ距離が比例して求まっている限り
+        // 見え方は相似になる（x/height, y/heightがステージ高に依存しない）。
+        val tiltDeg = 50f
+        val heightSmall = 800f
+        val heightLarge = 1600f // 2倍
+        val dSmall = NaviRenderMath.previewGroundCameraDistancePx(heightSmall)
+        val dLarge = NaviRenderMath.previewGroundCameraDistancePx(heightLarge)
+
+        val lateralFraction = 0.1f
+        val depthFraction = 0.4f
+        val small = NaviRenderMath.previewGroundProject(
+            lateralFraction * heightSmall, depthFraction * heightSmall, tiltDeg, dSmall,
+        )
+        val large = NaviRenderMath.previewGroundProject(
+            lateralFraction * heightLarge, depthFraction * heightLarge, tiltDeg, dLarge,
+        )
+        assertThat(small.scale).isWithin(1e-3f).of(large.scale)
+        assertThat(small.x / heightSmall).isWithin(1e-4f).of(large.x / heightLarge)
+        assertThat(small.y / heightSmall).isWithin(1e-4f).of(large.y / heightLarge)
     }
 
     // --- プレビュー地面のヨー回転（[NaviRenderMath.previewGroundRotateYaw]） ---

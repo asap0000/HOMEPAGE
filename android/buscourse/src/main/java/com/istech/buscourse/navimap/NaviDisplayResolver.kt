@@ -5,6 +5,7 @@ data class NaviSettingsPatch(
     val tiltDeg: Double? = null,
     val videoAmountPct: Int? = null,
     val videoLateralPct: Int? = null,
+    val videoVerticalPct: Int? = null,
     val selfCarFwdBackPct: Int? = null,
     val selfCarLateralPct: Int? = null,
     val orientation: NaviMapOrientation? = null,
@@ -41,6 +42,9 @@ object NaviDisplayResolver {
             ),
             videoLateralPct = defaults.clampVideoLateralPct(
                 patch.videoLateralPct ?: defaults.VIDEO_LATERAL_PCT,
+            ),
+            videoVerticalPct = defaults.clampVideoVerticalPct(
+                patch.videoVerticalPct ?: defaults.VIDEO_VERTICAL_PCT,
             ),
             selfCarFwdBackPct = defaults.clampSelfCarFwdBackPct(
                 patch.selfCarFwdBackPct ?: defaults.SELF_CAR_FWD_BACK_PCT,

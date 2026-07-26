@@ -10,8 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -36,21 +36,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -273,6 +280,37 @@ private fun buildPreviewRouteData(): NaviRouteData {
 /** 経路線の色（[com.istech.buscourse.ui.NaviScreen]と同じブランド青）。 */
 private const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
 
+/**
+ * 映像オーバーレイと「実機ナビ画面枠」の角丸フレームが干渉しないための、四辺共通のわずかな余白
+ * （ステージの幅/高さに対する比率、chrome）。映像量・映像位置いずれの**設定値とも無関係**の純粋な
+ * チロムで、角丸フレームの角に直角の映像パネルが食い込む見た目（第2ラウンド確定不具合1／
+ * 第3ラウンド確定不具合9「Dの状態で映像枠の右辺が枠の内側ギリギリ〜外にかかって見える」）だけを
+ * 避けるための最小限の値。
+ *
+ * ★第3ラウンド是正: 旧`NAVI_VIDEO_OVERLAY_TOP_MARGIN_FRACTION`は上辺だけの固定値で、映像の
+ * **上下位置**設定（新設）や映像量100%（幅/高さがステージいっぱいになりうる）と組み合わせると、
+ * 「動かせるはずの範囲を勝手に狭める」＝§0で禁止された上限ガードに抵触しかねない。
+ * [videoOverlayFrameMarginPx]で「割ける余白があるときだけ使う」設計にし、映像サイズが枠いっぱいに
+ * 近く余白を割く余地が無いときは自動的に0へ縮む（＝映像を縮めたり動きを妨げたりはしない）。
+ *
+ * ★第4ラウンド是正（istech 2026-07-26・確定不具合7）: 0.035だと映像量80%時の実測余白が
+ * 枠の角丸半径（[com.istech.buscourse.ui]側`NAVI_PREVIEW_FRAME_CORNER_RADIUS`）より小さくなり、
+ * 「コーナー飾りが切れる」原因の一端になっていた。0.05へ引き上げ、角丸半径を8dpへ縮めた変更
+ * （枠デコレーション側）と合わせて、通常の映像量では弧の内側に余白が収まるようにする。
+ */
+private const val NAVI_VIDEO_OVERLAY_FRAME_MARGIN_FRACTION = 0.05f
+
+/**
+ * [NAVI_VIDEO_OVERLAY_FRAME_MARGIN_FRACTION]による理想の余白と、実際に動かせる残り幅
+ * （`(ステージ幅/高さ - オーバーレイ幅/高さ) / 2`）の小さい方を返す。映像が枠いっぱいのときは
+ * 残り幅が0になるため、この関数も0を返す＝映像サイズ自体には一切影響しない「使える分だけ使う」余白。
+ */
+private fun videoOverlayFrameMarginPx(stageExtentPx: Float, overlayExtentPx: Float): Float {
+    val idealMarginPx = stageExtentPx * NAVI_VIDEO_OVERLAY_FRAME_MARGIN_FRACTION
+    val availableMarginPx = ((stageExtentPx - overlayExtentPx) / 2f).coerceAtLeast(0f)
+    return minOf(idealMarginPx, availableMarginPx)
+}
+
 /** 初期/スクラブ時のカメラズーム（[com.istech.buscourse.ui.NaviScreen]のDEFAULT_NAVI_ZOOMを踏襲）。 */
 private const val NAVI_RENDERER_ZOOM = 16.0
 
@@ -341,12 +379,29 @@ private fun NaviRendererBody(
 
             // 縦映像9:16オーバーレイ（MapViewの外側＝Composeレイヤ。地図をリサイズしない・設計§4）。
             // z順はpin/自車(z2)より後＝映像(z3)が上に重なる（設計§3のレイヤ図と一致）。
+            //
+            // ★第2ラウンド是正（istech 2026-07-26・オーナー設計意図追記後）: 映像量52%・上部中央という
+            // **サイズと位置は変更しない**（実機の事実そのもの。「経路が隠れるから映像を小さく/ずらす」は
+            // 誤り＝オーナーが明示的に否定）。映像の実効サイズ（settings.videoAmountPct由来の
+            // widthPx/heightPx）自体は一切変更しない。
+            //
+            // ★第3ラウンド是正: 上下位置設定を新設したため、オフセット計算をX/Y対称に揃える
+            // （[NaviRenderMath.videoOverlayOffsetXPx]/[videoOverlayOffsetYPx]、同型）。
+            // 四辺共通の[videoOverlayFrameMarginPx]チロムを両軸に適用し、既定値（左右50=中央は
+            // 元々マージン非依存、上下0=上端）では**現状の見え方を変えない**
+            // （映像量52%のときmarginは十分な残り幅の範囲内でidealMarginPxそのものになり、
+            // 旧`NAVI_VIDEO_OVERLAY_TOP_MARGIN_FRACTION`と同じ値に一致する）。
             if (settings.videoAmountPct > 0) {
                 val videoSize = NaviRenderMath.videoOverlaySizePx(
                     stageWidthPx, stageHeightPx, settings.videoAmountPct, isLandscape,
                 )
-                val offsetX = NaviRenderMath.videoOverlayOffsetXPx(
-                    stageWidthPx, videoSize.widthPx, settings.videoLateralPct,
+                val marginXPx = videoOverlayFrameMarginPx(stageWidthPx, videoSize.widthPx)
+                val marginYPx = videoOverlayFrameMarginPx(stageHeightPx, videoSize.heightPx)
+                val offsetX = marginXPx + NaviRenderMath.videoOverlayOffsetXPx(
+                    stageWidthPx - marginXPx * 2f, videoSize.widthPx, settings.videoLateralPct,
+                )
+                val offsetY = marginYPx + NaviRenderMath.videoOverlayOffsetYPx(
+                    stageHeightPx - marginYPx * 2f, videoSize.heightPx, settings.videoVerticalPct,
                 )
                 with(localDensity) {
                     NaviVideoOverlay(
@@ -357,7 +412,7 @@ private fun NaviRendererBody(
                         theme = settings.theme,
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .offset(x = offsetX.toDp(), y = 0.dp)
+                            .offset(x = offsetX.toDp(), y = offsetY.toDp())
                             .width(videoSize.widthPx.toDp())
                             .height(videoSize.heightPx.toDp()),
                     )
@@ -576,6 +631,7 @@ private fun NaviRendererMapStage(
                 selfCarRotationDeg = selfCarRotationDeg,
                 theme = settings.theme,
                 counterRotationXDeg = extraRotationXDeg,
+                stageWidthPx = stageWidthPx,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -636,6 +692,7 @@ private fun NaviRendererFallbackStage(
             theme = settings.theme,
             // フォールバックは台形変形を掛けていない（グリッド地面もピンも素の平面）ため逆回転は不要。
             counterRotationXDeg = 0f,
+            stageWidthPx = stageWidthPx,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -650,6 +707,15 @@ private fun NaviRendererFallbackStage(
  * `worldUnitPx`＝ステージ高さの倍数。lateral: 負=左／正=右、depth: 0=自車直近／大きいほど奥）。
  * 緩やかなS字で、奥（消失点付近）まで十分伸ばす（合格条件1「有限の板の端が見えてはいけない」）。
  */
+/**
+ * ★第3ラウンド是正（istech 2026-07-26・確定不具合4）: 第2ラウンドの配置は自車ごく近傍
+ * （depth 0.01〜0.05）で左右へ激しくジグザグしており、投影されると「自車を中心とした星形
+ * （アスタリスク）」に見え、枝の先が停留所も無いまま行き止まりで終わっているように見えた
+ * （Opus指摘・発注元が独立に確認）。「詰め込み」より**「バスの通る道に見えること」を優先**し、
+ * 一次資料`navi_preview_target_v2.html`の`ROUTE`定数と同じ、手前から奥へ一本の緩いS字として
+ * 単調に伸びる形へ作り直す（depthが単調増加＝折り返し無し）。停留所が映像の裏に隠れるのは
+ * 構わない（§0で明示された仕様）。隠れないように無理に寄せない。
+ */
 private val PREVIEW_ROUTE_POINTS_WORLD = listOf(
     0.00f to 0.05f,
     -0.10f to 0.40f,
@@ -659,8 +725,17 @@ private val PREVIEW_ROUTE_POINTS_WORLD = listOf(
     0.10f to 3.40f,
 )
 
-/** プレビューの停留所の固定位置（世界座標）。[PREVIEW_ROUTE_POINTS_WORLD]に沿わせた4点
- * （停留所1が最も手前＝depth小、停留所4が最も奥＝depth大）。互いに間隔を空ける（合格条件6）。 */
+/**
+ * プレビューの停留所の固定位置（世界座標）。[PREVIEW_ROUTE_POINTS_WORLD]に沿わせた4点
+ * （停留所1が最も手前＝depth小、停留所4が最も奥＝depth大）。互いに間隔を空ける（合格条件6）。
+ *
+ * ★第3ラウンド是正（istech 2026-07-26・確定不具合4、一次資料`navi_preview_target_v2.html`の
+ * `STOPS`定数と同じ配置に戻す）: 第2ラウンドはdepthを浅く保って「映像の下の隙間に必ず全部収める」
+ * ことを優先したが、それが経路のジグザグ（星形）の原因そのものだった。§0の設計意図
+ * （「映像が地図を隠すのは仕様」）に立ち返り、**停留所が映像の裏に隠れても構わない**という前提で、
+ * 経路に沿った自然な間隔に戻す。既定設定では停留所3・4が映像の背後に隠れうるが、映像を
+ * 左右にずらし自車を反対側へ動かす十字キー操作で隙間に現れる（変更なし・運用は同じ）。
+ */
 private val PREVIEW_STOP_POINTS_WORLD = listOf(
     -0.08f to 0.40f,
     -0.14f to 0.95f,
@@ -674,14 +749,77 @@ private const val PREVIEW_HEADING_DEG = 20.0
 /** 地面グリッドの1マスの世界サイズ（[worldUnitPx]に対する比率）。 */
 private const val PREVIEW_GRID_CELL_FRACTION = 0.10f
 
-/** グリッドの奥行き方向のマス数（これを超えた先は描かない＝フェードで見えなくする）。 */
-private const val PREVIEW_GRID_DEPTH_CELLS = 46
+/**
+ * 奥の描画終端を決めるscaleの閾値（★破綻1是正: 「70/46セル」のようなマジックナンバーで
+ * 押し切らず、[NaviRenderMath.previewGroundProject]のscale＝d/(d+z)がこの値まで縮小した depth を
+ * 解析的に解いて終端にする。scaleがこの値まで下がれば画面上ではほぼ地平線に達しており、
+ * それ以上奥を描いても（フェードでどのみち透明になるため）意味がない）。
+ *
+ * ★第2ラウンド是正（istech 2026-07-26）: 旧0.08だと終端が地平線の手前で止まり、
+ * 「地平線まで届かない無地の帯」が残ることをオーナーが計算で確認（tilt=45°で終端-0.41×worldUnit
+ * ／地平線-0.45×worldUnit＝約4%の帯）。0.08→0.015へ大幅に下げ、終端をほぼ地平線まで詰める
+ * （[PREVIEW_GRID_MAX_LINES_PER_AXIS]も合わせて引き上げる。フェード式`previewGroundFadeAlpha`が
+ * 終端付近をほぼ透明にするため、線数が増えても大半は`segmentAlpha>0.02f`のガードで実際には
+ * 描画されない＝見た目のコストは線数ほど増えない）。
+ */
+private const val PREVIEW_GRID_FAR_FADE_SCALE = 0.015f
 
 /**
- * グリッドの左右方向の半幅マス数（片側）。奥で透視収束しても画面四隅まで地面が届くよう、
- * 十分大きめに取る（合格条件1「有限の板の端が見えてはいけない」＝地面の"横"の端も含む）。
+ * 傾き≈0（事実上の正射影＝遠近感なし）のときの奥の描画終端＝[worldUnitPx]の何倍か。
+ * θ=0ではscaleが常に1で上記の閾値解法が使えない（合格条件のとおり地面は全面に見える）ため、
+ * ステージ寸法基準のフォールバックにする。
  */
-private const val PREVIEW_GRID_HALF_WIDTH_CELLS = 70
+private const val PREVIEW_GRID_FLAT_TILT_FAR_DEPTH_FACTOR = 2.2f
+
+/**
+ * 左右方向の描画半幅＝ステージ幅の何倍か。ヨー回転で斜めに振れても四隅まで地面が届くよう、
+ * 半幅（ステージ幅の半分）に対してさらに余裕を持たせる。
+ */
+private const val PREVIEW_GRID_HALF_WIDTH_STAGE_WIDTH_FACTOR = 0.5f
+
+/** 左右方向の追加余裕（[worldUnitPx]比。ヨー回転・近接平面側の拡大を見込む）。 */
+private const val PREVIEW_GRID_HALF_WIDTH_MARGIN_WORLD_UNIT_FACTOR = 0.5f
+
+/** 描画するグリッド線数の安全上限（θ→90付近など理論式が極端な本数を返した場合の暴走防止）。
+ * ★第2ラウンド是正: [PREVIEW_GRID_FAR_FADE_SCALE]を大幅に下げた分、終端到達に必要な線数も増えるため
+ * 140→350へ引き上げる（実機描画で許容範囲であることを確認する）。
+ * ★第3ラウンド是正（確定不具合6）: 350では低い傾き（sinθが小さい）ほど必要なaheadCellsが
+ * 上限に届いて実際の終端が地平線の手前で打ち切られ、「地平線まで届かない無地の帯」が残っていた
+ * （round2は`PREVIEW_GRID_FAR_FADE_SCALE`だけ下げたが、`aheadCells`の上限コーピングまでは
+ * 追随できていなかった）。350→900へ引き上げる。フェードで大半のセグメントは
+ * `segmentAlpha>0.02f`のガードにより実際には描画されないため、見た目のコストは線数ほど増えない。 */
+private const val PREVIEW_GRID_MAX_LINES_PER_AXIS = 900
+
+/**
+ * 停留所ピンの縮小率下限。
+ * ★第2ラウンド是正（istech 2026-07-26）: 一次資料`navi_preview_target_v2.html`の値を
+ * `Math.max(.55, ...)`→`Math.max(.28, ...)`に更新済み（一次資料コメント参照）。0.55だと
+ * depth 0.95/1.60/2.40の停留所3点が実測で全部0.55に潰れて同じ大きさになり、「奥ほど小さい」という
+ * 遠近の手がかりが消えていた（オーナーが計算で確認）。下限を0.28まで下げて手がかりを回復する。
+ */
+private const val PREVIEW_PIN_MIN_SCALE = 0.28f
+
+/**
+ * 停留所の接地点（楕円）の半径px（[radiusXPx]/[radiusYPx]、奥ほど[scale]で小さくなるが視認できる
+ * 下限あり）。[drawPreviewStopGroundMarks]（接地点そのものの描画）と、名前ピルの持ち上げ量
+ * （[NaviRendererPreviewGridStage]内の`pinPoleHeightPx`）の**両方が同じ値を参照する**ための
+ * 単一ソース（★第4ラウンド是正・確定不具合6の実体: 以前は持ち上げ量が接地点の実際の半径と
+ * 無関係な固定2dpだったため、ラベル下辺が接地点の楕円の上端にちょうど乗らず「浮いて見える／
+ * めり込んで見える」ことがあった。持ち上げ量＝楕円の縦半径そのものにすることで、ラベルの下辺が
+ * **楕円の上端に密着**する＝オーナー決定「浮かせない」を厳密に満たす）。
+ */
+private data class PreviewStopGroundRadiusPx(val x: Float, val y: Float)
+
+private fun previewStopGroundRadiusPx(scale: Float): PreviewStopGroundRadiusPx {
+    // ★第3ラウンド是正（確定不具合7）: 接地点の白い点が小さすぎて「ゴミ」に見えたため、
+    // scale比例の縮小（奥ほど小さい＝合格条件6）は維持しつつ、視認できる下限サイズを設けた。
+    val radiusX = (11f * scale).coerceAtLeast(5f)
+    val radiusY = (5f * scale).coerceAtLeast(2.5f)
+    return PreviewStopGroundRadiusPx(radiusX, radiusY)
+}
+
+/** 自車の接地影の半径＝[worldUnitPx]に対する比率（あわせて直す：接地の楕円影）。 */
+private const val PREVIEW_SELF_CAR_SHADOW_RADIUS_FRACTION = 0.013f
 
 /**
  * 設定画面プレビュー専用のグリッド平面ステージ。[NaviRenderSource.Preview]は常にこのステージを使う
@@ -724,8 +862,10 @@ private fun NaviRendererPreviewGridStage(
     modifier: Modifier = Modifier,
 ) {
     val groundColor = previewGridGroundColor(settings.theme)
+    val skyColor = previewGridSkyColor(settings.theme)
     val lineColor = previewGridLineColor(settings.theme)
     val routeLineColor = previewGridRouteLineColor(settings.theme)
+    val routeCasingColor = previewGridRouteCasingColor(settings.theme)
 
     // ヘディングアップ時のみ合成トゥルーヘディングをカメラ方位として使う（実ステージと同じ型）。
     val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) PREVIEW_HEADING_DEG else 0.0
@@ -735,7 +875,19 @@ private fun NaviRendererPreviewGridStage(
     val tiltDeg = NaviRenderMath.previewTiltRotationXDeg(settings.tiltDeg.toFloat())
 
     // 世界単位＝ステージ高さに比例させる（デバイスサイズが変わっても見え方の縮尺感が揃う）。
+    // ★ここでの「ステージ」＝呼び出し元(NaviSettingsScreen)が実機ナビ画面の外形比率で組んだ枠そのもの
+    // （破綻2是正）。[NaviRendererBody]のBoxWithConstraintsがこの枠の寸法をそのまま
+    // stageWidthPx/stageHeightPxとして読むため、本関数側の変更は不要（枠を渡す側の変更で完結する）。
     val worldUnitPx = stageHeightPx
+
+    // ★破綻1・原因B是正: カメラ距離をステージ高に比例させる（絶対px定数だった）。
+    val cameraDistancePx = NaviRenderMath.previewGroundCameraDistancePx(worldUnitPx)
+    // ★破綻1・原因A是正: 近接平面(d+z>0)の下限。この手前（自車のさらに後ろ）は「切る」(clip)。
+    // nullはθ≈0（水平面をほぼ真上から見ている）で制限なし。
+    val depthMinPx = NaviRenderMath.previewGroundNearDepthPx(tiltDeg, cameraDistancePx)
+    // 地平線（[NaviRenderMath.previewGroundHorizonOffsetY]、ヨーに依存しない＝常に水平）。
+    // nullはθ≈0で地平線なし（地面が全面）。
+    val horizonOffsetY = NaviRenderMath.previewGroundHorizonOffsetY(tiltDeg, cameraDistancePx)
 
     val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
     val originPx = remember(stageWidthPx, stageHeightPx, selfCarAnchor) {
@@ -747,18 +899,28 @@ private fun NaviRendererPreviewGridStage(
         val yawed = NaviRenderMath.previewGroundRotateYaw(
             lateralFraction * worldUnitPx, depthFraction * worldUnitPx, yawDeg,
         )
-        return NaviRenderMath.previewGroundProject(yawed.x, yawed.y, tiltDeg)
+        return NaviRenderMath.previewGroundProject(yawed.x, yawed.y, tiltDeg, cameraDistancePx)
     }
 
-    val pinPlacements = remember(worldUnitPx, yawDeg, tiltDeg, originPx, routeData.stopPoints) {
+    val pinPlacements = remember(worldUnitPx, yawDeg, tiltDeg, cameraDistancePx, originPx, routeData.stopPoints) {
         routeData.stopPoints.mapIndexedNotNull { index, stop ->
             val base = PREVIEW_STOP_POINTS_WORLD.getOrNull(index) ?: return@mapIndexedNotNull null
             val projected = projectWorld(base.first, base.second)
             stop.sequenceIndex to PinPlacement(
                 point = Offset(originPx.x + projected.x, originPx.y + projected.y),
-                scale = projected.scale,
+                // ★破綻4是正: 一次資料と同じクランプ範囲(0.55..1)をここで確定し、以降
+                // billboardScale・支柱の高さ・接地点の大きさすべてで同じ値を使い回す。
+                scale = projected.scale.coerceIn(PREVIEW_PIN_MIN_SCALE, 1f),
             )
         }.toMap()
+    }
+
+    // ★第4ラウンド是正（istech 2026-07-26・確定不具合6）: 持ち上げ量＝接地点の楕円の縦半径そのもの
+    // （[previewStopGroundRadiusPx]、[drawPreviewStopGroundMarks]と同じ値を参照）にする。
+    // 以前は接地点の実際の大きさと無関係な固定2dpだったため、ラベル下辺が楕円の上端にちょうど
+    // 乗らなかった。これで「ラベルの下辺を接地点の楕円に密着させる（浮かせない）」を厳密に満たす。
+    val pinPoleHeightPx: (Int) -> Float = { sequenceIndex ->
+        previewStopGroundRadiusPx(pinPlacements[sequenceIndex]?.scale ?: 1f).y
     }
 
     // ★プレビュー領域の外へ描画を漏らさない（実機で「グリッドが設定カードの裏まで広がる」現象）。
@@ -766,13 +928,24 @@ private fun NaviRendererPreviewGridStage(
         Canvas(Modifier.fillMaxSize()) {
             drawPreviewGroundGrid(
                 groundColor = groundColor,
+                skyColor = skyColor,
                 lineColor = lineColor,
                 originPx = originPx,
                 yawDeg = yawDeg,
                 tiltDeg = tiltDeg,
                 worldUnitPx = worldUnitPx,
+                cameraDistancePx = cameraDistancePx,
+                depthMinPx = depthMinPx,
+                horizonOffsetY = horizonOffsetY,
             )
-            drawPreviewRouteLine(routeLineColor, originPx, ::projectWorld)
+            drawPreviewRouteLine(
+                routeLineColor, routeCasingColor, originPx, yawDeg, tiltDeg, cameraDistancePx, depthMinPx, worldUnitPx,
+            )
+            // 自車の接地影（★あわせて直す: 「接地の楕円影＋進行方向矢印」）。
+            drawPreviewGroundContactShadow(center = originPx, radiusPx = worldUnitPx * PREVIEW_SELF_CAR_SHADOW_RADIUS_FRACTION)
+            // 停留所の接地点（★破綻4是正の本体：ピルだけで「どこに立っているか」が無かった。
+            // ★第2ラウンド是正：接地点からの支柱の線は描かない）。
+            drawPreviewStopGroundMarks(pinPlacements)
         }
 
         // billboardピン＋自車は変形を一切受けないComposeレイヤ（上のKDoc参照）。角度に関係なく
@@ -787,9 +960,15 @@ private fun NaviRendererPreviewGridStage(
             theme = settings.theme,
             // 地面の変形はもうグラフィックレイヤーではなく自前の射影計算なので、打ち消す逆回転は不要。
             counterRotationXDeg = 0f,
-            pinScale = { sequenceIndex -> pinPlacements[sequenceIndex]?.scale?.coerceIn(0.45f, 1f) ?: 1f },
+            pinScale = { sequenceIndex -> pinPlacements[sequenceIndex]?.scale ?: 1f },
+            // ★破綻4是正: 停留所の接地点から名前ピルをわずかに持ち上げる隙間（px、奥ほど小さい）。
+            // ★第2ラウンド是正: 支柱の線は描かない（[drawPreviewStopGroundMarks]参照）。ここは
+            // 「名前はそのすぐ上」を表現するための純粋なオフセットのみ。
+            // Real/Fallbackステージはこの引数を渡さない（既定0f）ため見た目は変わらない。
+            pinPoleHeightPx = pinPoleHeightPx,
             // 自車は常にdepth=0（原点）に固定されるため、遠近縮小の対象にならない（scale=1固定）。
             selfCarScale = 1f,
+            stageWidthPx = stageWidthPx,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -798,165 +977,325 @@ private fun NaviRendererPreviewGridStage(
 /** [NaviRendererPreviewGridStage]の停留所ピン配置（スクリーン座標＋距離に応じた縮小率）。 */
 private data class PinPlacement(val point: Offset, val scale: Float)
 
+// ---------------------------------------------------------------------------------------------
+// 近接平面クリップ（★破綻1是正の中核: 潰す(clamp)のではなく切る(clip)）
+//
+// [NaviRenderMath.previewGroundNearDepthPx]のKDoc参照: `d+z<=0`になる depth は
+// [NaviRenderMath.previewGroundProject]へ渡す**前**に線分ごと切る。頂点を単純に捨てると
+// 端がジグザグになるため、ここでは線分上でアフィンに`depth=depthMin`となる交点を解いて
+// そこで区切る。ヨー回転は線形写像なので、ヨー適用**後**の座標同士を素直に線形補間しても
+// （ヨー適用前で補間してからヨーを掛けたのと）同じ交点になる。
+// ---------------------------------------------------------------------------------------------
+
+/** ヨー適用後の地面座標1点（[NaviRenderMath.previewGroundRotateYaw]の出力をこの文脈用に明示した型）。 */
+private data class YawedGroundPoint(val yawedLateralPx: Float, val yawedDepthPx: Float)
+
+private fun yawGroundPoint(lateralPx: Float, depthPx: Float, yawDeg: Float): YawedGroundPoint {
+    val yawed = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg)
+    return YawedGroundPoint(yawed.x, yawed.y)
+}
+
+/**
+ * ヨー適用済みのポリラインを近接平面（[depthMinPx]、nullなら制限なし）で「切る」。
+ * 結果は0本以上の連続区間（それぞれ2点以上）のリスト＝近接平面をまたぐたびに区間が分かれる。
+ */
+private fun clipYawedPolylineAtNearPlane(
+    points: List<YawedGroundPoint>,
+    depthMinPx: Float?,
+): List<List<YawedGroundPoint>> {
+    if (depthMinPx == null) {
+        return if (points.size >= 2) listOf(points) else emptyList()
+    }
+    val runs = mutableListOf<MutableList<YawedGroundPoint>>()
+    var current: MutableList<YawedGroundPoint>? = null
+    for (i in points.indices) {
+        val p = points[i]
+        if (p.yawedDepthPx > depthMinPx) {
+            var run = current
+            if (run == null) {
+                run = mutableListOf()
+                if (i > 0 && points[i - 1].yawedDepthPx <= depthMinPx) {
+                    run.add(interpolateAtNearPlane(points[i - 1], p, depthMinPx))
+                }
+                runs.add(run)
+                current = run
+            }
+            run.add(p)
+        } else {
+            val run = current
+            if (run != null) {
+                run.add(interpolateAtNearPlane(points[i - 1], p, depthMinPx))
+                current = null
+            }
+        }
+    }
+    return runs.filter { it.size >= 2 }
+}
+
+/** 線分[a]→[b]上で`yawedDepthPx == depthMinPx`となる交点をアフィン補間で求める。 */
+private fun interpolateAtNearPlane(a: YawedGroundPoint, b: YawedGroundPoint, depthMinPx: Float): YawedGroundPoint {
+    val denom = b.yawedDepthPx - a.yawedDepthPx
+    val t = if (denom != 0f) ((depthMinPx - a.yawedDepthPx) / denom).coerceIn(0f, 1f) else 0f
+    return YawedGroundPoint(
+        yawedLateralPx = a.yawedLateralPx + (b.yawedLateralPx - a.yawedLateralPx) * t,
+        yawedDepthPx = depthMinPx,
+    )
+}
+
+/**
+ * 奥行きに応じたフェード係数（0=透明・1=不透明）。手前～自車の後ろ（depth<=0）は常に不透明で、
+ * [farDepthPx]に近づくほど二次的に透明へ近づく（奥は空に溶かす。合格条件1）。
+ */
+private fun previewGroundFadeAlpha(effectiveDepthPx: Float, farDepthPx: Float): Float {
+    if (farDepthPx <= 0f) return 1f
+    val t = (effectiveDepthPx.coerceAtLeast(0f) / farDepthPx).coerceIn(0f, 1f)
+    val eased = 1f - t
+    return eased * eased
+}
+
+/**
+ * 世界座標のポリライン（ヨー適用**前**の(lateralPx, depthPx)の並び）を、ヨー→近接平面クリップ→
+ * 透視投影の順に処理し、区間ごとに奥行きフェードを掛けながらCanvasへ描く。
+ * グリッド地面・経路線の両方が共有する下請け（★破綻1是正の実体）。
+ */
+private fun DrawScope.drawFadingClippedGroundPolyline(
+    rawPoints: List<Pair<Float, Float>>,
+    yawDeg: Float,
+    tiltDeg: Float,
+    cameraDistancePx: Float,
+    depthMinPx: Float?,
+    farDepthPx: Float,
+    originPx: Offset,
+    color: Color,
+    strokeWidth: Float,
+    /** 線分のキャップ形状（★第4ラウンド是正: 経路の帯・縁取りは継ぎ目に隙間が出ないよう丸める）。 */
+    cap: StrokeCap = StrokeCap.Butt,
+) {
+    val yawedPoints = rawPoints.map { (lateralPx, depthPx) -> yawGroundPoint(lateralPx, depthPx, yawDeg) }
+    val runs = clipYawedPolylineAtNearPlane(yawedPoints, depthMinPx)
+    for (run in runs) {
+        var prevScreen: Offset? = null
+        var prevAlpha = 0f
+        for (p in run) {
+            val alpha = previewGroundFadeAlpha(p.yawedDepthPx, farDepthPx)
+            val projected = NaviRenderMath.previewGroundProject(p.yawedLateralPx, p.yawedDepthPx, tiltDeg, cameraDistancePx)
+            val screen = Offset(originPx.x + projected.x, originPx.y + projected.y)
+            val prev = prevScreen
+            if (prev != null && screen.isFinite() && prev.isFinite()) {
+                val segmentAlpha = (prevAlpha + alpha) * 0.5f
+                if (segmentAlpha > 0.02f) {
+                    drawLine(
+                        color.copy(alpha = color.alpha * segmentAlpha), prev, screen,
+                        strokeWidth = strokeWidth, cap = cap,
+                    )
+                }
+            }
+            prevScreen = screen
+            prevAlpha = alpha
+        }
+    }
+}
+
+private fun Offset.isFinite(): Boolean = x.isFinite() && y.isFinite()
+
 /**
  * グリッド地面を1枚だけ描く（合格条件2）。[NaviRenderMath.previewGroundProject]で各格子線を
  * 直接スクリーン座標へ投影するため、傾きが増すほど格子が自然に詰まって消失点へ収束し（合格条件3）、
  * 奥は透明度を落として空と溶け合わせる（合格条件1・「有限の板の端が見えてはいけない」）。
- * 地面の塗り自体も同じ投影で作った台形（ファン）1枚をグラデーション塗りするだけで、
- * 「地面矩形＋外側の背景グリッド」のような二重構造を作らない。
+ *
+ * ★破綻1是正（2026-07-26差し戻し増分）:
+ * - 塗りは「台形ファン1枚のグラデーション」ではなく**地平線から下の矩形**にする
+ *   （一次資料`navi_preview_target_v2.html`の「作り直し後」参照。ファン1枚だと有限の板の端が
+ *   見えてしまう。矩形なら地平線が動く限り常に枠いっぱいを覆う）。
+ * - 地平線から上は空、θ≈0（[horizonOffsetY]がnull）のときは地平線が無く地面が全面。
+ * - グリッド線は自車の**後ろ**（depth<0）も[depthMinPx]まで描き、近接平面は
+ *   [clipYawedPolylineAtNearPlane]で「潰さず切る」。
+ * - 描画範囲（左右半幅・奥の終端）は`70`/`46`のようなマジックナンバーではなく、
+ *   ステージ寸法とscaleの閾値（[PREVIEW_GRID_FAR_FADE_SCALE]）から算出する。
  */
 private fun DrawScope.drawPreviewGroundGrid(
     groundColor: Color,
+    skyColor: Color,
     lineColor: Color,
     originPx: Offset,
     yawDeg: Float,
     tiltDeg: Float,
     worldUnitPx: Float,
+    cameraDistancePx: Float,
+    depthMinPx: Float?,
+    horizonOffsetY: Float?,
 ) {
     val cellPx = worldUnitPx * PREVIEW_GRID_CELL_FRACTION
-    val halfWidthCells = PREVIEW_GRID_HALF_WIDTH_CELLS
-    val depthCells = PREVIEW_GRID_DEPTH_CELLS
-    val farDepthPx = depthCells * cellPx
-    val halfWidthPx = halfWidthCells * cellPx
 
-    fun toScreen(lateralPx: Float, depthPx: Float): Offset {
-        val yawed = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg)
-        val projected = NaviRenderMath.previewGroundProject(yawed.x, yawed.y, tiltDeg)
-        return Offset(originPx.x + projected.x, originPx.y + projected.y)
-    }
-
-    // ★オーナー指摘（2026-07-26・地平線が傾く不具合）: [NaviRenderMath.previewGroundRotateYaw]は
-    // ヨー回転でlateralとdepthを混ぜる。以前はここのフェードを「回転前の行/列インデックス」だけで
-    // 決めていたため、ヘディングアップでヨーが掛かると、同じ行でも列（lateral）によって
-    // 「回転後に実際どれだけ奥か」が大きく変わってしまい（片側は実質手前・反対側は実質奥）、
-    // 本来なら消失点の手前で滑らかに透明になるはずの縁が、そのばらつきのぶんだけ斜めの
-    // 筋として可視化されていた（＝斜めの地平線に見えるバグの実体）。
-    //
-    // 対策: フェードの入力を「回転前のインデックス」ではなく、[toScreen]に実際渡っている
-    // **ヨー適用後の実効奥行き**（[effectiveDepthPx]）にする。これは頂点ごとに計算するため、
-    // 同じ行/列の中でもlateral位置による実効奥行きの違いを正しく反映し、画面へ実際に投影される
-    // 位置が奥（＝消失点/地平線に近い）ほど、ヨー角に関係なく一様に透明へ近づく。
-    fun fadeAlpha(effectiveDepthPx: Float): Float {
-        val t = (effectiveDepthPx.coerceAtLeast(0f) / farDepthPx).coerceIn(0f, 1f)
-        val eased = (1f - t)
-        return eased * eased
-    }
-
-    fun fadeAlphaAt(lateralPx: Float, depthPx: Float): Float {
-        val effectiveDepthPx = NaviRenderMath.previewGroundRotateYaw(lateralPx, depthPx, yawDeg).y
-        return fadeAlpha(effectiveDepthPx)
-    }
-
-    // ★地面の塗り＝1枚のファン（扇形）ポリゴンをグラデーションで塗るだけ（二重構造を作らない）。
-    // 左右の外周を「手前→奥→手前」の順にたどって1つの閉じたPathにする。
-    val fillPath = Path()
-    val edgeSamples = 24
-    for (i in 0..edgeSamples) {
-        val depth = farDepthPx * (i.toFloat() / edgeSamples)
-        val p = toScreen(-halfWidthPx, depth)
-        if (i == 0) fillPath.moveTo(p.x, p.y) else fillPath.lineTo(p.x, p.y)
-    }
-    for (i in edgeSamples downTo 0) {
-        val depth = farDepthPx * (i.toFloat() / edgeSamples)
-        val p = toScreen(halfWidthPx, depth)
-        fillPath.lineTo(p.x, p.y)
-    }
-    fillPath.close()
-
-    // ★塗りの奥フェードも同じ理由でヨーに配慮する: 中央だけでなく奥の縁の左右両端も採寸し、
-    // 「原点から見て最も奥に見えていない（＝もっとも手前寄りにズレた）候補」を終端に使う。
-    // ヨーで非対称になっても、縁のどこか一点が半端に不透明のまま残ることがないようにするため
-    // （合格条件1「有限の板の端が見えてはいけない」を塗り側でも保証する）。
-    val farLeft = toScreen(-halfWidthPx, farDepthPx)
-    val farCenter = toScreen(0f, farDepthPx)
-    val farRight = toScreen(halfWidthPx, farDepthPx)
-    // ★傾き90°付近ではyPrime(=depth*cos θ)が0へ潰れ、farXxx.yがoriginPx.yと一致しうる
-    // （地面が水平線へ収束する合格条件5どおりの挙動）。startY==endYだとグラデーション生成が
-    // 不正になりうるため、最低1pxの差を強制してクラッシュを防ぐ（非有限もここで弾く）。
-    val nearestFarY = listOf(farLeft.y, farCenter.y, farRight.y)
-        .filter { it.isFinite() }
-        .minByOrNull { kotlin.math.abs(it - originPx.y) }
-    val gradientEndY = if (nearestFarY != null && kotlin.math.abs(nearestFarY - originPx.y) >= 1f) {
-        nearestFarY
+    // --- 背景: 地平線から下が地面、上が空（地平線が無いθ≈0では全面が地面）。---
+    val horizonY = if (horizonOffsetY != null) {
+        (originPx.y + horizonOffsetY).coerceIn(0f, size.height)
     } else {
-        originPx.y - 1f
+        0f
     }
-    drawPath(
-        path = fillPath,
-        brush = Brush.verticalGradient(
-            colors = listOf(groundColor, groundColor.copy(alpha = 0f)),
-            startY = originPx.y,
-            endY = gradientEndY,
-        ),
-    )
+    if (horizonOffsetY != null && horizonY > 0f) {
+        drawRect(color = skyColor, topLeft = Offset.Zero, size = Size(size.width, horizonY))
+    }
+    if (horizonY < size.height) {
+        drawRect(color = groundColor, topLeft = Offset(0f, horizonY), size = Size(size.width, size.height - horizonY))
+    }
+    if (horizonOffsetY != null) {
+        drawLine(
+            color = lineColor.copy(alpha = (lineColor.alpha + 0.25f).coerceAtMost(1f)),
+            start = Offset(0f, horizonY),
+            end = Offset(size.width, horizonY),
+            strokeWidth = 1.6f,
+        )
+    }
 
-    // 縦線（lateral方向の各列）: 奥行きに沿ってポリラインで描く（透視で曲がって収束する）。
-    // フェードは区間（前後の頂点）の実効奥行きの平均で決める＝頂点ごとの急変を滑らかに繋ぐ。
+    // --- 描画範囲をステージ寸法とscale閾値から求める（マジックナンバーで押し切らない）。 ---
+    val sinTheta = kotlin.math.sin(Math.toRadians(tiltDeg.toDouble())).toFloat()
+    val farDepthPx = if (sinTheta > 1e-4f) {
+        (cameraDistancePx * (1f / PREVIEW_GRID_FAR_FADE_SCALE - 1f)) / sinTheta
+    } else {
+        worldUnitPx * PREVIEW_GRID_FLAT_TILT_FAR_DEPTH_FACTOR
+    }
+    val nearDepthPx = depthMinPx ?: -farDepthPx
+    // ★第3ラウンド是正（istech 2026-07-26・確定不具合5）: 世界座標の矩形をそのまま使うと、
+    // ヨー回転で角が欠ける（「地面が有限の板になっている。左端が斜めにスパッと切れ、画面左半分に
+    // 床が無い」）。原因はヨーが lateral と depth を混ぜるため（`previewGroundRotateYaw`）、
+    // depthが深い行ほどヨー後のlateral中心が `-depth*sin(yaw)` だけ横へシフトすること
+    // （矩形が平行四辺形になり、片側の隅が元のhalfWidthPxの範囲外へはみ出す）。
+    // 到達しうる最大depth（前後どちらか大きい方）×|sin(yaw)|の分だけhalfWidthPxを広げ、
+    // ヨー後も画面の四隅を確実に覆うようにする。
+    val maxDepthReachPx = maxOf(farDepthPx, -nearDepthPx, 0f)
+    val yawLateralSlackPx = maxDepthReachPx * kotlin.math.abs(kotlin.math.sin(Math.toRadians(yawDeg.toDouble()))).toFloat()
+    val halfWidthPx = size.width * PREVIEW_GRID_HALF_WIDTH_STAGE_WIDTH_FACTOR +
+        worldUnitPx * PREVIEW_GRID_HALF_WIDTH_MARGIN_WORLD_UNIT_FACTOR +
+        yawLateralSlackPx
+
+    val aheadCells = (farDepthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
+        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+    val behindCells = (-nearDepthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
+        .coerceIn(0, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+    val halfWidthCells = (halfWidthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
+        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+
+    // 縦線（lateral方向の各列）: depth方向にポリラインで描く（透視で曲がって収束する）。
     for (col in -halfWidthCells..halfWidthCells) {
         val lateralPx = col * cellPx
-        var prevPoint: Offset? = null
-        var prevAlpha = 0f
-        for (i in 0..depthCells) {
-            val depthPx = i * cellPx
-            val alpha = fadeAlphaAt(lateralPx, depthPx)
-            val screen = toScreen(lateralPx, depthPx)
-            val p = prevPoint
-            if (p != null) {
-                val segmentAlpha = (prevAlpha + alpha) * 0.5f
-                if (segmentAlpha > 0.02f) {
-                    drawLine(lineColor.copy(alpha = lineColor.alpha * segmentAlpha), p, screen, strokeWidth = 1.5f)
-                }
-            }
-            prevPoint = screen
-            prevAlpha = alpha
-        }
+        val points = (-behindCells..aheadCells).map { i -> lateralPx to i * cellPx }
+        drawFadingClippedGroundPolyline(
+            points, yawDeg, tiltDeg, cameraDistancePx, depthMinPx, farDepthPx, originPx, lineColor, 1.5f,
+        )
     }
 
-    // 横線（depth方向の各行）: 手前から奥へ、行ごとに左右を複数分割して描く。
-    // ★以前は行1本につきフェードを1回だけ（回転前のdepthPxのみから）決めていたため、
-    // ヨーが掛かると同じ行でも列によって実効奥行きが大きく違うのに同じ濃さで描かれ、
-    // それが斜めの筋として見えていた。ここも頂点ごとに実効奥行きを見る。
+    // 横線（depth方向の各行、自車の後ろの行も含む＝合格条件4）。
     val lateralSteps = 10
-    for (row in 0..depthCells) {
+    for (row in -behindCells..aheadCells) {
         val depthPx = row * cellPx
-        var prevPoint: Offset? = null
-        var prevAlpha = 0f
-        for (s in 0..lateralSteps) {
-            val lateralPx = -halfWidthPx + (2f * halfWidthPx) * (s.toFloat() / lateralSteps)
-            val alpha = fadeAlphaAt(lateralPx, depthPx)
-            val screen = toScreen(lateralPx, depthPx)
-            val p = prevPoint
-            if (p != null) {
-                val segmentAlpha = (prevAlpha + alpha) * 0.5f
-                if (segmentAlpha > 0.02f) {
-                    drawLine(lineColor.copy(alpha = lineColor.alpha * segmentAlpha), p, screen, strokeWidth = 1.5f)
-                }
-            }
-            prevPoint = screen
-            prevAlpha = alpha
+        val points = (-lateralSteps..lateralSteps).map { s ->
+            (-halfWidthPx + (2f * halfWidthPx) * ((s + lateralSteps).toFloat() / (2 * lateralSteps))) to depthPx
         }
+        drawFadingClippedGroundPolyline(
+            points, yawDeg, tiltDeg, cameraDistancePx, depthMinPx, farDepthPx, originPx, lineColor, 1.5f,
+        )
     }
 }
 
-/** 合成経路線（[PREVIEW_ROUTE_POINTS_WORLD]）を、地面と同じ投影関数でCanvasに描く。 */
+/**
+ * 合成経路線（[PREVIEW_ROUTE_POINTS_WORLD]）を、地面と同じ投影＋近接平面クリップでCanvasに描く。
+ * [worldUnitPx]は世界座標の比率(0..数)をpxへ換算するために必要（[PREVIEW_ROUTE_POINTS_WORLD]は
+ * ステージ高に対する比率で定義されているため）。
+ *
+ * ★第4ラウンド是正（istech 2026-07-26・確定不具合2）: 「映像枠の下端から自車へ伸びる青い線の
+ * 正体が分からない」（Sol「壁に見える」／Opus「経路か引き出し線か判別できない」）。
+ * **細い1本線**だと、映像の裏へ一部が隠れたときに残る短い区間だけでは「道」に見えず、
+ * 引き出し線や飾り線とも区別が付かない。**縁取り(casing)を持つ帯**にして、短い区間を覗いても
+ * 「道」と分かる描き方にする（映像の裏に入ること自体は仕様のまま変えない）。
+ * 縁取りを先に太く描き、その上に本体の細い塗りを重ねる（実装は同じ座標列を2回描くだけ、
+ * Canvasの描画順で下から縁取り→本体になる）。
+ */
 private fun DrawScope.drawPreviewRouteLine(
     color: Color,
+    casingColor: Color,
     originPx: Offset,
-    projectWorld: (lateralFraction: Float, depthFraction: Float) -> NaviRenderMath.PreviewGroundPointPx,
+    yawDeg: Float,
+    tiltDeg: Float,
+    cameraDistancePx: Float,
+    depthMinPx: Float?,
+    worldUnitPx: Float,
 ) {
+    val farDepthPx = Float.MAX_VALUE / 2f // 経路線はフェードさせない（固定サンプル全体を常に見せる）。
     val points = PREVIEW_ROUTE_POINTS_WORLD.map { (lateralFraction, depthFraction) ->
-        val projected = projectWorld(lateralFraction, depthFraction)
-        Offset(originPx.x + projected.x, originPx.y + projected.y)
+        lateralFraction * worldUnitPx to depthFraction * worldUnitPx
     }
-    for (i in 0 until points.size - 1) {
-        drawLine(color, points[i], points[i + 1], strokeWidth = 6f, cap = StrokeCap.Round)
+    drawFadingClippedGroundPolyline(
+        points, yawDeg, tiltDeg, cameraDistancePx, depthMinPx, farDepthPx, originPx,
+        casingColor, PREVIEW_ROUTE_CASING_WIDTH_PX, cap = StrokeCap.Round,
+    )
+    drawFadingClippedGroundPolyline(
+        points, yawDeg, tiltDeg, cameraDistancePx, depthMinPx, farDepthPx, originPx,
+        color, PREVIEW_ROUTE_LINE_WIDTH_PX, cap = StrokeCap.Round,
+    )
+}
+
+/** 経路の帯の本体幅px（★第4ラウンド是正: 6f→8fへ太らせ、より「道」らしい幅にする）。 */
+private const val PREVIEW_ROUTE_LINE_WIDTH_PX = 8f
+
+/** 経路の縁取り(casing)の幅px。本体より一回り太く、下に敷いて縁取りとして見せる。 */
+private const val PREVIEW_ROUTE_CASING_WIDTH_PX = 13f
+
+/** 自車の接地影（★あわせて直す: 進行方向は自車マーカー自身の矢印で示すため、ここは影のみ）。 */
+private fun DrawScope.drawPreviewGroundContactShadow(center: Offset, radiusPx: Float) {
+    if (!center.isFinite() || radiusPx <= 0f) return
+    drawOval(
+        color = Color.Black.copy(alpha = 0.35f),
+        topLeft = Offset(center.x - radiusPx, center.y - radiusPx * 0.4f),
+        size = Size(radiusPx * 2f, radiusPx * 0.8f),
+    )
+}
+
+/**
+ * 停留所の接地点（小さな楕円）を描く（★破綻4是正の本体: 以前は名前のピルだけで
+ * 「どこに立っているか」が無かった）。
+ *
+ * ★第2ラウンド是正（istech 2026-07-26）: 支柱（接地点から名前ピルへの縦線）は描かない。
+ * 第三者2者が「謎の棒」「映像が自車に串刺し」と判定したため（一次資料
+ * `navi_preview_target_v2.html`のコメント「支柱は描かない」参照）。停留所の実体は接地点の楕円
+ * だけで示し、名前ピルは[NaviPinAndSelfCarOverlay]側で[PREVIEW_PIN_POLE_HEIGHT_DP]ぶんだけ
+ * わずかに持ち上げて接地点のすぐ上に置く（＝視覚的な線は無い。持ち上げ量は隙間のみ）。
+ */
+private fun DrawScope.drawPreviewStopGroundMarks(pinPlacements: Map<Int, PinPlacement>) {
+    for ((_, placement) in pinPlacements) {
+        val point = placement.point
+        if (!point.isFinite()) continue
+        val scale = placement.scale
+        val (radiusX, radiusY) = previewStopGroundRadiusPx(scale)
+        // 明るい地面(昼)・暗い地面(夜)のどちらでも埋もれないよう、暗い縁取り＋白の塗りで
+        // コントラストを持たせる（地面色に頼らない自己完結の視認性）。
+        drawOval(
+            color = Color.Black.copy(alpha = 0.35f),
+            topLeft = Offset(point.x - radiusX - 1.5f, point.y - radiusY - 1.5f),
+            size = Size((radiusX + 1.5f) * 2f, (radiusY + 1.5f) * 2f),
+        )
+        drawOval(
+            color = Color.White.copy(alpha = 0.95f),
+            topLeft = Offset(point.x - radiusX, point.y - radiusY),
+            size = Size(radiusX * 2f, radiusY * 2f),
+        )
     }
 }
 
-/** グリッド地面色（昼夜設定に直接従う。設計上の理由は[NaviRendererPreviewGridStage]KDoc参照）。 */
+/** グリッド地面色（昼夜設定に直接従う。設計上の理由は[NaviRendererPreviewGridStage]KDoc参照）。
+ * ★第3ラウンド是正（確定不具合8）: 空色との差が小さすぎ「空なのか虚無なのか判別できない」
+ * 状態だったため、地面をより暗く/明るく振って空との差を広げる。 */
 private fun previewGridGroundColor(theme: NaviTheme): Color = when (theme) {
-    NaviTheme.DAY -> Color(0xFFE7ECF5)
-    NaviTheme.NIGHT -> Color(0xFF14192A)
+    NaviTheme.DAY -> Color(0xFFEFF2F8)
+    NaviTheme.NIGHT -> Color(0xFF10141F)
+}
+
+/** 空色（地平線から上、傾き>0のときのみ見える。昼夜設定に直接従う。★破綻1是正で新設）。
+ * ★第3ラウンド是正（確定不具合8・[previewGridGroundColor]と対）: コントラストを広げるため
+ * 空を地面よりはっきり明るい/淡いトーンにする。 */
+private fun previewGridSkyColor(theme: NaviTheme): Color = when (theme) {
+    NaviTheme.DAY -> Color(0xFFA8CBF2)
+    NaviTheme.NIGHT -> Color(0xFF1B2C4D)
 }
 
 /** グリッド罫線色（昼夜設定に直接従う）。 */
@@ -969,6 +1308,16 @@ private fun previewGridLineColor(theme: NaviTheme): Color = when (theme) {
 private fun previewGridRouteLineColor(theme: NaviTheme): Color = when (theme) {
     NaviTheme.DAY -> Color(0xFF3366FF)
     NaviTheme.NIGHT -> Color(0xFF6E8CFF)
+}
+
+/**
+ * 経路の縁取り(casing)色（★第4ラウンド是正・確定不具合2）。地図アプリの経路表示でよくある
+ * 「明るい縁取り＋濃い本体」の配色にして、地面色が昼夜で変わっても本体線とのコントラストを保つ
+ * （白系の半透明。夜は目に刺さらないよう不透明度を落とす）。
+ */
+private fun previewGridRouteCasingColor(theme: NaviTheme): Color = when (theme) {
+    NaviTheme.DAY -> Color.White.copy(alpha = 0.9f)
+    NaviTheme.NIGHT -> Color.White.copy(alpha = 0.5f)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -988,6 +1337,12 @@ private fun NaviPinAndSelfCarOverlay(
     selfCarRotationDeg: Float,
     theme: NaviTheme,
     /**
+     * ステージ幅（px）。停留所ラベルが枠の右端／左端で切れないよう水平位置をクランプするために使う
+     * （★第5ラウンド是正・差し戻し2）。停留所そのもの（接地点＝[pinScreenPositions]）は動かさない。
+     * ラベルの「出る方向」だけが枠内に収まる側へ寄る（詳細は[NaviAnchoredBottomCenter]）。
+     */
+    stageWidthPx: Float,
+    /**
      * 親（地図）に掛かっている台形変形 `rotationX` の角度。各マーカーに**その逆**を掛けて絵を立てる
      * ＝billboard（F② M1 の修正・2026-07-25。実地図/フォールバックステージ用。プレビューグリッド
      * ステージはもう地面をgraphicsLayerで変形しない＝自前射影のため常に0fを渡す）。0f なら実質無変換。
@@ -1000,6 +1355,15 @@ private fun NaviPinAndSelfCarOverlay(
      * 実地図/フォールバックステージは指定せず、既定の等倍のまま。
      */
     pinScale: (Int) -> Float = { 1f },
+    /**
+     * 停留所[sequenceIndex]ごとの、接地点からピルまでのわずかな持ち上げ量（px、線は描かない）。
+     * プレビューグリッドステージのみ非ゼロを渡す（★破綻4是正: 接地点が無かった。
+     * [drawPreviewStopGroundMarks]と対になる）。既定0fなら[NaviAnchoredBottomCenter]は従来どおり
+     * 接地点にピルの下端が直接乗る（実地図/フォールバックステージの見た目を変えない＝壊さない）。
+     * ★第2ラウンド是正: 以前は接地点とピルの間に支柱の線を引いていたが、第三者2者が
+     * 「謎の棒」と判定したため線は廃止。この値は「名前はそのすぐ上」を表現する隙間としてのみ残す。
+     */
+    pinPoleHeightPx: (Int) -> Float = { 0f },
     /** 自車マーカーの表示縮小率。プレビューは自車が常に原点（depth=0）のため常に1f。 */
     selfCarScale: Float = 1f,
 ) {
@@ -1012,14 +1376,22 @@ private fun NaviPinAndSelfCarOverlay(
             } else {
                 stop.sequenceIndex.toString()
             }
-            NaviBillboardPin(
-                label = label,
-                theme = theme,
-                modifier = Modifier
-                    .offset { pinTopLeftOffset(point) }
-                    .billboardScale(pinScale(stop.sequenceIndex))
-                    .billboardCounterRotation(counterRotationXDeg),
-            )
+            // ★第3ラウンド是正（istech 2026-07-26・確定不具合7の根本原因）: 旧[pinTopLeftOffset]は
+            // ピルの**実際の幅**ではなく高さ[PIN_SIZE_DP]を流用して横方向をセンタリングしており、
+            // 停留所名が長いほど中心が右へずれ「ラベルの出る方向がバラバラ」に見える一因だった
+            // （[NaviAnchoredBottomCenter]参照）。
+            NaviAnchoredBottomCenter(
+                anchorPx = Offset(point.x, point.y - pinPoleHeightPx(stop.sequenceIndex)),
+                stageWidthPx = stageWidthPx,
+            ) {
+                NaviBillboardPin(
+                    label = label,
+                    theme = theme,
+                    modifier = Modifier
+                        .billboardScale(pinScale(stop.sequenceIndex))
+                        .billboardCounterRotation(counterRotationXDeg),
+                )
+            }
         }
         NaviSelfCarMarker(
             rotationDeg = selfCarRotationDeg,
@@ -1066,10 +1438,46 @@ private fun Modifier.billboardScale(scale: Float): Modifier =
         }
     }
 
-/** ピンの中心x・下端yがscreen座標[point]に一致するような左上オフセット（bottom anchor）。 */
-private fun Density.pinTopLeftOffset(point: Offset): IntOffset {
-    val sizePx = PIN_SIZE_DP.toPx()
-    return IntOffset((point.x - sizePx / 2f).roundToInt(), (point.y - sizePx).roundToInt())
+/**
+ * 中身を実測して**下端中央**が[anchorPx]に一致するよう自己配置する（★第3ラウンド是正・確定不具合7の
+ * 根本原因）。停留所ピルは文字数に応じて幅が変わる（[NaviBillboardPin]は`Modifier.height`のみ固定・
+ * 幅はwrap content）ため、固定サイズを仮定したオフセット計算（旧`pinTopLeftOffset`は[PIN_SIZE_DP]＝
+ * 高さの値を横方向にも流用していた）だと、長い名前ほど中心が右へずれて「ラベルの出る方向が
+ * バラバラ」に見えていた。[Layout]で実測した`placeable.width`から正しい半幅を引く。
+ *
+ * `place()`はこのcomposable自身の原点（＝親[Box]内でのデフォルト配置＝Box原点そのもの、
+ * 他のoffset等を挟まない）からの相対座標のため、結果として[anchorPx]は**親Boxの座標系での
+ * 絶対位置**として機能する（[NaviPinAndSelfCarOverlay]の呼び出し方と同じ前提）。
+ *
+ * ★第5ラウンド是正（istech 2026-07-26・差し戻し2）: 中心配置だけだと、接地点[anchorPx]が
+ * ステージの右端／左端近くにあるとき、ピルの半分が枠の外へはみ出し、呼び出し元の`clipToBounds()`
+ * （[NaviRendererPreviewGridStage]）で物理的に切れて「ラベルの残骸」に見えていた（既定値・
+ * 停留所3/4で発生・二者一致）。**停留所の接地点[anchorPx]自体は動かさず**、ラベルの横位置だけを
+ * `[0, stageWidthPx - width]`にクランプする＝「枠内に収まる側へラベルを出す」（ラベルの描き方だけの
+ * 修正。停留所を動かす・映像を避ける配置には一切触れない）。[stageWidthPx]がnull（Real/Fallback
+ * ステージの既定）のときは従来どおりクランプしない＝挙動を変えない。
+ */
+@Composable
+private fun NaviAnchoredBottomCenter(
+    anchorPx: Offset,
+    stageWidthPx: Float? = null,
+    content: @Composable () -> Unit,
+) {
+    Layout(content = content) { measurables, constraints ->
+        val placeable = measurables.first().measure(constraints)
+        val idealX = anchorPx.x - placeable.width / 2f
+        val clampedX = if (stageWidthPx != null) {
+            idealX.coerceIn(0f, (stageWidthPx - placeable.width).coerceAtLeast(0f))
+        } else {
+            idealX
+        }
+        layout(placeable.width, placeable.height) {
+            placeable.place(
+                clampedX.roundToInt(),
+                (anchorPx.y - placeable.height).roundToInt(),
+            )
+        }
+    }
 }
 
 /**
@@ -1077,8 +1485,8 @@ private fun Density.pinTopLeftOffset(point: Offset): IntOffset {
  *
  * ★オーナー指摘（2026-07-26）: 自車の黄色い丸の下半分が地面に埋まっていた。原因は本関数が
  * マーカーを[point]（地面座標系の原点＝接地点）に**中心**で重ねていたため（中心アンカーだと
- * マーカー高さの半分が[point]より下＝地面の下に潜る）。停留所ピン（[pinTopLeftOffset]）と同じ
- * 「下端中央＝接地点」のアンカーに揃える。マーカー自体は円形（[NaviSelfCarMarker]の`CircleShape`）
+ * マーカー高さの半分が[point]より下＝地面の下に潜る）。停留所ピン（[NaviAnchoredBottomCenter]）と
+ * 同じ「下端中央＝接地点」のアンカーに揃える。マーカー自体は円形（[NaviSelfCarMarker]の`CircleShape`）
  * のため、進行方向の矢印回転（`Modifier.rotate`は円の中心を軸に回る）をこの下端アンカー配置に
  * 変えても、円の外形（＝接地点の位置）はどの回転角でも変わらず、足元がズレる心配はない。
  */
@@ -1136,9 +1544,16 @@ private fun pinColors(theme: NaviTheme): Pair<Color, Color> = when (theme) {
     NaviTheme.NIGHT -> Color(0xFF1B2A4A) to Color(0xFFFFD166)
 }
 
+/**
+ * ★あわせて直す（2026-07-26・istech `navi_preview_target_v2.html`一次資料）: 自車を操作UI
+ * （設定画面D-padの`MaterialTheme.colorScheme.primary`＝ブランド青）と同じ青に統一する。
+ * 以前はNIGHTのみ黄色い丸で、十字キー側の青い点と不一致だった。`MaterialTheme.colorScheme`は
+ * システムのライト/ダークに従ってしまうため使わず（[NaviRendererPreviewGridStage]と同じ理由）、
+ * ブランド定数のHexを直接使う。昼夜で色を変えないのは意図（自車は常に同じ色で見分けやすくする）。
+ */
 private fun selfCarColors(theme: NaviTheme): Pair<Color, Color> = when (theme) {
     NaviTheme.DAY -> Color(0xFF3366FF) to Color.White
-    NaviTheme.NIGHT -> Color(0xFFFFD166) to Color(0xFF1B2A4A)
+    NaviTheme.NIGHT -> Color(0xFF3366FF) to Color.White
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1205,25 +1620,218 @@ private fun NaviVideoOverlay(
     }
 }
 
-/** Previewソース用のダミー色面＋ラベル（設計§3-0「ダミー映像」）。DB・ファイルI/Oを一切行わない。 */
+/**
+ * Previewソース用のダミー色面＋テストパターン（設計§3-0「ダミー映像」）。DB・ファイルI/Oを一切行わない。
+ *
+ * ★第3ラウンド是正（istech 2026-07-26・確定不具合1・2）:
+ * - **影は外す**（第1ラウンド指示「影は手前向き」は発注元の誤りと判明・撤回。ぼかし無しの
+ *   大きくオフセットした真っ黒な影が「空中に浮いた板」の正体だった＝第三者2者一致）。
+ *   4辺同一の不透明な枠線（第2ラウンドで導入済み・維持）だけで「画面に固定されたウィンドウ」を表す。
+ * - 中央のテキスト1行（「映像プレビュー」の看板）をやめ、**写真的で「映像の窓」に見えるダミーの
+ *   テストパターン**にする（水平線・簡単な図形・画面端の四隅マーカー・下端の小さな字幕帯）。
+ *   実写画像は同梱しない（アセット追加なし・Canvasで描く合成パターン）。これにより
+ *   (a) 看板感が消え (b) サイズを変えたとき中身がどう切れるかが評価できる。
+ * - 角は直角のまま（丸めない。一次資料の`strokeRect`と同じ）。
+ *
+ * ★第4ラウンド是正（istech 2026-07-26・確定不具合3）: 「丸が太陽か被写体か、水平線が何かの
+ * 手がかりがない。20%では潰れて判別不能」（二者一致）。水平線・地平の丸・四隅ブラケットという
+ * 「テストパターン」は枠が大きいときは風景写真的で読み取れるが、枠が小さくなると細部が潰れて
+ * 逆にノイズになる。**サイズ別の表現**にする: 枠の短辺が[NAVI_VIDEO_PLACEHOLDER_COMPACT_THRESHOLD_DP]
+ * を下回るときは要素を全部やめて**カメラのアイコン**（本体＋レンズの単純な合成図形）を中央に
+ * 大きく1つだけ描く（小さくても「カメラ＝映像」と直感できる）。上回るときは従来どおりの
+ * 詳細テストパターン（水平線・地平の丸・四隅ブラケット）を維持する。
+ */
 @Composable
 private fun NaviVideoPreviewPlaceholder(theme: NaviTheme, modifier: Modifier = Modifier) {
     val gradient = when (theme) {
         NaviTheme.DAY -> Brush.verticalGradient(listOf(Color(0xFF4A6FE0), Color(0xFF6E8CF2)))
         NaviTheme.NIGHT -> Brush.verticalGradient(listOf(Color(0xFF202037), Color(0xFF35354F)))
     }
-    Box(
-        modifier = modifier.background(gradient).border(1.dp, Color.White.copy(alpha = 0.35f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "映像プレビュー",
-                color = Color.White,
-                style = MaterialTheme.typography.labelMedium,
-                minLines = 2,
-                maxLines = 2,
-            )
+    val markerColor = Color.White.copy(alpha = 0.55f)
+    val horizonColor = Color.White.copy(alpha = 0.35f)
+    val diskColor = when (theme) {
+        NaviTheme.DAY -> Color(0xFFFFE9A8).copy(alpha = 0.9f)
+        NaviTheme.NIGHT -> Color(0xFFDDE6FF).copy(alpha = 0.55f)
+    }
+    BoxWithConstraints(modifier) {
+        // ★第2ラウンド是正（実機screencap実測・2026-07-26）: 映像量を小さく(例20%)すると枠が
+        // 細くなり、固定11spでも1行に収まらず「映像プ」で文字が切れていた（★破綻2「枠が細いときは
+        // さらに縮める」）。枠の実測幅から収まる最大フォントサイズを[TextMeasurer]で解決して使う
+        // （固定値の勘ではなく実測。BasicTextの自動縮小APIは本プロジェクトのCompose BOMには無いため
+        // 自前で二分探索する）。
+        val density = LocalDensity.current
+        val availableWidthPx = with(density) { maxWidth.toPx() } - with(density) { NAVI_VIDEO_PLACEHOLDER_HORIZONTAL_PADDING_DP.toPx() * 2 }
+        val textMeasurer = rememberTextMeasurer()
+        val fontSizeSp = remember(availableWidthPx) {
+            resolveNaviVideoPlaceholderFontSp(textMeasurer, availableWidthPx)
+        }
+        val isCompact = minOf(maxWidth, maxHeight) < NAVI_VIDEO_PLACEHOLDER_COMPACT_THRESHOLD_DP
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(gradient)
+                .border(NAVI_VIDEO_PANEL_BORDER_WIDTH_DP, NAVI_VIDEO_PANEL_BORDER_COLOR),
+        ) {
+            // ダミーの映像テストパターン（写真的な「映像の窓」に見せるための合成図形。実写画像は使わない）。
+            Canvas(Modifier.matchParentSize()) {
+                if (isCompact) {
+                    drawNaviVideoCameraGlyph(markerColor)
+                } else {
+                    val w = size.width
+                    val h = size.height
+                    val horizonY = h * 0.42f
+                    drawLine(horizonColor, Offset(0f, horizonY), Offset(w, horizonY), strokeWidth = 1.5f)
+                    val diskRadius = minOf(w, h) * 0.09f
+                    drawCircle(diskColor, radius = diskRadius, center = Offset(w * 0.72f, horizonY - diskRadius * 1.1f))
+                    // 画面端のマーカー（カメラのビューファインダー風の四隅のL字。「映像の窓」感を補強する）。
+                    val bracketLenPx = minOf(w, h) * 0.14f
+                    val insetPx = minOf(w, h) * 0.09f
+                    val strokeWidthPx = 2f
+                    for (cornerX in listOf(insetPx, w - insetPx)) {
+                        for (cornerY in listOf(insetPx, h - insetPx)) {
+                            val dirX = if (cornerX < w / 2f) 1f else -1f
+                            val dirY = if (cornerY < h / 2f) 1f else -1f
+                            drawLine(
+                                markerColor,
+                                Offset(cornerX, cornerY),
+                                Offset(cornerX + bracketLenPx * dirX, cornerY),
+                                strokeWidth = strokeWidthPx,
+                            )
+                            drawLine(
+                                markerColor,
+                                Offset(cornerX, cornerY),
+                                Offset(cornerX, cornerY + bracketLenPx * dirY),
+                                strokeWidth = strokeWidthPx,
+                            )
+                        }
+                    }
+                }
+            }
+            // 小さな字幕帯（下端。中央に大きく文字を置かない＝看板感を避けるための配置。
+            // ★第2ラウンド是正を維持: 1行に収まる文字にし、折り返させない）。
+            //
+            // ★第5ラウンド是正（istech 2026-07-26・差し戻し3）: [isCompact]のときはカメラアイコン
+            // （[drawNaviVideoCameraGlyph]）に一本化する設計だったが、この字幕帯だけは条件を持たず
+            // 常に描いていたため、小さい枠でアイコンと省略記号だらけの文字（例「映像プレ…」）が
+            // 同時に出て「窮屈」になっていた（二者一致）。省略された文字は情報量ゼロなうえ窮屈さだけが
+            // 残るため、[isCompact]では字幕帯自体を出さない（カメラアイコンだけにする）。
+            // サイズが上がって[isCompact]が外れたら、この字幕帯も含めた従来表現に自然に戻る
+            // （段階を追った表現の整理。§0のガード・上限系の禁止事項とは無関係な純粋な表示分岐）。
+            if (!isCompact) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.38f))
+                        .padding(horizontal = NAVI_VIDEO_PLACEHOLDER_HORIZONTAL_PADDING_DP, vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        NAVI_VIDEO_PLACEHOLDER_LABEL,
+                        color = Color.White,
+                        fontSize = fontSizeSp.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        // ★下限フォントでも収まらないほど枠が細い場合（映像量が極端に小さい設定）は、
+                        // 単純な文字切れ（Clip）ではなく省略記号（Ellipsis）で「省略した」ことを明示する
+                        // （確定不具合7のCAPTION同様、無音の文字切れより明示的な省略の方がまし）。
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }
+
+/**
+ * カメラを直感させる単純な合成アイコン（本体の角丸矩形＋上のビューファインダー出っ張り＋中央の
+ * レンズ二重円）。枠が小さいとき（[NAVI_VIDEO_PLACEHOLDER_COMPACT_THRESHOLD_DP]未満）専用の表現
+ * （★第4ラウンド是正・確定不具合3）。線画（Stroke）中心にして、極小サイズでも塗り潰れて
+ * 真っ黒/真っ白の塊に見えないようにする。
+ */
+private fun DrawScope.drawNaviVideoCameraGlyph(iconColor: Color) {
+    val w = size.width
+    val h = size.height
+    val shortSide = minOf(w, h)
+    val bodyWidth = shortSide * 0.62f
+    val bodyHeight = bodyWidth * 0.62f
+    val bodyLeft = (w - bodyWidth) / 2f
+    val bodyTop = (h - bodyHeight) / 2f
+    val strokeWidthPx = (shortSide * 0.05f).coerceAtLeast(1.5f)
+    val cornerRadiusPx = bodyHeight * 0.2f
+
+    // 本体（角丸矩形の輪郭のみ＝線画）。
+    drawRoundRect(
+        color = iconColor,
+        topLeft = Offset(bodyLeft, bodyTop),
+        size = Size(bodyWidth, bodyHeight),
+        cornerRadius = CornerRadius(cornerRadiusPx, cornerRadiusPx),
+        style = Stroke(width = strokeWidthPx),
+    )
+    // 上のビューファインダーの出っ張り（塗り。小さいので潰れても「出っ張りがある」ことだけ伝わればよい）。
+    val bumpWidth = bodyWidth * 0.34f
+    val bumpHeight = bodyHeight * 0.22f
+    drawRoundRect(
+        color = iconColor,
+        topLeft = Offset(bodyLeft + bodyWidth * 0.16f, bodyTop - bumpHeight * 0.55f),
+        size = Size(bumpWidth, bumpHeight),
+        cornerRadius = CornerRadius(bumpHeight * 0.35f, bumpHeight * 0.35f),
+    )
+    // レンズ（輪郭の円＋中心の小さな塗り円）。
+    val center = Offset(bodyLeft + bodyWidth / 2f, bodyTop + bodyHeight / 2f)
+    val lensRadius = bodyHeight * 0.34f
+    drawCircle(color = iconColor, radius = lensRadius, center = center, style = Stroke(width = strokeWidthPx))
+    drawCircle(color = iconColor, radius = lensRadius * 0.4f, center = center)
+}
+
+/**
+ * [NAVI_VIDEO_PLACEHOLDER_LABEL]が[availableWidthPx]（枠幅からパディングを引いた実測px）に
+ * 収まる最大フォントサイズ(sp)を、[NAVI_VIDEO_PLACEHOLDER_FONT_MAX_SP]から
+ * [NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP]まで二分探索で解決する（★第2ラウンド是正「枠が細いときは
+ * さらに縮める」の実体）。極端に細い枠では下限まで縮めても収まらないことがあるが、下限を割って
+ * 判読不能になるよりはまし（極小映像量は非目標のエッジケース）。
+ */
+private fun resolveNaviVideoPlaceholderFontSp(textMeasurer: TextMeasurer, availableWidthPx: Float): Float {
+    if (availableWidthPx <= 0f) return NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP
+    fun widthAt(fontSp: Float): Int =
+        textMeasurer.measure(
+            text = NAVI_VIDEO_PLACEHOLDER_LABEL,
+            style = TextStyle(fontSize = fontSp.sp),
+        ).size.width
+
+    if (widthAt(NAVI_VIDEO_PLACEHOLDER_FONT_MAX_SP) <= availableWidthPx) return NAVI_VIDEO_PLACEHOLDER_FONT_MAX_SP
+    if (widthAt(NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP) > availableWidthPx) return NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP
+
+    var lo = NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP
+    var hi = NAVI_VIDEO_PLACEHOLDER_FONT_MAX_SP
+    repeat(8) {
+        val mid = (lo + hi) / 2f
+        if (widthAt(mid) <= availableWidthPx) lo = mid else hi = mid
+    }
+    return lo
+}
+
+/**
+ * この値を短辺が下回るとき、詳細テストパターンではなく[drawNaviVideoCameraGlyph]の単純な
+ * カメラアイコンに切り替える（★第4ラウンド是正・確定不具合3）。100dpは「映像52%・傾き45°」の
+ * 実機実測で、映像量を20%程度まで絞ったときの枠短辺（幅）とおおむね一致する値（実機screencapで調整）。
+ */
+private val NAVI_VIDEO_PLACEHOLDER_COMPACT_THRESHOLD_DP = 100.dp
+
+/** 映像プレビューのプレースホルダ文字（★第2ラウンド是正: 語中改行を避けるため短く保つ）。 */
+private const val NAVI_VIDEO_PLACEHOLDER_LABEL = "映像プレビュー"
+
+/** [resolveNaviVideoPlaceholderFontSp]の探索上限（旧固定値と同じ11sp＝標準的な映像量での見た目を維持）。 */
+private const val NAVI_VIDEO_PLACEHOLDER_FONT_MAX_SP = 11f
+
+/** [resolveNaviVideoPlaceholderFontSp]の探索下限（これより縮めても可読性が失われるだけなので下げない）。 */
+private const val NAVI_VIDEO_PLACEHOLDER_FONT_MIN_SP = 5f
+
+/** プレースホルダ文字の左右余白（枠の内側に必ず余白を持たせる。破綻1是正と同じ思想）。 */
+private val NAVI_VIDEO_PLACEHOLDER_HORIZONTAL_PADDING_DP = 3.dp
+
+/** 映像プレビューパネルの枠線幅（★第2ラウンド是正: 4辺均一・不透明）。 */
+private val NAVI_VIDEO_PANEL_BORDER_WIDTH_DP = 2.dp
+
+/** 映像プレビューパネルの枠線色（不透明。旧: alpha0.35の半透明だったため「厚みのある物体」に見えていた）。 */
+private val NAVI_VIDEO_PANEL_BORDER_COLOR = Color(0xFF7FA6E0)
