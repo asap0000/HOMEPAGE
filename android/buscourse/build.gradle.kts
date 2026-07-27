@@ -38,13 +38,44 @@ android {
         versionName = System.getenv("VERSION_NAME") ?: "0.0-dev"
     }
 
+    // ------------------------------------------------------------------------------------------
+    // 環境分離（官房 2026-07-26 裁定「再発防止4点」の 1＝構造的免疫。2026-07-27 実装）
+    //
+    // 事故: 開発中の `adb uninstall` で実機の内部ストレージが消え、実車走行のタイムラプス映像
+    // 約14,600枚を失った。禁止リストは言い換え（`adb -s <serial> uninstall` 等）で抜けるため
+    // 負け筋であり、**アプリ ID を分けて物理的に届かなくする**のが本命の対策。
+    //
+    //   debug  … com.istech.buscourse.debug  ← 日常の開発・検証はすべてこちら。消してよい
+    //   field  … com.istech.buscourse        ← 記録用実機に入れる。**二度と uninstall しない**
+    //   release… com.istech.buscourse        ← 配布用（keystore 未設定のため現状は未使用）
+    //
+    // field を設ける理由: release 署名の keystore が未設定（CLAUDE.local.md）なので、
+    // 「suffix 無し × debug 署名」の枠が別に要る。これなら keystore 未設定のまま今日から効く。
+    //
+    // ⚠ 運用上の罠（手順書に必ず書くこと）
+    //   (a) 救出データ・実車データの復元先は **field 側**（suffix 無し）。debug 側へ置くと
+    //       保護対象外の場所に本番データを載せることになり、この分離の意味が消える。
+    //   (b) 既存の検証環境（エミュレータ等）の既存データは suffix 無し ID の下にあるため、
+    //       debug ビルドからは見えなくなる。検証を続けるなら field ビルドを入れること。
+    // ------------------------------------------------------------------------------------------
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("field") {
+            // applicationIdSuffix は付けない＝com.istech.buscourse（実データを持つ側）
+            isDebuggable = true
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+            versionNameSuffix = "-field"
         }
     }
 

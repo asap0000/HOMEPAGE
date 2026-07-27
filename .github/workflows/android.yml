@@ -144,7 +144,10 @@ jobs:
           fi
 
       - name: Build debug & release APKs
-        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+        # :buscourse の field は「記録用実機に入れる」バリアント（環境分離・2026-07-27）。
+        # 実データを持つ端末に入るビルドなので、オフライン厳守の APK 検査を必ず通す必要がある。
+        # ここで組み立てておかないと後段の検査が対象を見つけられない。
+        run: ./gradlew assembleDebug assembleRelease :buscourse:assembleField --no-daemon --stacktrace
 
       # istech オフライン厳守の機械的担保 (1/2):
       # この製品は機器連動を持たないため、INTERNET パーミッションの宣言自体を禁止する。
@@ -184,6 +187,7 @@ jobs:
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
           checked=0
           for apk in buscourse/build/outputs/apk/debug/*.apk \
+                     buscourse/build/outputs/apk/field/*.apk \
                      buscourse/build/outputs/apk/release/*.apk; do
             [ -f "$apk" ] || continue
             checked=1
