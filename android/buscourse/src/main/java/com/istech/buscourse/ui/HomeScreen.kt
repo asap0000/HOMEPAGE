@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
@@ -47,6 +50,10 @@ import androidx.compose.ui.unit.dp
  * 【2026-07-14追加】S4「コース創設」（トップダウン、記録セッションから2軸マトリクス評価→承認→
  * 拠点分割→新規コース群を生成、[CourseCreateScreen]）への導線を追加。既存「コース編成」は
  * 「コース編集」に改称（ラベルのみ。既存の順列編成機能自体は変更しない）。
+ *
+ * 【2026-07-26追加】機種変更バックアップ（「出口を作ってみる」、[BackupScreen]）への導線を追加。
+ * 棚卸し→ZIP生成→SAF保存の一本のみ。復元・暗号化・分割は今回の増分に含まない
+ * （タスク指示書「機種変更バックアップ『出口を作ってみる』」§0）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,6 +65,7 @@ fun HomeScreen(
     onOpenCourseCreate: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
+    onOpenBackup: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -75,7 +83,12 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(16.dp)
+                // 2026-07-26追加：「バックアップ」を足したことで実機（OPPO Reno3A実測）では
+                // 一覧が画面下に収まりきらず最下段が到達不能になったため、スクロール可能にする
+                // （既存6項目でも将来また増える前提。バックアップ機能自体のスコープではなく、
+                // 新規メニュー項目を実際に押せるようにするための最小修正）。
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             HomeMenuCard(
@@ -93,7 +106,8 @@ fun HomeScreen(
             HomeMenuCard(
                 icon = Icons.Filled.Route,
                 title = "コース編集",
-                description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX入出力）",
+                // コース全体のGPXエクスポートは2026-07-26に撤去したため「入出力」→「取り込み」。
+                description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX取り込み）",
                 onClick = onOpenCourses,
             )
             HomeMenuCard(
@@ -113,6 +127,12 @@ fun HomeScreen(
                 title = "地図データ管理",
                 description = "オフライン地図パッケージ（.iscmap）を取り込み、使用するパッケージを切り替えます",
                 onClick = onOpenMapImport,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.Backup,
+                title = "バックアップ",
+                description = "端末のデータを1つのZIPにまとめてUSBメモリ等へ退避します",
+                onClick = onOpenBackup,
             )
         }
     }

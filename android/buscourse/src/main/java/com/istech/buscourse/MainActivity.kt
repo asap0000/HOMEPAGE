@@ -13,6 +13,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.istech.buscourse.ui.AllowRotationWhileVisible
+import com.istech.buscourse.ui.BackupScreen
 import com.istech.buscourse.ui.BusCourseViewModel
 import com.istech.buscourse.ui.CourseCreateScreen
 import com.istech.buscourse.ui.CourseDetailScreen
@@ -84,6 +85,8 @@ private object Routes {
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
     const val MAP_IMPORT = "map_import"
+    // 機種変更バックアップ（「出口を作ってみる」、2026-07-26追加。istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md）
+    const val BACKUP = "backup"
     // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
     // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
     const val SPEED_MAP = "sessions/{sessionId}/speedmap"
@@ -118,7 +121,11 @@ private fun AppNavHost() {
                 onOpenCourseCreate = { navController.navigate(Routes.COURSE_CREATE) },
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+                onOpenBackup = { navController.navigate(Routes.BACKUP) },
             )
+        }
+        composable(Routes.BACKUP) {
+            BackupScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.WORK_LOG) {
             WorkLogScreen(

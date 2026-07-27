@@ -93,6 +93,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * version 17（2026-07-23）: navi_map に app_settings_json（コース単位 app_settings・増分6契約 schema 1.1 相乗り）を
  * nullable でない TEXT DEFAULT '{}' で追加（[MIGRATION_16_17]）。既存行は '{}' で埋まる。App Room 版は
  * `.isnavi` schema（EX 主導）とは別軸（正典 §9・増分6 Q3-2）。zip リーダー増分の前提スキーマ。
+ *
+ * （スキーマ自体の変更ではない、2026-07-26）: バージョン番号のリテラルを [SCHEMA_VERSION] へ抽出した。
+ * 機種変更バックアップの `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
+ * 別途「17」を書き写して二重管理するのを避けるため。
  */
 @Database(
     entities = [
@@ -116,7 +120,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         NaviEventEntity::class,
         NaviEventOutputEntity::class,
     ],
-    version = 17,
+    version = BusCourseDatabase.SCHEMA_VERSION,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -136,6 +140,13 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun naviMapDao(): NaviMapDao
 
     companion object {
+        /**
+         * Room スキーマ版（`@Database(version = ...)` と同一の値）。機種変更バックアップの
+         * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
+         * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
+         */
+        const val SCHEMA_VERSION = 17
+
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
             Room.databaseBuilder(
