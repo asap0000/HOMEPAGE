@@ -43,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,7 +86,12 @@ fun CourseCreateScreen(
     val repository = viewModel.repository
     var sessions by remember { mutableStateOf<List<RecordingSessionEntity>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
-    var creatingSessionId by remember { mutableStateOf<Long?>(null) }
+    // ★2026-07-27 修正（オーナー報告「コース創設で地図を開くと戻り先が一つ上の階層になっている」）:
+    // ここが素の `remember` だと、速度マップ（[onOpenSpeedMap]）へ navigate した時点でこの画面が
+    // composition から外れて値が破棄され、**戻ってきたときに null＝セッション一覧に落ちていた**。
+    // 「どのセッションを開いているか」は画面の居場所そのものなので、破棄されてはいけない。
+    // 下の `remember(sessionId)` 群（一覧・プレビュー等）は戻ったときに読み直せばよいので素のままでよい。
+    var creatingSessionId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(Unit) {
         sessions = repository.getExtractableSessions()
