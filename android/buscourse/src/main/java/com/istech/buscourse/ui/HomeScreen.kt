@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
@@ -69,8 +68,7 @@ fun HomeScreen(
     onOpenCourseCreate: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
-    onOpenBackup: () -> Unit,
-    onOpenRestore: () -> Unit,
+    onOpenBackupRestore: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -118,7 +116,9 @@ fun HomeScreen(
             HomeMenuCard(
                 icon = Icons.Filled.AddCircle,
                 title = "コース創設",
-                description = "記録セッションから2軸評価でコースを新規に創ります",
+                // 2026-07-27 文言是正: 「2軸評価」は廃案（コース創設は2軸マトリクスから
+                // 3パス成熟モデルへ転換済み。istech `project_buscourse_course_creation_topdown`）。
+                description = "記録した走行から停留所を拾い、コースを新しく創ります",
                 onClick = onOpenCourseCreate,
             )
             HomeMenuCard(
@@ -133,17 +133,14 @@ fun HomeScreen(
                 description = "オフライン地図パッケージ（.iscmap）を取り込み、使用するパッケージを切り替えます",
                 onClick = onOpenMapImport,
             )
+            // 2026-07-27 統合（オーナー指示「バックアップと復元は1つのボタンで」）: 「退避」と「戻す」は
+            // 機種変更という1つの用事の往路と復路なので、入口を分けると探す場所が2箇所になる。
+            // 遷移先の [BackupRestoreScreen] で往路/復路を選ぶ。
             HomeMenuCard(
                 icon = Icons.Filled.Backup,
-                title = "バックアップ",
-                description = "端末のデータを1つのZIPにまとめてUSBメモリ等へ退避します",
-                onClick = onOpenBackup,
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.Restore,
-                title = "復元",
-                description = "機種変更バックアップ（.zip）をこの端末へ復元します（まっさらな端末専用）",
-                onClick = onOpenRestore,
+                title = "バックアップと復元",
+                description = "端末のデータを1つのZIPへ退避します。退避したZIPを別の端末へ戻すのもここです",
+                onClick = onOpenBackupRestore,
             )
         }
     }

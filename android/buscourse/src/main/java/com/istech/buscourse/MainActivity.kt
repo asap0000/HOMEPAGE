@@ -13,7 +13,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.istech.buscourse.ui.AllowRotationWhileVisible
-import com.istech.buscourse.ui.BackupScreen
+import com.istech.buscourse.ui.BackupRestoreScreen
 import com.istech.buscourse.ui.BusCourseViewModel
 import com.istech.buscourse.ui.CourseCreateScreen
 import com.istech.buscourse.ui.CourseDetailScreen
@@ -24,7 +24,6 @@ import com.istech.buscourse.ui.NaviMainScreen
 import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.NaviSettingsScreen
 import com.istech.buscourse.ui.RecordingScreen
-import com.istech.buscourse.ui.RestoreScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
 import com.istech.buscourse.ui.StopCardCreateScreen
@@ -86,10 +85,11 @@ private object Routes {
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
     const val MAP_IMPORT = "map_import"
-    // 機種変更バックアップ（「出口を作ってみる」、2026-07-26追加。istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md）
-    const val BACKUP = "backup"
-    // 機種変更バックアップの復元（「復元の口」、2026-07-27追加。BACKUPの鏡像。istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md §8-5）
-    const val RESTORE = "restore"
+    // 機種変更バックアップ（退避＝「出口」2026-07-26追加／復元＝「戻す」2026-07-27追加。
+    // istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md）。
+    // 2026-07-27 統合: 往路(backup)と復路(restore)で別ルートだったものを1つの入口へ
+    // （オーナー指示「バックアップと復元は1つのボタンで」）。分岐は BackupRestoreScreen が持つ。
+    const val BACKUP_RESTORE = "backup_restore"
     // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
     // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
     const val SPEED_MAP = "sessions/{sessionId}/speedmap"
@@ -124,15 +124,11 @@ private fun AppNavHost() {
                 onOpenCourseCreate = { navController.navigate(Routes.COURSE_CREATE) },
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
-                onOpenBackup = { navController.navigate(Routes.BACKUP) },
-                onOpenRestore = { navController.navigate(Routes.RESTORE) },
+                onOpenBackupRestore = { navController.navigate(Routes.BACKUP_RESTORE) },
             )
         }
-        composable(Routes.BACKUP) {
-            BackupScreen(onBack = { navController.popBackStack() })
-        }
-        composable(Routes.RESTORE) {
-            RestoreScreen(onBack = { navController.popBackStack() })
+        composable(Routes.BACKUP_RESTORE) {
+            BackupRestoreScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.WORK_LOG) {
             WorkLogScreen(
