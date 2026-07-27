@@ -107,7 +107,7 @@ do_pull() {
   echo "[pull] $serial:$src -> $dst"
   echo "[pull] sha256=${total} chunk=${CHUNK_MB}MB"
 
-  adb -s "$serial" shell "rm -rf '$WORK_DEVICE'; mkdir -p '$WORK_DEVICE' && split -b ${CHUNK_MB}m -a 4 -d '$src' '$WORK_DEVICE/c.'" >/dev/null \
+  adb -s "$serial" shell "rm -rf '$WORK_DEVICE'; mkdir -p '$WORK_DEVICE' && split -b ${CHUNK_MB}m '$src' '$WORK_DEVICE/c.'" >/dev/null \
     || die "端末側の split に失敗"
   local list; list="$(adb -s "$serial" shell "ls '$WORK_DEVICE'" | tr -d '\r')"
   [ -n "$list" ] || die "チャンクが1つも作られていない"
