@@ -51,6 +51,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
@@ -436,8 +438,20 @@ private const val PREVIEW_CHAINAGE_M = 200f
 /** D-pad一押しあたりの自車位置移動量（%）。 */
 private const val SELF_CAR_DPAD_STEP_PCT = 5
 
-/** 値ラベル用の固定幅（§3-2：文字数が変わっても行・レイアウトが動かないようにする）。 */
-private val VALUE_LABEL_WIDTH = 56.dp
+/**
+ * 値ラベル用の固定幅（§3-2：文字数が変わっても行・レイアウトが動かないようにする）。
+ * 2026-07-27 に 56dp → 76dp（語彙ラベルへ数値を併記したため。最長は "中央 100" 相当）。
+ */
+private val VALUE_LABEL_WIDTH = 76.dp
+
+/** スライダーのつまみ直径（自前描画。M3 1.3 既定の細い縦棒を丸へ戻す）。 */
+private val SLIDER_THUMB_DIAMETER = 20.dp
+
+/** スライダーの線の太さ（自前描画）。 */
+private val SLIDER_TRACK_HEIGHT = 6.dp
+
+/** 未到達側の線の濃さ（同じ色を薄くして1本の線に見せる）。 */
+private const val SLIDER_INACTIVE_TRACK_ALPHA = 0.24f
 
 /**
  * 項目名ラベル用の固定幅。
@@ -648,6 +662,20 @@ private val D_PAD_INDICATOR_HEIGHT = 60.dp
 /** D-pad凡例文の折り返し幅（★第3ラウンド新設・確定不具合3）。2行程度に収まる幅。 */
 private val D_PAD_LEGEND_WIDTH = 168.dp
 
+/**
+ * 値ラベル付きスライダー。
+ *
+ * ★2026-07-27 作り直し（オーナー承認済み・第三者2者が3ラウンドとも上位に挙げた「描画崩れ」）。
+ * **崩れていたのではなく、Material3 1.3.0 の Slider 既定デザインがそう見えていた**——
+ * 既定では (a) つまみが幅数dpの縦棒 (b) つまみと塗りの間に隙間（`thumbTrackGapSize`）
+ * (c) 線の右端に停止インジケータの点（`drawStopIndicator`）が描かれる。**既定のまま直す道は無い**ので、
+ * `thumb`/`track` スロットを差し替えて従来型（丸いつまみ・切れ目のない1本の線・点なし）を自前で描く。
+ *
+ * - **(c) の点は見た目だけの問題ではない**: Slider のタッチ領域内にあるため、点に触れると値が右端付近まで飛ぶ。
+ * - **値ラベルは左寄せ**（従来は右寄せ）。可変長の語彙ラベル（"中央 50"）で右端を揃えると、
+ *   短い値（"45°"）のとき線と数字の間に指1本分の空白が空き「線が右端まで届いていない」ように見えていた。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NaviLabeledSlider(
     caption: String,
@@ -657,6 +685,8 @@ private fun NaviLabeledSlider(
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
 ) {
+    val activeColor = MaterialTheme.colorScheme.primary
+    val inactiveColor = activeColor.copy(alpha = SLIDER_INACTIVE_TRACK_ALPHA)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             caption,
@@ -669,15 +699,47 @@ private fun NaviLabeledSlider(
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,
             valueRange = valueRange,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            modifier = Modifier.weight(1f).padding(start = 8.dp, end = 4.dp),
+            thumb = {
+                Box(
+                    Modifier
+                        .size(SLIDER_THUMB_DIAMETER)
+                        .background(activeColor, RoundedCornerShape(percent = 50)),
+                )
+            },
+            track = {
+                // state ではなく呼び出し側の value/valueRange から比率を出す（SliderState の
+                // プロパティ公開状況に依存させない）。
+                val span = (valueRange.endInclusive - valueRange.start).takeIf { it > 0f } ?: 1f
+                val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
+                Canvas(Modifier.fillMaxWidth().height(SLIDER_TRACK_HEIGHT)) {
+                    val y = size.height / 2f
+                    drawLine(
+                        color = inactiveColor,
+                        start = Offset(0f, y),
+                        end = Offset(size.width, y),
+                        strokeWidth = size.height,
+                        cap = StrokeCap.Round,
+                    )
+                    if (fraction > 0f) {
+                        drawLine(
+                            color = activeColor,
+                            start = Offset(0f, y),
+                            end = Offset(size.width * fraction, y),
+                            strokeWidth = size.height,
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                }
+            },
         )
-        Box(Modifier.width(VALUE_LABEL_WIDTH), contentAlignment = Alignment.CenterEnd) {
+        Box(Modifier.width(VALUE_LABEL_WIDTH), contentAlignment = Alignment.CenterStart) {
             Text(
                 valueLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
-                textAlign = TextAlign.End,
+                textAlign = TextAlign.Start,
             )
         }
     }

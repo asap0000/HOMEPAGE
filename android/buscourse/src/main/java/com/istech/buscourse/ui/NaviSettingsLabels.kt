@@ -25,15 +25,23 @@ object NaviSettingsLabels {
     /** 映像の大きさスライダーの値ラベル（例: "52%"）。 */
     fun videoAmountLabel(videoAmountPct: Int): String = "$videoAmountPct%"
 
-    /** 映像の左右位置スライダーの値ラベル（"左端"/"左寄り"/"中央"/"右寄り"/"右端"）。 */
-    fun videoLateralLabel(videoLateralPct: Int): String = lateralLabel(videoLateralPct)
+    /**
+     * 映像の左右位置スライダーの値ラベル（例 "中央 50" / "左寄り 30" / "右端 100"）。
+     *
+     * ★2026-07-27 是正（オーナー承認済み・確定不具合4「値の単位混在」）: 同じ列に「45°」「52%」という
+     * 数値と「中央」「上端」という言葉が混ざり、しかも**言葉だけでは 1〜49 がすべて「左寄り」**に
+     * なってどのくらい寄ったかが読めなかった。語彙（第4ラウンドでオーナー確定）は変えずに数値を添える。
+     */
+    fun videoLateralLabel(videoLateralPct: Int): String =
+        withPct(lateralLabel(videoLateralPct), videoLateralPct)
 
     /**
-     * 映像の上下位置スライダーの値ラベル（"上端"/"上寄り"/"中央"/"下寄り"/"下端"）。
-     * istech 第3ラウンド新設・第4ラウンドで左右系と語彙・閾値を統一（[edgeAwareLabel]参照）。
+     * 映像の上下位置スライダーの値ラベル（例 "上端 0" / "下寄り 70"）。
+     * istech 第3ラウンド新設・第4ラウンドで左右系と語彙・閾値を統一（[edgeAwareLabel]参照）・
+     * 2026-07-27 に数値を併記（[videoLateralLabel] と同じ理由）。
      */
     fun videoVerticalLabel(videoVerticalPct: Int): String =
-        edgeAwareLabel(videoVerticalPct, "上端", "上寄り", "中央", "下寄り", "下端")
+        withPct(edgeAwareLabel(videoVerticalPct, "上端", "上寄り", "中央", "下寄り", "下端"), videoVerticalPct)
 
     /** 自車の前後位置スライダーの値ラベル（"下気味"/"中央"/"上気味"）。 */
     fun selfCarFwdBackLabel(selfCarFwdBackPct: Int): String = when {
@@ -66,6 +74,14 @@ object NaviSettingsLabels {
 
     private fun lateralLabel(pct: Int): String =
         edgeAwareLabel(pct, "左端", "左寄り", "中央", "右寄り", "右端")
+
+    /**
+     * 語彙ラベルに実数値を添える（"中央" → "中央 50"）。**スライダーの値ラベル専用**。
+     *
+     * 自車位置の十字キー（[selfCarPositionLabel]）には使わない——あちらは前後・左右の2軸を1行に
+     * 併記する（"下気味・左寄り"）ため、数値まで足すと十字キー中央の狭い領域に収まらない。
+     */
+    private fun withPct(label: String, pct: Int): String = "$label $pct"
 
     /**
      * 「両端で端／途中で寄り／真ん中で中央」という5段階を、左右・上下どちらの軸にも同じ閾値で適用する
