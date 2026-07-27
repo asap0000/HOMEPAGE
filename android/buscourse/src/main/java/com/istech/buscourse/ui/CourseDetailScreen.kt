@@ -332,7 +332,11 @@ fun CourseDetailScreen(
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text("停留所の並び", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "長押しでドラッグするか、上下ボタンで順序を入れ替えられます。保存すると地図の経路も作り直します。",
+                        // 2026-07-27 文言是正: 旧文「保存すると地図の経路も作り直します」は、
+                        // ナビ用マップまで更新されると読めてしまう。実際に作り直されるのはコースの
+                        // 経路線（route_point）だけで、ナビ用マップは NaviScreen から手動生成する。
+                        "長押しでドラッグするか、上下ボタンで順序を入れ替えられます。" +
+                            "保存するとコースの経路線を作り直します（ナビ用マップは自動では更新されません）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
