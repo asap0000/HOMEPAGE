@@ -24,6 +24,7 @@ import com.istech.buscourse.ui.NaviMainScreen
 import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.NaviSettingsScreen
 import com.istech.buscourse.ui.RecordingScreen
+import com.istech.buscourse.ui.RestoreScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
 import com.istech.buscourse.ui.StopCardCreateScreen
@@ -87,6 +88,8 @@ private object Routes {
     const val MAP_IMPORT = "map_import"
     // 機種変更バックアップ（「出口を作ってみる」、2026-07-26追加。istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md）
     const val BACKUP = "backup"
+    // 機種変更バックアップの復元（「復元の口」、2026-07-27追加。BACKUPの鏡像。istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md §8-5）
+    const val RESTORE = "restore"
     // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
     // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
     const val SPEED_MAP = "sessions/{sessionId}/speedmap"
@@ -122,10 +125,14 @@ private fun AppNavHost() {
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
                 onOpenBackup = { navController.navigate(Routes.BACKUP) },
+                onOpenRestore = { navController.navigate(Routes.RESTORE) },
             )
         }
         composable(Routes.BACKUP) {
             BackupScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.RESTORE) {
+            RestoreScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.WORK_LOG) {
             WorkLogScreen(

@@ -31,6 +31,14 @@ interface BusStopCardDao {
      */
     @Query("UPDATE bus_stop_card SET is_hub = :hub, updated_at = :t WHERE id = :id")
     suspend fun setHub(id: Long, hub: Boolean, t: Long)
+
+    /**
+     * 総行数（is_archivedを問わない全件）。機種変更バックアップの復元前「データなし」判定
+     * （タスク指示書§3・[com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     * [getAllActive]と違いアーカイブ済み行も数える＝「主要テーブルが全て空」の文字どおりの判定のため。
+     */
+    @Query("SELECT COUNT(*) FROM bus_stop_card")
+    suspend fun count(): Int
 }
 
 /**
@@ -137,6 +145,13 @@ interface CourseDao {
      */
     @Query("DELETE FROM course WHERE id = :courseId")
     suspend fun deleteById(courseId: Long)
+
+    /**
+     * 総行数。機種変更バックアップの復元前「データなし」判定（タスク指示書§3・
+     * [com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     */
+    @Query("SELECT COUNT(*) FROM course")
+    suspend fun count(): Int
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */
@@ -297,6 +312,13 @@ interface RecordingSessionDao {
     /** セッションメモの更新（区間抽出画面、2026-07-11追加）。 */
     @Query("UPDATE recording_session SET memo = :memo WHERE id = :id")
     suspend fun updateMemo(id: Long, memo: String?)
+
+    /**
+     * 総行数。機種変更バックアップの復元前「データなし」判定（タスク指示書§3・
+     * [com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     */
+    @Query("SELECT COUNT(*) FROM recording_session")
+    suspend fun count(): Int
 }
 
 /** `timelapse_frame`（LORES連写／HIRES単写メタデータ）の操作（設計書§3.5、D6）。 */

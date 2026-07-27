@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
@@ -54,6 +55,9 @@ import androidx.compose.ui.unit.dp
  * 【2026-07-26追加】機種変更バックアップ（「出口を作ってみる」、[BackupScreen]）への導線を追加。
  * 棚卸し→ZIP生成→SAF保存の一本のみ。復元・暗号化・分割は今回の増分に含まない
  * （タスク指示書「機種変更バックアップ『出口を作ってみる』」§0）。
+ *
+ * 【2026-07-27追加】機種変更バックアップの「復元」（[RestoreScreen]、[BackupScreen]の鏡像）への
+ * 導線を追加。まっさらな端末専用（既にデータが入っている端末では復元できない）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,6 +70,7 @@ fun HomeScreen(
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
     onOpenBackup: () -> Unit,
+    onOpenRestore: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -133,6 +138,12 @@ fun HomeScreen(
                 title = "バックアップ",
                 description = "端末のデータを1つのZIPにまとめてUSBメモリ等へ退避します",
                 onClick = onOpenBackup,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.Restore,
+                title = "復元",
+                description = "機種変更バックアップ（.zip）をこの端末へ復元します（まっさらな端末専用）",
+                onClick = onOpenRestore,
             )
         }
     }
