@@ -22,7 +22,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.istech.buscourse.BuildConfig
 
 /**
  * 最上位トップ画面（依頼３ 2026-07-11）。
@@ -81,6 +83,27 @@ fun TopScreen(
                     modifier = Modifier.weight(1f),
                 )
             }
+
+            Spacer(Modifier.weight(1f))
+
+            // 版とビルド種別（2026-07-27 オーナー依頼）。
+            // **実機を見ただけでは開発版か記録用かが分からない**のが 2026-07-26 のデータ消失と
+            // 同じ構図なので、`applicationId` まで出して環境分離を画面上で判別できるようにする
+            // （debug は `com.istech.buscourse.debug` / field は suffix 無し）。
+            Text(
+                text = "${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = BuildConfig.APPLICATION_ID,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

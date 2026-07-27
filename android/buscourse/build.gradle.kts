@@ -90,6 +90,11 @@ android {
 
     buildFeatures {
         compose = true
+        // 2026-07-27追加: トップ画面に版とビルド種別を出すため（[com.istech.buscourse.ui.TopScreen]）。
+        // AGP 8 系では既定 false なので明示が要る（:app は既に有効化済み）。
+        // **どのビルド種別のアプリを今触っているかが実機で判別できないと、開発版と記録用を取り違える**
+        // ——2026-07-26 のデータ消失と同じ構図なので、環境分離を画面上でも見えるようにする。
+        buildConfig = true
     }
 
     packaging {
