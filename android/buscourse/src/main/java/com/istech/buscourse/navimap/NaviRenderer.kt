@@ -791,6 +791,31 @@ private const val PREVIEW_GRID_HALF_WIDTH_MARGIN_WORLD_UNIT_FACTOR = 0.5f
 private const val PREVIEW_GRID_MAX_LINES_PER_AXIS = 900
 
 /**
+ * グリッドの描画範囲を「**傾き0°（真上から見下ろした状態）で画面に収まる行数・列数**」の何倍まで取るか。
+ *
+ * ★2026-07-29 新設（オーナー指示「角度0％で画面に入っている線の n 倍くらいの感覚で決めて」）。
+ *
+ * **経緯＝ANR（応答なし）を実機で踏んだ**: SHG12（BASIO active2・720×1520）で映像ナビ設定を開くと
+ * `drawPreviewGroundGrid` がメインスレッドを 5 秒以上塞ぎ、システムに強制終了を促された
+ * （ANR トレース実測・描画完了に 9.3 秒・ページフォルト 242 万回）。
+ * 傾き50°で **奥 385 セル × 横 272 セル ≒ 42 万セグメント**を毎フレーム描こうとしていた。
+ *
+ * **上の [PREVIEW_GRID_MAX_LINES_PER_AXIS]（絶対値 900）だけでは効かない**。あれは
+ * 「350 では低い傾きで地平線の手前に無地の帯が残る」ために引き上げた値で、そのとき
+ * 「フェードで大半は描画されないからコストは線数ほど増えない」と見積もられていた——
+ * **実機ではその見積もりが外れた**。`segmentAlpha` のガードは `drawLine` を省くだけで、
+ * **投影計算のループそのものは回る**ため。
+ *
+ * **なぜ画面基準か**: 絶対値の上限は画面サイズにも設定にも追従しない魔法数になる。
+ * 「傾き0°で画面に何本入るか」は**その画面でユーザーが実際に見ている密度**なので、
+ * 端末が変わっても意味が保たれる。
+ *
+ * **値の決め方**: 小さすぎると「地平線の手前に無地の帯」が再発する（訂正済みの既知バグ）。
+ * 実機で傾きを振って帯が出ないことを確かめたうえでこの値にしている。
+ */
+private const val PREVIEW_GRID_REACH_FACTOR_VS_FLAT = 8f
+
+/**
  * 停留所ピンの縮小率下限。
  * ★第2ラウンド是正（istech 2026-07-26）: 一次資料`navi_preview_target_v2.html`の値を
  * `Math.max(.55, ...)`→`Math.max(.28, ...)`に更新済み（一次資料コメント参照）。0.55だと
@@ -1169,12 +1194,22 @@ private fun DrawScope.drawPreviewGroundGrid(
         worldUnitPx * PREVIEW_GRID_HALF_WIDTH_MARGIN_WORLD_UNIT_FACTOR +
         yawLateralSlackPx
 
+    // ★描画量の上限（2026-07-29・ANR 対策。[PREVIEW_GRID_REACH_FACTOR_VS_FLAT] 参照）。
+    // 「傾き0°で画面に収まる行数・列数」＝**その画面で実際に見えている密度**を物差しにし、その n 倍で打ち切る。
+    // 絶対値の [PREVIEW_GRID_MAX_LINES_PER_AXIS] は暴走時の最後の砦として残す（二段構え）。
+    val flatRows = kotlin.math.ceil(size.height / cellPx).toInt().coerceAtLeast(1)
+    val flatCols = kotlin.math.ceil(size.width / cellPx).toInt().coerceAtLeast(1)
+    val maxRows = (flatRows * PREVIEW_GRID_REACH_FACTOR_VS_FLAT).toInt()
+        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+    val maxCols = (flatCols * PREVIEW_GRID_REACH_FACTOR_VS_FLAT).toInt()
+        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+
     val aheadCells = (farDepthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
-        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+        .coerceIn(1, maxRows)
     val behindCells = (-nearDepthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
-        .coerceIn(0, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+        .coerceIn(0, maxRows)
     val halfWidthCells = (halfWidthPx / cellPx).let { kotlin.math.ceil(it).toInt() }
-        .coerceIn(1, PREVIEW_GRID_MAX_LINES_PER_AXIS)
+        .coerceIn(1, maxCols)
 
     // 縦線（lateral方向の各列）: depth方向にポリラインで描く（透視で曲がって収束する）。
     for (col in -halfWidthCells..halfWidthCells) {
