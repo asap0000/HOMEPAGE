@@ -41,6 +41,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
@@ -1099,6 +1100,17 @@ private fun DrawScope.drawFadingClippedGroundPolyline(
     val yawedPoints = rawPoints.map { (lateralPx, depthPx) -> yawGroundPoint(lateralPx, depthPx, yawDeg) }
     val runs = clipYawedPolylineAtNearPlane(yawedPoints, depthMinPx)
     for (run in runs) {
+        // ★2026-07-29（オーナー指示「線は1回の描画で」）: **1本のポリラインを Path にまとめて1回で描く**。
+        // 以前は線分ごとに `drawLine` を呼んでおり、グリッドだけで数万回の描画命令になっていた
+        // （ANR の直接原因。`9ed1828` で本数は減らしたが、**1本あたりの命令数はここが決めている**）。
+        //
+        // **引き換えに失うもの**: 以前は線分ごとに alpha を変えて滑らかにフェードしていたが、
+        // Path は1色でしか塗れないので**1本につき1つの alpha（その線の平均）**になる。
+        // グリッドは1本が短く、遠方ほど密になるため、**線をまたいだ濃淡の階調は保たれる**
+        // ＝見た目の劣化はほぼ無い。経路（太い帯）も同様に1本ずつなので影響は小さい。
+        var path: Path? = null
+        var alphaSum = 0f
+        var alphaCount = 0
         var prevScreen: Offset? = null
         var prevAlpha = 0f
         for (p in run) {
@@ -1109,14 +1121,24 @@ private fun DrawScope.drawFadingClippedGroundPolyline(
             if (prev != null && screen.isFinite() && prev.isFinite()) {
                 val segmentAlpha = (prevAlpha + alpha) * 0.5f
                 if (segmentAlpha > 0.02f) {
-                    drawLine(
-                        color.copy(alpha = color.alpha * segmentAlpha), prev, screen,
-                        strokeWidth = strokeWidth, cap = cap,
-                    )
+                    val p0 = path ?: Path().also { path = it; it.moveTo(prev.x, prev.y) }
+                    // 直前の線分が捨てられていた（alpha が低い／非有限）場合は continue せず線を切る。
+                    if (p0.isEmpty) p0.moveTo(prev.x, prev.y)
+                    p0.lineTo(screen.x, screen.y)
+                    alphaSum += segmentAlpha
+                    alphaCount++
                 }
             }
             prevScreen = screen
             prevAlpha = alpha
+        }
+        val built = path
+        if (built != null && alphaCount > 0) {
+            drawPath(
+                path = built,
+                color = color.copy(alpha = color.alpha * (alphaSum / alphaCount)),
+                style = Stroke(width = strokeWidth, cap = cap),
+            )
         }
     }
 }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -257,7 +258,9 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("映像ナビ設定") },
+                // ★2026-07-29: メインメニューのカード（[TopScreen]）と語を揃える。
+                // アプリ内に映像ナビ以外のナビは無いので「映像」は説明であって識別子ではない。
+                title = { Text("ナビ設定") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
@@ -302,9 +305,20 @@ private fun NaviSettingsTabRow(selected: NaviSettingsTab, onSelect: (NaviSetting
     // ★第4ラウンド是正（確定不具合1）: containerColorを明示し、テーマ既定に依らず確実に不透明にする。
     TabRow(selectedTabIndex = selected.ordinal, containerColor = MaterialTheme.colorScheme.surface) {
         NaviSettingsTab.entries.forEach { tab ->
+            val isSelected = tab == selected
             Tab(
-                selected = tab == selected,
+                selected = isSelected,
                 onClick = { onSelect(tab) },
+                // ★2026-07-29（オーナー指示）: 選択中のタブを**塗りつぶして強調**する。
+                // 既定の下線だけでは弱く、そのぶんカード内にもう一度同じ見出しを置いていた。
+                // ここを強くすることで**カード内の見出し1行を丸ごと削れる**（説明の省略）。
+                modifier = if (isSelected) {
+                    Modifier.background(MaterialTheme.colorScheme.primary)
+                } else {
+                    Modifier
+                },
+                selectedContentColor = MaterialTheme.colorScheme.onPrimary,
+                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 text = { Text(tab.label, maxLines = 1) },
             )
         }
@@ -423,7 +437,17 @@ private val NAVI_PREVIEW_FRAME_CORNER_RADIUS = 8.dp
  * 「スクロールが必要なこと」自体ではなく「スクロール終端で隙間ゼロに詰まって見えること」
  * （そちらは直前の固定[Spacer]で別途担保する）。
  */
-private const val PREVIEW_WEIGHT = 0.50f
+private const val PREVIEW_WEIGHT = 0.42f
+
+/*
+ * ★2026-07-29（オーナー指示）: 0.50 → 0.42。
+ * 指示は「**自車位置の D-pad をもう少し上げれば、スライダーバーが全部見える状態で、
+ * 自車位置の文字が下に出ている**から、ああ、設定画面は下があるんだなとわかる」。
+ * つまり**スライダー4本＋見出し「自車位置」までが初期表示に入る**のが要件。
+ * キャプション短縮とカード余白の圧縮（16→12dp・行間10→6dp）だけでは 1 行分（約110px）足りず、
+ * 実機 SHG12 で4本目が下端で切れていたため、プレビューの取り分を下げて高さ予算を回す。
+ * **下端が「ちょうど切れている」ことに意味がある**——余白で終わると続きがあると分からない。
+ */
 
 /**
  * タブバーとスクロール領域の間の固定余白（★第5ラウンド是正・差し戻し1）。スクロール領域の**外**
@@ -440,9 +464,31 @@ private const val SELF_CAR_DPAD_STEP_PCT = 5
 
 /**
  * 値ラベル用の固定幅（§3-2：文字数が変わっても行・レイアウトが動かないようにする）。
- * 2026-07-27 に 56dp → 76dp（語彙ラベルへ数値を併記したため。最長は "中央 100" 相当）。
+ * 2026-07-29 に 76dp → 40dp。**数字3桁分**で足りる（オーナー指示）——
+ * 中央の目盛りを入れたことで「中央」「上端」といった語を値ラベルから落とせたため。
  */
-private val VALUE_LABEL_WIDTH = 76.dp
+private val VALUE_LABEL_WIDTH = 40.dp
+
+/**
+ * スライダー両端のラベル幅（"大"/"小"、"左"/"右"、"上"/"下" の1文字）。
+ *
+ * ★2026-07-29（オーナー案）: 「大小」「左右」「上下」という**熟語をひとつのキャプションにせず、
+ * 1文字ずつバーの両端へ割る**。熟語は"名前"にしかならないが、両端に置くと
+ * **バーそのものが向きを語る絵**になる（オーナー「位置を属性にすると、アイキャッチになる」）。
+ * 副次効果が大きく、**キャプション 136dp → 20dp でバーが 172px → 約500px（2.9倍）に伸びる**
+ * ＝指先1.4個分だったバーが4個分になり、同じ指のぶれでも角度の誤差が ±10° → ±3.5° に減る。
+ */
+private val EDGE_LABEL_WIDTH = 38.dp
+
+/** 中央の目盛りの濃さ。 */
+private const val SLIDER_CENTER_TICK_ALPHA = 0.55f
+
+/**
+ * 映像の大きさの最大値（％）。**スライダーの向きを反転させるための鏡**として使う。
+ * UI 上は「大 ── 小」＝左いっぱいが映像最大なので、表示値は `MAX - videoAmountPct` になる。
+ * 内部値（`videoAmountPct` ＝ 映像の占有率）の意味は変えない。
+ */
+private const val VIDEO_AMOUNT_MAX_PCT = 100
 
 /** スライダーのつまみ直径（自前描画。M3 1.3 既定の細い縦棒を丸へ戻す）。 */
 private val SLIDER_THUMB_DIAMETER = 20.dp
@@ -489,27 +535,43 @@ private fun NaviLayoutCard(
     onSelfCarLeft: () -> Unit,
     onSelfCarRight: () -> Unit,
 ) {
-    NaviSettingsSectionCard(title = "レイアウト") {
-        // ★第3ラウンド是正（istech 2026-07-26・§2）: 「傾き」→「地図の傾き」。第三者2者そろって
-        // 「何の傾きか（地図の視点か映像の傾きか）分からない」と指摘したため。
+    // ★2026-07-29（オーナー指示）: カード内の見出し「レイアウト」を廃止。
+    // **タブに同じ語が出ているので1行まるごと重複**していた。代わりにタブ側の選択を塗りで強調する
+    // （[NaviSettingsTabRow]）。「UI とは説明をいかに省略できるか」。
+    NaviSettingsSectionCard(title = null) {
+        // 「地図の傾き」→「傾き」。この画面に地図以外の傾きは無いので「地図の」は説明であって識別子ではない。
         NaviLabeledSlider(
-            caption = "地図の傾き",
+            startLabel = "傾き",
+            endLabel = null,
             value = tiltDeg.toFloat(),
             valueRange = 0f..90f,
             valueLabel = NaviSettingsLabels.tiltLabel(tiltDeg),
             onValueChange = { onTiltDegChange(it.toDouble()) },
             onValueChangeFinished = onTiltDegChangeFinished,
         )
+        // 映像の3本は「映像」のグループ見出しでまとめ、各行は両端1文字にする（"映像の"を3回書かない）。
+        Text(
+            "映像",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        // ★向きを反転している（オーナー裁定 2026-07-29「小大ではなく大小で」）。
+        // **左いっぱいが映像最大・右いっぱいが映像なし**。UI 上の位置と内部値（0..100%）が逆なので、
+        // ここで `100 - x` を挟む。**内部の意味（videoAmountPct=映像の占有率）は変えない**
+        // ——変えると保存済み設定・プレビュー・本番ナビの全てに波及するため、変換はこの1行に閉じ込める。
         NaviLabeledSlider(
-            caption = "映像の大きさ",
-            value = videoAmountPct.toFloat(),
-            valueRange = 0f..100f,
+            startLabel = "大",
+            endLabel = "小",
+            value = (VIDEO_AMOUNT_MAX_PCT - videoAmountPct).toFloat(),
+            valueRange = 0f..VIDEO_AMOUNT_MAX_PCT.toFloat(),
             valueLabel = NaviSettingsLabels.videoAmountLabel(videoAmountPct),
-            onValueChange = { onVideoAmountPctChange(it.toInt()) },
+            onValueChange = { onVideoAmountPctChange(VIDEO_AMOUNT_MAX_PCT - it.toInt()) },
             onValueChangeFinished = onVideoAmountPctChangeFinished,
         )
         NaviLabeledSlider(
-            caption = "映像の左右位置",
+            startLabel = "左",
+            endLabel = "右",
             value = videoLateralPct.toFloat(),
             valueRange = 0f..100f,
             valueLabel = NaviSettingsLabels.videoLateralLabel(videoLateralPct),
@@ -519,7 +581,8 @@ private fun NaviLayoutCard(
         // ★第3ラウンド新設（istech 2026-07-26・§1・オーナー承認済み）: 映像を上下にも動かせるようにする。
         // 既定値0＝上端＝従来の見え方のまま（非破壊）。
         NaviLabeledSlider(
-            caption = "映像の上下位置",
+            startLabel = "上",
+            endLabel = "下",
             value = videoVerticalPct.toFloat(),
             valueRange = 0f..100f,
             valueLabel = NaviSettingsLabels.videoVerticalLabel(videoVerticalPct),
@@ -532,28 +595,20 @@ private fun NaviLayoutCard(
         // 冗長だった。自車位置は「地図のどこに自分を置くか」という2次元の配置なので、前後・左右を
         // 別々のスライダーで考えさせるより十字キーが直感的（設計 §5「十字キーで前後左右に移動」）。
         // 現在値はキーの中央に出す（スライダーを消しても今どこかが分かるように）。
-        Spacer(Modifier.size(8.dp))
+        // ★2026-07-29（オーナー指示）: 並びを **見出し → 十字キー → 説明** に変える。
+        // 以前は見出しと十字キーの**間に説明文が挟まっていた**ので、名前と操作対象の対応が切れていた。
+        // 説明は読まなくても操作できるが、**どれが「自車位置」なのかは一目で要る**。
+        // また上の余白を詰め、**スライダー4本が全部見える位置で「自車位置」の見出しが下端に覗く**ようにする
+        // ＝「この画面には続きがある」がスクロールしなくても分かる。
+        Spacer(Modifier.size(4.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     "自車位置",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
                 )
-                // ★第3ラウンド是正（istech 2026-07-26・確定不具合3）: 中央の小さな長方形と青い点が
-                // 何を表すか説明が無かった。「地図上の実際の位置を変える機能ではない」ことも込みで、
-                // 「ナビ画面の中での自車の表示位置」であることを短く添えた。
-                // ★第4ラウンド是正（確定不具合8）: それでも「自車位置を動かすと地図全体が動く」
-                // （自車アイコンだけが動くのではない）ことが初見で伝わらなかった。「自車はここに
-                // 固定され、地図の方が動く」と明言する一段具体的な文言にする。
-                Text(
-                    "自車はこの位置に固定され、地図の方が動きます",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.width(D_PAD_LEGEND_WIDTH),
-                )
-                Spacer(Modifier.size(4.dp))
+                Spacer(Modifier.size(2.dp))
                 NaviSelfCarDPad(
                     onUp = onSelfCarUp,
                     onDown = onSelfCarDown,
@@ -563,9 +618,20 @@ private fun NaviLayoutCard(
                     lateralPct = selfCarLateralPct,
                     centerLabel = NaviSettingsLabels.selfCarPositionLabel(selfCarFwdBackPct, selfCarLateralPct),
                 )
+                // ★第3/第4ラウンド是正（確定不具合3・8）の文言はそのまま維持する。
+                // 「自車位置を動かすと自車アイコンだけでなく地図全体が動く」が初見で伝わらなかったため、
+                // 「自車はここに固定され、地図の方が動く」と明言している。位置だけを下へ移した。
+                Spacer(Modifier.size(2.dp))
+                Text(
+                    "自車はこの位置に固定され、地図の方が動きます",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(D_PAD_LEGEND_WIDTH),
+                )
             }
         }
-        Spacer(Modifier.size(8.dp))
+        Spacer(Modifier.size(4.dp))
     }
 }
 
@@ -678,7 +744,8 @@ private val D_PAD_LEGEND_WIDTH = 168.dp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NaviLabeledSlider(
-    caption: String,
+    startLabel: String,
+    endLabel: String?,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     valueLabel: String,
@@ -687,10 +754,11 @@ private fun NaviLabeledSlider(
 ) {
     val activeColor = MaterialTheme.colorScheme.primary
     val inactiveColor = activeColor.copy(alpha = SLIDER_INACTIVE_TRACK_ALPHA)
+    val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = SLIDER_CENTER_TICK_ALPHA)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            caption,
-            modifier = Modifier.width(CAPTION_WIDTH),
+            startLabel,
+            modifier = Modifier.width(EDGE_LABEL_WIDTH),
             style = MaterialTheme.typography.bodyMedium,
             maxLines = 1,
         )
@@ -699,7 +767,7 @@ private fun NaviLabeledSlider(
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,
             valueRange = valueRange,
-            modifier = Modifier.weight(1f).padding(start = 8.dp, end = 4.dp),
+            modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
             thumb = {
                 Box(
                     Modifier
@@ -730,16 +798,34 @@ private fun NaviLabeledSlider(
                             cap = StrokeCap.Round,
                         )
                     }
+                    // ★中央の目盛り（2026-07-29 オーナー指示）。**4本すべてに入れる**——
+                    // 傾きは45°、映像の大小は50%、左右・上下は中央、と**どの軸も中央値に意味がある**。
+                    // これがあるので値ラベルから「中央」「上端」の語を落とせる（数字だけで位置が読める）。
+                    drawLine(
+                        color = tickColor,
+                        start = Offset(size.width / 2f, -size.height * 0.9f),
+                        end = Offset(size.width / 2f, size.height * 1.9f),
+                        strokeWidth = size.height * 0.34f,
+                    )
                 }
             },
         )
-        Box(Modifier.width(VALUE_LABEL_WIDTH), contentAlignment = Alignment.CenterStart) {
+        if (endLabel != null) {
+            Text(
+                endLabel,
+                modifier = Modifier.width(EDGE_LABEL_WIDTH),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                textAlign = TextAlign.Start,
+            )
+        }
+        Box(Modifier.width(VALUE_LABEL_WIDTH), contentAlignment = Alignment.CenterEnd) {
             Text(
                 valueLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
-                textAlign = TextAlign.Start,
+                textAlign = TextAlign.End,
             )
         }
     }
@@ -758,9 +844,14 @@ private fun NaviDisplayCard(
     stopNameVisible: Boolean,
     onStopNameVisibleChange: (Boolean) -> Unit,
 ) {
-    NaviSettingsSectionCard(title = "表示") {
+    // ★2026-07-29（オーナー指示）: 見出しを削って**1画面に収める**。
+    // カード見出し「表示」はタブと重複。「地図の向き」「昼夜」は**ボタンの文字を読めば分かる**ので不要
+    // （ノースアップ／ヘディングアップ、夜用／昼用）。**停留所名だけは見出しを残す**——
+    // 「表示／非表示」だけでは何を指すのか分からないため。「UI とは説明をいかに省略できるか」。
+    // 副次効果として、見出しが奪っていた幅が戻り「ヘディングアップ」が切れずに収まる。
+    NaviSettingsSectionCard(title = null) {
         NaviSegmentedToggle(
-            label = "地図の向き",
+            label = null,
             options = listOf(
                 NaviMapOrientation.NORTH_UP to "ノースアップ",
                 NaviMapOrientation.HEADING_UP to "ヘディングアップ",
@@ -769,10 +860,10 @@ private fun NaviDisplayCard(
             onSelect = onOrientationChange,
         )
         NaviSegmentedToggle(
-            label = "昼夜",
+            label = null,
             options = listOf(
-                NaviTheme.NIGHT to "夜",
-                NaviTheme.DAY to "昼",
+                NaviTheme.NIGHT to "夜用",
+                NaviTheme.DAY to "昼用",
             ),
             selected = theme,
             onSelect = onThemeChange,
@@ -791,18 +882,20 @@ private fun NaviDisplayCard(
 
 @Composable
 private fun <T> NaviSegmentedToggle(
-    label: String,
+    label: String?,
     options: List<Pair<T, String>>,
     selected: T,
     onSelect: (T) -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.size(4.dp))
+    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        if (label != null) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -814,6 +907,10 @@ private fun <T> NaviSegmentedToggle(
                     onClick = { onSelect(value) },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(10.dp),
+                    // ★2026-07-29: TextButton の既定 contentPadding（水平24dp）が文字幅を奪い、
+                    // 「ヘディングアップ」が「ヘディングアッ」で切れていた。ボタン自体は半分幅で
+                    // 十分あるので、内側の余白だけ詰めて文字に回す。
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                     colors = ButtonDefaults.textButtonColors(
                         containerColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
                         contentColor = if (isSelected) {
@@ -835,14 +932,20 @@ private fun <T> NaviSegmentedToggle(
 // ---------------------------------------------------------------------------------------------
 
 @Composable
-private fun NaviSettingsSectionCard(title: String, content: @Composable () -> Unit) {
+private fun NaviSettingsSectionCard(title: String?, content: @Composable () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        // ★2026-07-29: title を null 許容に。タブと同じ語をカード内で繰り返さないため
+        // （どちらのタブも現在は null。将来カードが増えて見分けが要るときのために引数は残す）。
+        // 併せて余白を 16→12dp・行間 10→6dp に詰め、**スライダー4本＋「自車位置」の見出しが
+        // スクロールなしで見える**ようにする。
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (title != null) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             content()
         }
     }

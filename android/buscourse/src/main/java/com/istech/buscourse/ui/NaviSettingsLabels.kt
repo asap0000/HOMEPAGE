@@ -32,16 +32,14 @@ object NaviSettingsLabels {
      * 数値と「中央」「上端」という言葉が混ざり、しかも**言葉だけでは 1〜49 がすべて「左寄り」**に
      * なってどのくらい寄ったかが読めなかった。語彙（第4ラウンドでオーナー確定）は変えずに数値を添える。
      */
-    fun videoLateralLabel(videoLateralPct: Int): String =
-        withPct(lateralLabel(videoLateralPct), videoLateralPct)
+    fun videoLateralLabel(videoLateralPct: Int): String = "$videoLateralPct"
 
     /**
      * 映像の上下位置スライダーの値ラベル（例 "上端 0" / "下寄り 70"）。
      * istech 第3ラウンド新設・第4ラウンドで左右系と語彙・閾値を統一（[edgeAwareLabel]参照）・
      * 2026-07-27 に数値を併記（[videoLateralLabel] と同じ理由）。
      */
-    fun videoVerticalLabel(videoVerticalPct: Int): String =
-        withPct(edgeAwareLabel(videoVerticalPct, "上端", "上寄り", "中央", "下寄り", "下端"), videoVerticalPct)
+    fun videoVerticalLabel(videoVerticalPct: Int): String = "$videoVerticalPct"
 
     /** 自車の前後位置スライダーの値ラベル（"下気味"/"中央"/"上気味"）。 */
     fun selfCarFwdBackLabel(selfCarFwdBackPct: Int): String = when {
