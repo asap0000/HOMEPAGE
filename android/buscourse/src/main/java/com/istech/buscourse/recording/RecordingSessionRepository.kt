@@ -217,6 +217,33 @@ class RecordingSessionRepository(
         }
     }
 
+    // ------------------------------------------------------------------
+    // POC押下ログ（poc_press_log.jsonl・玄関再設計POC段階1の計測装置。2026-07-31）
+    // ------------------------------------------------------------------
+
+    /**
+     * POC段階1の押下計測を `sessions/<id>/poc_press_log.jsonl` へ1行追記する。
+     * `gps_raw.jsonl` と同じ「追記＋行ごと flush」でクラッシュ耐性を確保する。頻度が低い
+     * （人がボタンを押した回数だけ）ため、常設 writer は持たず毎回開いて閉じる。
+     * セッションフォルダ内に置くので機種変更バックアップ（sessions 配下ごと同梱）に自動で載る。
+     * **DBスキーマには一切触れない**（v20 鋳造＝官房マターを POC の後ろに置く＝測ってから鋳造する）。
+     */
+    fun appendPocPressLog(json: JSONObject) {
+        repositoryScope.launch {
+            val current = session ?: return@launch
+            val file = File(sessionDir(current.id), "poc_press_log.jsonl")
+            try {
+                OutputStreamWriter(FileOutputStream(file, true), Charsets.UTF_8).use { w ->
+                    w.write(json.toString())
+                    w.write("\n")
+                    w.flush()
+                }
+            } catch (e: IOException) {
+                Log.e(TAG, "poc_press_log.jsonl 追記に失敗しました", e)
+            }
+        }
+    }
+
     private suspend fun importGpsPointsFromJsonl(sessionId: Long) {
         val current = recordingSessionDao.getById(sessionId) ?: return
         val file = BusCourseStorage.resolve(context, current.gpsRawLogRelPath)

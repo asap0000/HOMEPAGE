@@ -20,6 +20,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.R
 import com.istech.buscourse.core.data.BusCourseDatabase
@@ -31,10 +32,12 @@ import com.istech.buscourse.course.CourseRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 記録エンジンFGS本体（設計書§4.1〜§4.4）。`foregroundServiceType = "camera|location"`。
@@ -367,6 +370,15 @@ class BusRecordingService : LifecycleService() {
      *      （映像が無ければ部分成功＝映像なしとして扱う。これは3の位置鮮度チェックとは独立）
      */
     private fun onManualStopMark() {
+        // ------------------------------------------------------------------
+        // POC段階1（2026-07-31）: 玄関の再設計（記録先行・撮影後付け・吸着なし・無言分岐なし）の検証装置。
+        // **debug ビルド種別限定**。⚠ BuildConfig.DEBUG では判定しない——field も isDebuggable=true のため
+        // DEBUG が true になり、実データを持つ記録用ビルドへ POC が漏れる（癖リスト0「既定で有効な他経路」）。
+        // ------------------------------------------------------------------
+        if (BuildConfig.BUILD_TYPE == "debug") {
+            pocManualStopMark()
+            return
+        }
         if (isDebounced(lastStopMarkElapsedMs)) return
         lastStopMarkElapsedMs = SystemClock.elapsedRealtime()
 
@@ -464,6 +476,111 @@ class BusRecordingService : LifecycleService() {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // POC段階1（2026-07-31）: 玄関の再設計の検証装置。debug ビルド種別のみ到達（onManualStopMark 冒頭のガード）。
+    // ------------------------------------------------------------------
+
+    /** POC押下の通し番号（サービス生存期間内で単調増加。ログ行の突き合わせキー）。 */
+    private val pocPressSeq = AtomicInteger(0)
+
+    /**
+     * POC版の停留所マーク。検証したい玄関の形＝
+     *   ① 押下の事実と測位を最優先で確定する（カード0件でも・連打でも・毎回。#2 の「何も残らない」の逆）
+     *   ② 押下直前の LORES フレームを特定だけする（`stop_card_id` タグは付けない＝既存テーブル・既存読み手は不変）
+     *   ③ 最後に HIRES 単写を投げる（失敗しても①②は確定済み＝測位は消えない）
+     * 従来の4つの沈黙/失敗分岐（デバウンス無言 return・現在地なし・カードなし・LORES探索失敗）を
+     * すべて「記録したうえでフィードバック」へ置き換える。連打も間引かず全押下を記録する
+     * （0〜10秒に20回押せば20行残る——ノイズの実態こそが計測対象。間引きの要否はデータで決める）。
+     * 計測は `sessions/<id>/poc_press_log.jsonl` へ（[RecordingSessionRepository.appendPocPressLog]）。
+     * `stop_visit_event` へは一切書かない（stop_card_id NOT NULL の v20 nullable 化＝版鋳造＝官房マターは
+     * POC の実測が出てから起案する。測ってから鋳造する）。
+     */
+    private fun pocManualStopMark() {
+        // ① 押下の事実を最初に固定する（この3行より前に return する分岐を作らない）
+        val pressTs = System.currentTimeMillis()
+        val pressErtNs = SystemClock.elapsedRealtimeNanos()
+        val seq = pocPressSeq.incrementAndGet()
+
+        val location = cameraCaptureController?.lastKnownLocation
+        val locAgeMs = location?.let { (pressErtNs - it.elapsedRealtimeNanos) / 1_000_000L }
+
+        // 手応えは毎押下・即時。「押下が記録された」の意味に限定する（写真の成否はここでは分からない）
+        vibrateMarkSuccess()
+        Toast.makeText(
+            this,
+            "POC ${seq}件目" + (if (location == null) "（現在地なし）" else ""),
+            Toast.LENGTH_SHORT,
+        ).show()
+
+        lifecycleScope.launch {
+            // ② 押下“直前”の LORES を特定だけする。Δt・前後間隔は解析側が capturedAt と突き合わせて出す
+            val loresBeforeId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = pressTs)
+
+            sessionRepository.appendPocPressLog(JSONObject().apply {
+                put("ev", "press")
+                put("seq", seq)
+                put("t", pressTs)
+                put("ert", pressErtNs)
+                put("lat", location?.latitude ?: JSONObject.NULL)
+                put("lon", location?.longitude ?: JSONObject.NULL)
+                put("spd", location?.takeIf { it.hasSpeed() }?.speed?.toDouble() ?: JSONObject.NULL)
+                put("acc", location?.takeIf { it.hasAccuracy() }?.accuracy?.toDouble() ?: JSONObject.NULL)
+                put("loc_age_ms", locAgeMs ?: JSONObject.NULL)
+                put("lores_before_id", loresBeforeId ?: JSONObject.NULL)
+            })
+
+            // ③ HIRES は最後。captureHiRes でなく captureToFile を使う——失敗コールバックを持つのは後者だけで、
+            //    「失敗も含めて測る」POC に、失敗が黙って消える経路（captureHiRes の onFailure={}）は使えない
+            val controller = cameraCaptureController
+            if (controller == null) {
+                sessionRepository.appendPocPressLog(pocHiresResult(seq, "no_camera", 0L, null, null))
+                return@launch
+            }
+            val hiresFile = try {
+                sessionRepository.newHiResFile(HiResReason.STOP_MANUAL)
+            } catch (e: IllegalStateException) {
+                sessionRepository.appendPocPressLog(pocHiresResult(seq, "no_session", 0L, null, null))
+                return@launch
+            }
+            val hiresStartMs = SystemClock.elapsedRealtime()
+            controller.captureToFile(
+                hiresFile,
+                location,
+                onFailure = {
+                    lifecycleScope.launch {
+                        sessionRepository.appendPocPressLog(
+                            pocHiresResult(seq, "fail", SystemClock.elapsedRealtime() - hiresStartMs, null, null)
+                        )
+                    }
+                },
+            ) { file ->
+                lifecycleScope.launch {
+                    // セッションが撮影完了前に終了していたら DB 行は起こせないが、ログには成否を残す
+                    val frameId = try {
+                        sessionRepository.recordHiResFrame(file, System.currentTimeMillis(), location)
+                    } catch (e: IllegalStateException) {
+                        null
+                    }
+                    sessionRepository.appendPocPressLog(
+                        pocHiresResult(seq, "ok", SystemClock.elapsedRealtime() - hiresStartMs, frameId, file.length())
+                    )
+                }
+            }
+        }
+    }
+
+    /** POC の HIRES 結果行（`"ev":"hires"`）。press 行と `seq` で突き合わせる。 */
+    private fun pocHiresResult(seq: Int, result: String, elapsedMs: Long, frameId: Long?, bytes: Long?): JSONObject =
+        JSONObject().apply {
+            put("ev", "hires")
+            put("seq", seq)
+            put("t", System.currentTimeMillis())
+            put("result", result)
+            put("ms", elapsedMs)
+            put("frame_id", frameId ?: JSONObject.NULL)
+            put("bytes", bytes ?: JSONObject.NULL)
+        }
 
     /** 通知アクションボタンの二度押し対策。前回発火からの経過時間が短ければtrue。 */
     private fun isDebounced(previousElapsedMs: Long, intervalMs: Long = NOTIFICATION_BUTTON_DEBOUNCE_MS): Boolean =
