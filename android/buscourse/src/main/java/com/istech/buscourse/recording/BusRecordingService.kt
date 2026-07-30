@@ -250,6 +250,18 @@ class BusRecordingService : LifecycleService() {
         cameraCaptureController?.lastKnownLocation = location
         sessionRepository.appendGpsRaw(location)
 
+        // UI改善（停車ストップウォッチ、2026-07-31・オーナー承認済み）: 5km/h 以下を「停車」として
+        // UI に見せる。閾値は AUTO 検知（StopDetector.speedThresholdKmh=5.0）と同じ＝
+        // 「機械が停車と認識している時間」がそのまま見える（人と機械の停車認識を合わせる、が目的）。
+        // 書き込みは**境界をまたいだ遷移時のみ**（毎秒ではない）。表示専用で、どこにも記録しない。
+        // 測位・撮影のどの処理にも介入しない（この既存コールバックの末尾で値を見るだけ）。
+        val stationaryNow = currentSpeedKmh <= STATIONARY_THRESHOLD_KMH
+        if (stationaryNow != stationaryActive) {
+            stationaryActive = stationaryNow
+            val since = if (stationaryNow) System.currentTimeMillis() else null
+            lifecycleScope.launch { recordingStateStore.setStationarySince(since) }
+        }
+
         val fired = stopDetector?.onLocation(location)
         if (fired != null) {
             val distance = GeoMath.haversineM(location.latitude, location.longitude, fired.latitude, fired.longitude)
@@ -485,6 +497,9 @@ class BusRecordingService : LifecycleService() {
 
     /** POC押下の通し番号（サービス生存期間内で単調増加。ログ行の突き合わせキー）。 */
     private val pocPressSeq = AtomicInteger(0)
+
+    /** 停車ストップウォッチの現在状態（[onLocationUpdate] だけが触る。遷移検出用）。 */
+    private var stationaryActive = false
 
     /**
      * UI改善2（2026-07-31・オーナー承認済み y）: マーカー手ごたえのシャッター音。
@@ -780,6 +795,12 @@ class BusRecordingService : LifecycleService() {
         private const val SHOCK_PRE_WINDOW_MS = 2_000L
         private const val SHOCK_POST_WINDOW_MS = 3_000L
         private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
+
+        /**
+         * 停車ストップウォッチの閾値（km/h）。**AUTO 検知の `StopDetector.speedThresholdKmh` と同じ値**
+         * に揃える（人と機械の停車認識を合わせる、というこの表示の目的そのもの。2026-07-31）。
+         */
+        private const val STATIONARY_THRESHOLD_KMH = 5.0
 
         /** カメラ健全性チェックの周期（S0-b、2026-07-15追加）。判定ロジックの詳細は[runCameraHealthLoop]参照。 */
         private const val CAMERA_HEALTH_CHECK_INTERVAL_MS = 20_000L

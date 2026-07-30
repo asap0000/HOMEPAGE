@@ -11,7 +11,10 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.PinDrop
+import androidx.compose.material.icons.filled.SatelliteAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -61,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
@@ -383,6 +388,7 @@ private fun SessionTypeOption(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecordingActiveContent(
     sessionId: Long,
@@ -443,150 +449,150 @@ private fun RecordingActiveContent(
     }
 
     // スクロール可能にしておくこと（S0-d 実機検証 2026-07-16 で判明した不具合の修正）。
-    // カメラ・測位の警告カード（S0-c/S0-d）が出ると縦に伸び、固定Columnのままでは
-    // 「停留所マーク」「記録を終了」が画面外へ押し出されて押せなくなる。警告が出ている時ほど
-    // 運転手はマークと終了を使う必要があるため、ここがスクロールしないのは致命的になる。
+    // 2026-07-31 改修で警告は「高さ固定スロットの中身が入れ替わる」方式になり縦に伸びなくなったが、
+    // 小画面端末（SHG12 等）で全高が収まらない場合の保険としてスクロールは残す。
+    //
+    // 【レイアウトの不変条件（2026-07-31・オーナー指示）】記録中は状態（停車・警告）が変わっても
+    // **「停留所マーク」ボタンの画面座標が動かない**こと。走行中はボタンを見ずに押すため、
+    // 座標が揺れると押し損ねる。⇒ 出たり消えたりする表示（停車ストップウォッチ・警告）はすべて
+    // **高さ固定のスロット**に入れて中身だけを差し替える。要素の追加・削除でレイアウトを揺らさない。
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(24.dp))
-        Icon(
-            Icons.Filled.FiberManualRecord,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.error,
-            modifier = Modifier.size(48.dp),
-        )
-        Text("記録中", style = MaterialTheme.typography.headlineSmall)
-        session?.let {
-            // UI改善1（2026-07-31・オーナー承認済み y）: 種別を文字でなく色札で判別できるようにする。
-            // 本番運行（FULL_RUN）＝赤系／試走（TEST_DRIVE）＝青系。走行中の一瞥で
-            // 「いま本番を記録している」ことが読めるのが目的（文字列 "FULL_RUN" の読解を要求しない）。
-            // 未知の種別（PARTIAL_RUN 等、この画面から開始しない種別）は従来どおり生の名前を無彩色で出す。
-            val (badgeLabel, badgeBg, badgeFg) = when (it.type) {
-                "FULL_RUN" -> Triple(
-                    "本番運行（FULL_RUN）",
-                    MaterialTheme.colorScheme.errorContainer,
-                    MaterialTheme.colorScheme.onErrorContainer,
-                )
-                "TEST_DRIVE" -> Triple(
-                    "試走（TEST_DRIVE）",
-                    MaterialTheme.colorScheme.primaryContainer,
-                    MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-                else -> Triple(
-                    "種別: ${it.type}",
-                    MaterialTheme.colorScheme.surfaceVariant,
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .background(badgeBg, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-            ) {
-                Text(badgeLabel, style = MaterialTheme.typography.titleMedium, color = badgeFg)
-            }
+        // UI改善1改（2026-07-31・オーナー承認）: 種別は画面最上部の**全幅色帯**。
+        // 初版の角丸バッジは「ボタンに見えるのはマーカーだけ」原則に抵触したため置換した。
+        // 本番運行＝赤系／試走＝青系。全幅の帯はボタンに見えず、走行中の一瞥で種別が読める。
+        val (bandLabel, bandBg, bandFg) = when (session?.type) {
+            "FULL_RUN" -> Triple(
+                "本番運行（FULL_RUN）",
+                MaterialTheme.colorScheme.errorContainer,
+                MaterialTheme.colorScheme.onErrorContainer,
+            )
+            "TEST_DRIVE" -> Triple(
+                "試走（TEST_DRIVE）",
+                MaterialTheme.colorScheme.primaryContainer,
+                MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            null -> Triple("", MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> Triple(
+                "種別: ${session?.type}",
+                MaterialTheme.colorScheme.surfaceVariant,
+                MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(bandBg)
+                .padding(vertical = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(bandLabel, style = MaterialTheme.typography.titleMedium, color = bandFg)
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.FiberManualRecord,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text("記録中", style = MaterialTheme.typography.titleMedium)
+        }
+
+        // UI改善4（前回例示で承認済み）: 経過時間を時計サイズに（囲いなし）
         val h = elapsedSec / 3600
         val m = (elapsedSec % 3600) / 60
         val s = elapsedSec % 60
-        Text("経過時間: %02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.bodyLarge)
+        Text("%02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.displayMedium)
+        Text("経過時間", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-        // S0-c 撮影状況の常時表示（2026-07-15追加）。実車事故（セッション#17、2026-07-15）で
-        // カメラが1枚も撮影しないまま77分間気づけなかった反省を踏まえたオーナー指示：
-        // 「通知画面よりも記録画面のボタンの方が視覚的にはるかに分かりやすい。振動は走行中だと
-        // 感じ取りにくい」。よって振動に頼らず、走行中の運転手が一目で分かるサイズで撮影枚数を
-        // 常時表示し、異常時は赤い警告表示を目立たせる（S0-bの[cameraWarning]を反映）。
-        Text(
-            "撮影枚数: ${frameCount}枚",
-            style = MaterialTheme.typography.titleLarge,
-            color = if (cameraWarning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-        )
-        if (cameraWarning) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Icon(
-                        Icons.Filled.Warning,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.size(32.dp),
-                    )
-                    Text(
-                        "映像が撮れていません",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                    Text(
-                        "停留所マークの位置情報は記録できますが、映像は保存されません。カメラの状態を確認してください。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        textAlign = TextAlign.Center,
-                    )
-                }
+        // UI改善（停車ストップウォッチ・2026-07-31 承認）: 5km/h 以下（AUTO 検知と同じ閾値＝機械の
+        // 停車認識そのもの）で出現し、発進で消える。表示のみでどこにも記録しない（停車の記録は
+        // GPX＝gps_raw が既に持つ）。**高さ固定スロット**＝出現・消滅で下のマーカーボタン座標を動かさない。
+        // 経過秒の再計算は elapsedSec の1秒ティッカーの再コンポーズに相乗り（追加タイマーを持たない）。
+        val stationarySince by stateStore.stationarySinceFlow.collectAsState(initial = null)
+        val nowMs = remember(elapsedSec) { System.currentTimeMillis() }
+        Box(Modifier.height(52.dp), contentAlignment = Alignment.Center) {
+            val since = stationarySince
+            if (since != null) {
+                val stopSec = ((nowMs - since) / 1000).coerceAtLeast(0)
+                Text(
+                    "停車 %02d:%02d".format(stopSec / 60, stopSec % 60),
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
         }
 
-        // S0-d 測位状態の常時表示（2026-07-16追加）。カメラ側S0-cと同じ考え方：
-        // オーナー観察「走行中は振動を体感しづらい。画面表示の方が圧倒的に分かりやすい」を踏まえ、
-        // 測位についても振動だけに頼らず常時表示する。
-        Text(
-            "測位: ${if (gnssWarning) "警告" else "正常"}",
-            style = MaterialTheme.typography.titleLarge,
-            color = if (gnssWarning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-        )
-        if (gnssWarning) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Icon(
-                        Icons.Filled.Warning,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.size(32.dp),
-                    )
-                    Text(
-                        "位置情報が取得できていません",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                    Text(
-                        "停留所マークを押しても位置がずれて記録される可能性があります。GPSが有効か、屋外・見通しの良い場所か確認してください。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        textAlign = TextAlign.Center,
-                    )
-                }
+        // 状態表示2行（2026-07-31 改修・UI改善3）: 角丸カードを廃止（ボタンに見えるのはマーカーだけ、
+        // の原則）。異常は長文でなく**道路標識風マーク**＋一行で示す（丸に×はボタン誤認のため不採用）。
+        // 各行は高さ固定で、正常/異常は**行の中身が入れ替わるだけ**＝レイアウトを揺らさない。
+
+        // 測位行（S0-d の表現替え）: 正常＝衛星がくっきり「測位中」／異常（回復する系＝衛星ロスト）＝
+        // 衛星が薄くなり「衛星を探しています」。
+        // ※「モジュール停止（待っても戻らない系）」の赤標識は、それを検知する信号が現状エンジンに
+        //   無いため表示だけ先行させない（検知を足す増分で表示ごと足す。エンジン不変の境界を守る）。
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(40.dp),
+        ) {
+            Icon(
+                Icons.Filled.SatelliteAlt,
+                contentDescription = null,
+                tint = if (gnssWarning) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (gnssWarning) "衛星を探しています" else "測位中",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (gnssWarning) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+
+        // カメラ行（S0-c の表現替え）: 正常＝撮影枚数のプレーン表示／
+        // 異常＝黄色の標識風ビックリマーク＋停止枚数（同じ行の中身が入れ替わる）。
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(40.dp),
+        ) {
+            if (cameraWarning) {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = Color(0xFFF9A825), // 道路標識の黄
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "カメラが停止しています（${frameCount}枚で停止）",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else {
+                Text("撮影 ${frameCount}枚", style = MaterialTheme.typography.titleMedium)
             }
         }
 
+        Spacer(Modifier.height(6.dp))
         Text(
             "停留所に着いたら下のボタンを押してください。通知バーの「停留所マーク」ボタンからも同じ操作ができます。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 24.dp),
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         // 押しやすさ優先で大きめサイズ・ブランド基調色（istech/CLAUDE.md #3366FF = colorScheme.primary）。
-        // 二度押し対策はBusRecordingService側の既存デバウンス(2秒)に委ねる（UI側では追加ロックしない）。
+        // この画面で「ボタンに見える」形をしてよいのはこのマーカーだけ（2026-07-31 オーナー指示）。
         Button(
             onClick = { markStop() },
             colors = ButtonDefaults.buttonColors(
@@ -595,25 +601,50 @@ private fun RecordingActiveContent(
             ),
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 24.dp)
                 .height(64.dp),
         ) {
             Icon(Icons.Filled.PinDrop, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("停留所マーク", style = MaterialTheme.typography.titleMedium)
         }
-        Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = { showConfirm = true },
-            enabled = !stopRequested,
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+        Spacer(Modifier.height(18.dp))
+        // UI改善5（承認済み・**段階停止**）: 終了は**長押し→確認ダイアログ**の二段。
+        // 2時間超の記録を誤タップ一発で失わないため（オーナー: 長時間記録の途中でハプニングはなくもない）。
+        // 短いタップは無反応にせずヒントを返す（無言分岐を作らない）。ボタンであることは維持してよい
+        // （オーナー指示＝⏹を含めてよい）が、見た目の強度はマーカーより落とす（枠線のみ・幅控えめ）。
+        Box(
             modifier = Modifier
+                .padding(horizontal = 64.dp)
                 .fillMaxWidth()
-                .height(52.dp),
+                .height(48.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(24.dp))
+                .combinedClickable(
+                    enabled = !stopRequested,
+                    onClick = {
+                        Toast.makeText(context, "終了するには長押ししてください", Toast.LENGTH_SHORT).show()
+                    },
+                    onLongClick = { showConfirm = true },
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Stop, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(if (stopRequested) "終了処理中…" else "記録を終了")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Stop,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (stopRequested) "終了処理中…" else "記録を終了（長押し）",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
+        Spacer(Modifier.height(24.dp))
     }
 
     if (showConfirm) {

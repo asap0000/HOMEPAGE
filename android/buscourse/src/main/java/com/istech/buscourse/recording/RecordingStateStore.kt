@@ -45,6 +45,15 @@ class RecordingStateStore(private val context: Context) {
     val gnssWarningFlow: Flow<Boolean> =
         context.recordingStateDataStore.data.map { it[KEY_GNSS_WARNING] ?: false }
 
+    /**
+     * 停車開始時刻（epoch ms）。null＝走行中。UI改善（停車ストップウォッチ、2026-07-31）用。
+     * 5km/h 境界をまたいだ**遷移時のみ**書き込まれる（毎秒ではない＝DataStore への 1Hz 書き込みを避ける。
+     * 経過秒の計算は UI 側が既存の1秒ティッカーで行う）。表示のみで、どのテーブル・ログにも記録しない
+     * （停車の記録そのものは GPX＝gps_raw が既に持っている）。
+     */
+    val stationarySinceFlow: Flow<Long?> =
+        context.recordingStateDataStore.data.map { it[KEY_STATIONARY_SINCE] }
+
     suspend fun markRecording(sessionId: Long) {
         context.recordingStateDataStore.edit { prefs ->
             prefs[KEY_IS_RECORDING] = true
@@ -62,6 +71,14 @@ class RecordingStateStore(private val context: Context) {
         context.recordingStateDataStore.edit { prefs -> prefs[KEY_GNSS_WARNING] = active }
     }
 
+    /** 停車開始時刻を反映する（`BusRecordingService`が5km/h境界の遷移時のみ呼ぶ）。null＝走行再開。 */
+    suspend fun setStationarySince(sinceEpochMs: Long?) {
+        context.recordingStateDataStore.edit { prefs ->
+            if (sinceEpochMs == null) prefs.remove(KEY_STATIONARY_SINCE)
+            else prefs[KEY_STATIONARY_SINCE] = sinceEpochMs
+        }
+    }
+
     suspend fun clear() {
         context.recordingStateDataStore.edit { it.clear() }
     }
@@ -73,5 +90,6 @@ class RecordingStateStore(private val context: Context) {
         private val KEY_SESSION_ID = longPreferencesKey("session_id")
         private val KEY_CAMERA_WARNING = booleanPreferencesKey("camera_warning")
         private val KEY_GNSS_WARNING = booleanPreferencesKey("gnss_warning")
+        private val KEY_STATIONARY_SINCE = longPreferencesKey("stationary_since")
     }
 }
