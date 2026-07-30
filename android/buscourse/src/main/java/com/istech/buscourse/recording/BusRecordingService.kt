@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.SensorManager
 import android.location.Location
+import android.media.MediaActionSound
 import android.os.Build
 import android.os.HandlerThread
 import android.os.PowerManager
@@ -458,6 +459,7 @@ class BusRecordingService : LifecycleService() {
                 }
                 frameId != null -> {
                     vibrateMarkSuccess()
+                    shutterSound.play(MediaActionSound.SHUTTER_CLICK) // UI改善2: 完全成功時のみ（映像なしで鳴らすと嘘になる）
                     Toast.makeText(
                         this@BusRecordingService, "停留所マーク: ${stopLabel}（${stopMarkCount}件目）", Toast.LENGTH_SHORT
                     ).show()
@@ -485,6 +487,15 @@ class BusRecordingService : LifecycleService() {
     private val pocPressSeq = AtomicInteger(0)
 
     /**
+     * UI改善2（2026-07-31・オーナー承認済み y）: マーカー手ごたえのシャッター音。
+     * 振動は走行中に感じ取りにくい（S0-c と同じ知見）ため、聴覚でも「押下が効いた」を返す。
+     * 遅延ロード＋[onDestroy] で解放。
+     */
+    private val shutterSound by lazy {
+        MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
+    }
+
+    /**
      * POC版の停留所マーク。検証したい玄関の形＝
      *   ① 押下の事実と測位を最優先で確定する（カード0件でも・連打でも・毎回。#2 の「何も残らない」の逆）
      *   ② 押下直前の LORES フレームを特定だけする（`stop_card_id` タグは付けない＝既存テーブル・既存読み手は不変）
@@ -507,6 +518,7 @@ class BusRecordingService : LifecycleService() {
 
         // 手応えは毎押下・即時。「押下が記録された」の意味に限定する（写真の成否はここでは分からない）
         vibrateMarkSuccess()
+        shutterSound.play(MediaActionSound.SHUTTER_CLICK)
         Toast.makeText(
             this,
             "POC ${seq}件目" + (if (location == null) "（現在地なし）" else ""),
@@ -748,6 +760,7 @@ class BusRecordingService : LifecycleService() {
         releaseControllers()
         thermalExecutor.shutdown()
         sessionRepository.shutdown() // writeExecutorのスレッドリーク防止（要レビュー修正）
+        shutterSound.release() // lazy 未初期化でもここで初期化→即解放されるだけで害はない
         super.onDestroy()
     }
 

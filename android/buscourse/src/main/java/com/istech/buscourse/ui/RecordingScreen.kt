@@ -463,7 +463,34 @@ private fun RecordingActiveContent(
         )
         Text("記録中", style = MaterialTheme.typography.headlineSmall)
         session?.let {
-            Text("種別: ${it.type}", style = MaterialTheme.typography.bodyLarge)
+            // UI改善1（2026-07-31・オーナー承認済み y）: 種別を文字でなく色札で判別できるようにする。
+            // 本番運行（FULL_RUN）＝赤系／試走（TEST_DRIVE）＝青系。走行中の一瞥で
+            // 「いま本番を記録している」ことが読めるのが目的（文字列 "FULL_RUN" の読解を要求しない）。
+            // 未知の種別（PARTIAL_RUN 等、この画面から開始しない種別）は従来どおり生の名前を無彩色で出す。
+            val (badgeLabel, badgeBg, badgeFg) = when (it.type) {
+                "FULL_RUN" -> Triple(
+                    "本番運行（FULL_RUN）",
+                    MaterialTheme.colorScheme.errorContainer,
+                    MaterialTheme.colorScheme.onErrorContainer,
+                )
+                "TEST_DRIVE" -> Triple(
+                    "試走（TEST_DRIVE）",
+                    MaterialTheme.colorScheme.primaryContainer,
+                    MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                else -> Triple(
+                    "種別: ${it.type}",
+                    MaterialTheme.colorScheme.surfaceVariant,
+                    MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .background(badgeBg, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+            ) {
+                Text(badgeLabel, style = MaterialTheme.typography.titleMedium, color = badgeFg)
+            }
         }
         val h = elapsedSec / 3600
         val m = (elapsedSec % 3600) / 60
