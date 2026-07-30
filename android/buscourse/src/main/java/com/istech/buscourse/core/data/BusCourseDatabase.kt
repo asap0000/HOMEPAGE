@@ -98,8 +98,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 機種変更バックアップの `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
  * 別途「17」を書き写して二重管理するのを避けるため。
  *
- * version 18（2026-07-30、**停留所マーカー欠落セッションのリカバリー**）: `course_stop` に
- * 「**結合で生まれた点**」用の4列を純増（[MIGRATION_17_18]）＝座標2列（`resolved_latitude/longitude`）＋
+ * version 19（2026-07-30、**停留所マーカー欠落セッションのリカバリー**。★元は v18 として実装したが、
+ * 官房が 2026-07-27 に認可した別設計「旧データ救済（空間アンカリング・新テーブル `navi_frame_index`）」
+ * （`937e340`）が v18 を先に予約していたため、二重鋳造と判明し官房裁定〔未適用ゆえ (b) 採用〕で v19 へ
+ * リナンバー。**v18 の予約は `937e340` のまま**——実装時は本バージョンの前に挿し込まれる）: `course_stop` に
+ * 「**結合で生まれた点**」用の4列を純増（[MIGRATION_17_19]）＝座標2列（`resolved_latitude/longitude`）＋
  * **出自** `provenance`（DEFAULT `'RECORDED'`）＋**空間誤差** `error_space_m`。
  * 3ポインタ（frame/event/card）は「そのセッションに実体があること」を前提とするが、
  * **別セッションから移植した点・軌跡の滞留だけを根拠に推定した点はどのポインタも指せない**ため、
@@ -107,7 +110,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * **出自と誤差は istech 正典 `docs/2026-07-30_制度定義_時空の分離と再統合.md` 条2 の要件**
  * （復元・推定した値を実記録と同格に置かない／誤差は軸ごとに別列で持つ）。
  * **実収録テーブル（`gps_point`/`timelapse_frame`/`stop_visit_event`）は一切変更しない**
- * ——官房 v18 認可条件(b)。既存行は無変更で通り、`provenance` は `'RECORDED'` が入る。
+ * ——官房 v18 認可条件(b)（v19 へ引き継がれた条件）。既存行は無変更で通り、`provenance` は `'RECORDED'` が入る。
  */
 @Database(
     entities = [
@@ -156,7 +159,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
          * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
          * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
          */
-        const val SCHEMA_VERSION = 18
+        const val SCHEMA_VERSION = 19
 
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
@@ -181,7 +184,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_14_15,
                 MIGRATION_15_16,
                 MIGRATION_16_17,
-                MIGRATION_17_18,
+                MIGRATION_17_19,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -461,26 +464,29 @@ abstract class BusCourseDatabase : RoomDatabase() {
         }
 
         /**
-         * `course_stop` に「結合で生まれた点」の3列を足す（version 18、2026-07-30）。
+         * `course_stop` に「結合で生まれた点」の4列を足す（version 19、2026-07-30。
+         * ★元は version 18 として実装したが、`937e340`（旧データ救済＝新テーブル `navi_frame_index`）が
+         * v18 を先に予約していた二重鋳造と判明し、官房裁定〔未適用ゆえ (b)〕で v19 へリナンバー。
+         * マイグレーション番号のみの変更で、中身（列定義・不変条件）は無変更）。
          *
          * **背景**: 停留所マーカー欠落セッションのリカバリーで、**3ポインタ（frame/event/card）の
          * どれも指せない点**を作る必要が出た（移植・滞留推定）。詳細は [CourseStopEntity] のコメント。
          *
-         * **★実収録テーブルは一切変更しない**（官房 v18 認可条件(b)・2026-07-27）:
+         * **★実収録テーブルは一切変更しない**（官房 v18 認可条件(b)・2026-07-27。v19 へ引き継ぎ）:
          * `gps_point` / `timelapse_frame` / `stop_visit_event` へは **ALTER も UPDATE も行わない**。
          * 触るのは `course_stop`（＝派生・編成側）だけ。**派生値を実収録に書き戻すと結合の産物が実測に混ざる**
          * （戸籍化で確認済みの病）。この不変条件は selftest で機械担保する（同条件(b)）。
          *
-         * **既存行の扱い**: 3列すべて nullable ないし DEFAULT 付きなので、**既存行は無変更で通る**。
+         * **既存行の扱い**: 4列すべて nullable ないし DEFAULT 付きなので、**既存行は無変更で通る**。
          * `provenance` は DEFAULT `'RECORDED'` が入る＝**従来の点はすべて「実測」として扱われる**
          * （正典 条2「復元・推定した値を実記録と同格に置かない」の裏返しで、**実記録は実記録のまま残る**）。
          *
          * **索引を張らない理由**（官房認可条件(c)＝索引は再生成可能な派生物である旨を明記）:
-         * この3列は**1コースあたり数十行の絞り込み後に読む列**で、検索キーにならない。
+         * この4列は**1コースあたり数十行の絞り込み後に読む列**で、検索キーにならない。
          * 将来 `provenance` で全コース横断のフィルタが要るなら索引を足すが、**索引は実収録から作り直せる派生物**
          * であり、壊れても再生成すれば足りる（＝スキーマの本質ではない）。
          */
-        val MIGRATION_17_18 = object : androidx.room.migration.Migration(17, 18) {
+        val MIGRATION_17_19 = object : androidx.room.migration.Migration(17, 19) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `resolved_latitude` REAL DEFAULT NULL")
                 db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `resolved_longitude` REAL DEFAULT NULL")

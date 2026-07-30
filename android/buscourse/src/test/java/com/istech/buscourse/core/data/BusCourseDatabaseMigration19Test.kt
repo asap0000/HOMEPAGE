@@ -14,40 +14,44 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * `MIGRATION_17_18` の実射テスト（**官房 v18 認可条件(a)**・2026-07-27 裁定）。
+ * `MIGRATION_17_19` の実射テスト（**官房 v18 認可条件(a)**・2026-07-27 裁定。v19 へ引き継ぎ）。
  *
  * v14〜v17 の前例どおり「実ファイル上に v17 の fixture を作り、実際に migrate を走らせて
  * Room が開けることまで確かめる」流儀を踏襲する（[BusCourseDatabaseMigration16Test] と同じ作り）。
  *
  * **認可条件(b)「実収録テーブル不変を selftest で機械担保」も本ファイルで果たす**
- * （[migration17to18DoesNotTouchRecordedTables]）。人の記憶に頼らず、
- * **`gps_point`/`timelapse_frame`/`stop_visit_event` の列構成が v17 と v18 で同一である**ことを
+ * （[migration17to19DoesNotTouchRecordedTables]）。人の記憶に頼らず、
+ * **`gps_point`/`timelapse_frame`/`stop_visit_event` の列構成が v17 と v19 で同一である**ことを
  * `PRAGMA table_info` で突き合わせる。**派生値を実収録に書き戻すと結合の産物が実測に混ざる**
  * （istech 正典 `docs/2026-07-30_制度定義_時空の分離と再統合.md` 条1「分離は投影であり、原本の切り捨てではない」）。
+ *
+ * **★このテストは当初 `BusCourseDatabaseMigration18Test`・`MIGRATION_17_18` として実装した**が、
+ * v18 は `937e340`（旧データ救済＝新テーブル `navi_frame_index`）が先に予約済みと判明し、
+ * 二重鋳造を官房裁定〔未適用ゆえ (b)〕で解消して v19 へリナンバーした（2026-07-30）。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = android.app.Application::class)
-class BusCourseDatabaseMigration18Test {
+class BusCourseDatabaseMigration19Test {
 
-    /** v18 で純増する4列。 */
+    /** v19 で純増する4列。 */
     private val addedColumns = listOf("resolved_latitude", "resolved_longitude", "provenance", "error_space_m")
 
     /** **触ってはならない**実収録テーブル（官房 v18 認可条件(b)）。 */
     private val recordedTables = listOf("gps_point", "timelapse_frame", "stop_visit_event")
 
     @Test
-    fun migration17to18AddsFourColumnsAndKeepsExistingRows() {
+    fun migration17to19AddsFourColumnsAndKeepsExistingRows() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val name = "migration_18_min_${System.nanoTime()}.db"
+        val name = "migration_19_min_${System.nanoTime()}.db"
         val db = openMinimalV17(context, name)
         try {
-            // v17 相当の course_stop（v18 の4列が無い形）に既存行を1件入れておく。
+            // v17 相当の course_stop（v19 の4列が無い形）に既存行を1件入れておく。
             db.execSQL(
                 "INSERT INTO course_stop (id, course_id, stop_card_id, frame_id, event_id, sequence_index, expected_chainage_m) " +
                     "VALUES (1, 7, 42, NULL, NULL, 0, 123.5)"
             )
 
-            BusCourseDatabase.MIGRATION_17_18.migrate(db)
+            BusCourseDatabase.MIGRATION_17_19.migrate(db)
 
             // (1) 4列が生えている
             val columns = tableColumns(db, "course_stop")
@@ -82,19 +86,19 @@ class BusCourseDatabaseMigration18Test {
      * ALTER も UPDATE も走っていないことを、列名の集合で突き合わせて確かめる。
      */
     @Test
-    fun migration17to18DoesNotTouchRecordedTables() {
+    fun migration17to19DoesNotTouchRecordedTables() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val name = "migration_18_recorded_${System.nanoTime()}.db"
+        val name = "migration_19_recorded_${System.nanoTime()}.db"
         val db = openMinimalV17(context, name)
         try {
             val before = recordedTables.associateWith { tableColumns(db, it) }
-            BusCourseDatabase.MIGRATION_17_18.migrate(db)
+            BusCourseDatabase.MIGRATION_17_19.migrate(db)
             val after = recordedTables.associateWith { tableColumns(db, it) }
 
             recordedTables.forEach { table ->
                 assertThat(after[table]).isEqualTo(before[table])
             }
-            // v18 の4列が実収録側へ漏れていないことも明示的に見る（列名の取り違えを機械で弾く）。
+            // v19 の4列が実収録側へ漏れていないことも明示的に見る（列名の取り違えを機械で弾く）。
             recordedTables.forEach { table ->
                 addedColumns.forEach { column ->
                     assertThat(after[table]).doesNotContain(column)
@@ -105,13 +109,13 @@ class BusCourseDatabaseMigration18Test {
         }
     }
 
-    /** Room が v18 の実ファイルを開けて DAO が使えること（v17 fixture からの一連の移行を通す）。 */
+    /** Room が v19 の実ファイルを開けて DAO が使えること（v17 fixture からの一連の移行を通す）。 */
     @Test
     fun roomOpensActualV17DatabaseAfterMigrationAndDaoQuerySucceeds() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val name = "migration_18_room_${System.nanoTime()}.db"
+        val name = "migration_19_room_${System.nanoTime()}.db"
 
-        // Room 自身に v18 の全表を作らせた後、v18 の4列を落として user_version を17に戻す。
+        // Room 自身に v19 の全表を作らせた後、v19 の4列を落として user_version を17に戻す。
         // 既存表の形状を省略しない、実ファイル上の v17 fixture として migrate を検証できる
         // （[BusCourseDatabaseMigration16Test] と同じ手）。
         val seed = Room.databaseBuilder(context, BusCourseDatabase::class.java, name)
@@ -124,8 +128,8 @@ class BusCourseDatabaseMigration18Test {
             // ★DDL を手書きして作り直してはいけない（2026-07-30 に実際に踏んだ）:
             // 列だけ真似た表を作ると **index と外部キーが欠けて** Room のスキーマ検証が
             // 「Migration didn't properly handle: course_stop」で落ちる。
-            // Room が作った本物の表から **v18 の4列だけを落として** v17 の形に戻す。
-            downgradeCourseStopToBeforeV18(this)
+            // Room が作った本物の表から **v19 の4列だけを落として** v17 の形に戻す。
+            downgradeCourseStopToBeforeV19(this)
             execSQL("PRAGMA user_version = 17")
         }
         helper.close()
@@ -143,7 +147,7 @@ class BusCourseDatabaseMigration18Test {
     }
 
     /**
-     * `course_stop` を **v18 の4列を持たない形**（v17/v15 相当）へ戻す。
+     * `course_stop` を **v19 の4列を持たない形**（v17/v15 相当）へ戻す。
      *
      * 素朴な手を2つ潰した末の実装（2026-07-30）:
      * - **DDL を手書きして CREATE すると落ちる**——列だけ真似ても **index と外部キーが欠け**、
@@ -154,7 +158,7 @@ class BusCourseDatabaseMigration18Test {
      *   作り直す**。index も `sqlite_master` から拾って張り直すので、**Room の期待スキーマと
      *   index・FK まで一致した「1バージョン前の表」**が得られる。
      */
-    private fun downgradeCourseStopToBeforeV18(db: SupportSQLiteDatabase) {
+    private fun downgradeCourseStopToBeforeV19(db: SupportSQLiteDatabase) {
         val createSql = db.query(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='course_stop'"
         ).use { c ->
@@ -173,21 +177,21 @@ class BusCourseDatabaseMigration18Test {
             ddl = ddl.replace(Regex(",\\s*`$col`[^,)]*"), "")
         }
         check(addedColumns.none { ddl.contains("`$it`") }) {
-            "v18 の列を DDL から除去できていない: $ddl"
+            "v19 の列を DDL から除去できていない: $ddl"
         }
 
         val keptColumns = listOf(
             "id", "course_id", "stop_card_id", "frame_id", "event_id", "sequence_index", "expected_chainage_m",
         ).joinToString(", ") { "`$it`" }
 
-        db.execSQL("ALTER TABLE `course_stop` RENAME TO `course_stop_v18_tmp`")
+        db.execSQL("ALTER TABLE `course_stop` RENAME TO `course_stop_v19_tmp`")
         db.execSQL(ddl)
-        db.execSQL("INSERT INTO `course_stop` ($keptColumns) SELECT $keptColumns FROM `course_stop_v18_tmp`")
-        db.execSQL("DROP TABLE `course_stop_v18_tmp`")
+        db.execSQL("INSERT INTO `course_stop` ($keptColumns) SELECT $keptColumns FROM `course_stop_v19_tmp`")
+        db.execSQL("DROP TABLE `course_stop_v19_tmp`")
         indexSqls.forEach { db.execSQL(it) }
     }
 
-    /** v17 相当（v18 の4列を持たない）の最小 DB を実ファイルとして作る。 */
+    /** v17 相当（v19 の4列を持たない）の最小 DB を実ファイルとして作る。 */
     private fun openMinimalV17(context: Context, name: String): SupportSQLiteDatabase =
         FrameworkSQLiteOpenHelperFactory().create(
             SupportSQLiteOpenHelper.Configuration.builder(context)
@@ -244,11 +248,11 @@ class BusCourseDatabaseMigration18Test {
         BusCourseDatabase.MIGRATION_11_12, BusCourseDatabase.MIGRATION_12_13,
         BusCourseDatabase.MIGRATION_13_14, BusCourseDatabase.MIGRATION_14_15,
         BusCourseDatabase.MIGRATION_15_16, BusCourseDatabase.MIGRATION_16_17,
-        BusCourseDatabase.MIGRATION_17_18,
+        BusCourseDatabase.MIGRATION_17_19,
     )
 
     private companion object {
-        /** v17 時点の `course_stop`（v18 の4列を持たない形）。FK は本テストの検査対象外なので付けない。 */
+        /** v17 時点の `course_stop`（v19 の4列を持たない形）。FK は本テストの検査対象外なので付けない。 */
         val V17_COURSE_STOP_DDL = """
             CREATE TABLE course_stop (
               id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
