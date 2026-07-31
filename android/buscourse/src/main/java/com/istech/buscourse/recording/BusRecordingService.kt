@@ -250,6 +250,12 @@ class BusRecordingService : LifecycleService() {
         cameraCaptureController?.lastKnownLocation = location
         sessionRepository.appendGpsRaw(location)
 
+        // S0-d 改（2026-08-01）: 位置が「届いている」ことを健全性監視へ伝える。
+        // 旧実装は衛星数しか見ておらず、**衛星は見えているのに位置が36秒来ない**状態を検知できず
+        // 画面が「測位中」と嘘をついていた（POC実走で実測）。到達の記録がここ、途絶の判定は
+        // [GnssHealthMonitor.onSatelliteStatusChanged]（位置が来なくても定期的に呼ばれる）で行う。
+        if (gnssHealthMonitor.onLocationReceived(SystemClock.elapsedRealtime())) onGnssHealthChanged(false)
+
         // UI改善（停車ストップウォッチ、2026-07-31・オーナー承認済み）: 5km/h 以下を「停車」として
         // UI に見せる。閾値は AUTO 検知（StopDetector.speedThresholdKmh=5.0）と同じ＝
         // 「機械が停車と認識している時間」がそのまま見える（人と機械の停車認識を合わせる、が目的）。
