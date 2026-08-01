@@ -94,6 +94,10 @@ fun HomeScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // 並び順＝ワークフローの順（2026-08-02 オーナー指示）: 走って記録する →
+            // その走行からコースを創る → 創ったコースを直す → カードを整える。
+            // POC は操作性の調整段階だが、ワークフローの組み換え自体は v20 の鋳造を待たずとも
+            // 既定路線に乗っている、というオーナー判断による。
             HomeMenuCard(
                 icon = Icons.Filled.FiberManualRecord,
                 title = "運行記録",
@@ -101,10 +105,12 @@ fun HomeScreen(
                 onClick = onOpenRecording,
             )
             HomeMenuCard(
-                icon = Icons.Filled.DirectionsBus,
-                title = "停留所カード",
-                description = "現在地とカメラで停留所を登録・編集します",
-                onClick = onOpenStopCards,
+                icon = Icons.Filled.AddCircle,
+                title = "コース創設",
+                // 2026-07-27 文言是正: 「2軸評価」は廃案（コース創設は2軸マトリクスから
+                // 3パス成熟モデルへ転換済み。istech `project_buscourse_course_creation_topdown`）。
+                description = "記録した走行から停留所を拾い、コースを新しく創ります",
+                onClick = onOpenCourseCreate,
             )
             HomeMenuCard(
                 icon = Icons.Filled.Route,
@@ -114,12 +120,10 @@ fun HomeScreen(
                 onClick = onOpenCourses,
             )
             HomeMenuCard(
-                icon = Icons.Filled.AddCircle,
-                title = "コース創設",
-                // 2026-07-27 文言是正: 「2軸評価」は廃案（コース創設は2軸マトリクスから
-                // 3パス成熟モデルへ転換済み。istech `project_buscourse_course_creation_topdown`）。
-                description = "記録した走行から停留所を拾い、コースを新しく創ります",
-                onClick = onOpenCourseCreate,
+                icon = Icons.Filled.DirectionsBus,
+                title = "停留所カード",
+                description = "現在地とカメラで停留所を登録・編集します",
+                onClick = onOpenStopCards,
             )
             HomeMenuCard(
                 icon = Icons.AutoMirrored.Filled.ListAlt,
