@@ -65,6 +65,19 @@ class BusRecordingService : LifecycleService() {
     private val thermalExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "thermal-guard") }
     private val timeFormatter = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+    /**
+     * よーいドン式（2026-08-01・実機検証で発覚したバグの修正）: [stopRecording] が起こす片付け
+     * コルーチンへの参照。**なぜ要るか**——Android の `stopSelf()` は非同期の破棄要求にすぎず、
+     * `onDestroy()` 完了前に次の `startForegroundService()` が同一インスタンスへ届くことがある
+     * （レビュー指摘で確定済み）。このとき [startRunIfNeeded] の新セッション用コルーチンが、
+     * まだ実行中の旧セッションの [stopRecording] コルーチン（`recordingStateStore.clear()` を含む）と
+     * **並走**し、DataStore への書き込み順序が保証されない。実機で実際に踏んだ：「映像なしで開始する」で
+     * 書いた `no_camera_mode=true` が、直後に完了した旧セッションの `clear()` に上書きされて消え、
+     * 画面が「準備中…」のまま固まった。[startRunIfNeeded] の先頭でこの Job を `join()` して、
+     * 旧セッションの片付けが完全に終わってから新セッションを始めることで順序を保証する。
+     */
+    @Volatile private var teardownJob: Job? = null
+
     private var cameraCaptureController: CameraCaptureController? = null
     private var gnssLocationSource: GnssLocationSource? = null
     private var stopDetector: StopDetector? = null
@@ -94,6 +107,22 @@ class BusRecordingService : LifecycleService() {
 
     /** 通知テキストの再構築用に現在セッションを保持する（S0-b、カメラ警告表示の切替に使用、2026-07-15追加）。 */
     @Volatile private var currentSession: RecordingSessionEntity? = null
+
+    /** よーいドン式（2026-08-01）: カメラの最初のフレームが撮れて「緑」になったか。 */
+    @Volatile private var cameraReadyActive: Boolean = false
+
+    /** よーいドン式: このセッションが「映像なしで開始する」を選んだか。 */
+    @Volatile private var noCameraMode: Boolean = false
+
+    /** よーいドン式: このセッションで既に失敗処理（[failStartup]）を実行済みか（二重発火防止）。 */
+    @Volatile private var startupFailureHandled: Boolean = false
+
+    /**
+     * よーいドン式: カメラ起動待ちのタイムアウト監視ジョブ。カメラが上がるかセッションが終わったらcancelする。
+     * [onCameraFirstFrame] は `analysisExecutor` スレッドからこのフィールドを読み書きするため `@Volatile`
+     * にする（レビュー指摘・2026-08-01。他の可視性が必要なフィールドと対称にする）。
+     */
+    @Volatile private var cameraReadyTimeoutJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -155,8 +184,37 @@ class BusRecordingService : LifecycleService() {
         val vehicleId = intent?.getStringExtra(EXTRA_VEHICLE_ID)
         val targetFrom = intent?.getLongExtra(EXTRA_TARGET_FROM_STOP_CARD_ID, -1L)?.takeIf { it > 0 }
         val targetTo = intent?.getLongExtra(EXTRA_TARGET_TO_STOP_CARD_ID, -1L)?.takeIf { it > 0 }
+        // よーいドン式（2026-08-01）: 何回目の試行か（UI側が管理・1始まり）。1回目=20秒待つ／2回目以降=10秒。
+        val attempt = intent?.getIntExtra(EXTRA_ATTEMPT, 1) ?: 1
+        // よーいドン式: 「映像なしで開始する」（試走の画面でのみ選べる）。true ならカメラのタイムアウト
+        // ゲートを完全にスキップし、GPSのみで即座に「記録中」として扱う（本番運行では選べない＝映像絶対）。
+        // ★UI側が唯一の導線（TEST_DRIVE選択時のみボタンを描画）だが、サービス側でも二重に防ぐ
+        //   （onManualStopMarkの二重ガードと同じ考え方。将来他の呼び出し元が増えても崩れないように）。
+        val requestedNoCamera = (intent?.getBooleanExtra(EXTRA_NO_CAMERA, false) ?: false) &&
+            type == RecordingSessionType.TEST_DRIVE
+
+        // ★よーいドン式のセッション単位フィールドをここでリセットする（レビュー指摘・2026-08-01・最重要）。
+        // Android の Service は stopSelf() が非同期のため、onDestroy() 完了前に次の
+        // startForegroundService() が届くと**同一インスタンスがそのまま onStartCommand を受け取る**
+        // （onCreate は再実行されない＝フィールドは前回試行の値が残ったまま）。「もう一度ためす」を
+        // 素早く押す操作は、まさにこの再入り窓に当たる。cameraHealthMonitor.reset()と同じ場所で
+        // 明示的に初期化しないと、①startupFailureHandled=trueの残留でfailStartupが二度と発火せず
+        // 記録機能が永久ロックする ②cameraReadyActive=trueの残留で「緑シグナルの条件はカメラの
+        // 最初のフレームが撮れたことのみ」という設計制約を無視したまま通知にマークボタンが出る、
+        // という2つの実害が確定していた。
+        cameraReadyActive = false
+        noCameraMode = false
+        startupFailureHandled = false
+        cameraReadyTimeoutJob?.cancel()
+        cameraReadyTimeoutJob = null
 
         lifecycleScope.launch {
+            // ★前セッションの片付けコルーチンが完了するまで待つ（実機検証で発覚したバグの修正）。
+            // teardownJobがまだ走っている（stopSelf()後にsame instanceへ即リトライが届いた）状態で
+            // 先へ進むと、旧セッションのrecordingStateStore.clear()がこのセッションの後続の書き込みを
+            // 上書きして消す事故が起きる（実測：「映像なしで開始する」のnoCameraModeフラグが消え、
+            // 画面が「準備中…」のまま固まった）。nullなら即座に通過する。
+            teardownJob?.join()
             try {
                 val session = sessionRepository.startSession(
                     courseId = courseId,
@@ -197,7 +255,30 @@ class BusRecordingService : LifecycleService() {
 
                 guard.start(thermalExecutor)
                 shock.start(handlerThread)
-                camera.start(::computeFrameIntervalMs) // メインスレッド（lifecycleScope）で呼ぶ必要あり
+
+                // よーいドン式（2026-08-01）: 「映像なしで開始する」はカメラの失敗をこのセッションの
+                // 失敗として扱わない（ベストエフォート）。成功すれば onCameraFirstFrame が後から
+                // 普通に発火しcameraReadyActiveがtrueになるだけ（既にnoCameraModeでreadyToRecordが
+                // trueなのでUI上の見た目は変わらない）。
+                if (requestedNoCamera) {
+                    noCameraMode = true
+                    lifecycleScope.launch { recordingStateStore.setNoCameraMode(true) }
+                    runCatching { camera.start(::computeFrameIntervalMs, onFirstFrame = ::onCameraFirstFrame) }
+                        .onFailure { Log.w(TAG, "映像なしモード: カメラの起動に失敗しましたが記録は続行します", it) }
+                } else {
+                    camera.start(::computeFrameIntervalMs, onFirstFrame = ::onCameraFirstFrame) // 例外は外側catchへ
+                    val timeoutMs = if (attempt <= 1) CAMERA_READY_TIMEOUT_FIRST_MS else CAMERA_READY_TIMEOUT_RETRY_MS
+                    cameraReadyTimeoutJob = lifecycleScope.launch {
+                        delay(timeoutMs)
+                        // ★TOCTOU対策（レビュー指摘・2026-08-01）: cancel()は協調的キャンセルなので、
+                        // delay()から既に復帰したコルーチンは止まらない。カメラの初回フレームが
+                        // タイムアウト境界ぎりぎりで届いた場合、onCameraFirstFrameのcancel()と
+                        // このdelay()復帰が競合しうるため、failStartupを呼ぶ直前にもう一度確認する
+                        // （cancel頼みにしない・二次防御）。
+                        if (!cameraReadyActive) failStartup("カメラが${timeoutMs / 1000}秒以内に起動しませんでした")
+                    }
+                }
+
                 gnss.start(
                     onLocation = ::onLocationUpdate,
                     onProviderDisabled = ::onGnssProviderDisabled,
@@ -207,15 +288,15 @@ class BusRecordingService : LifecycleService() {
                 )
                 cameraHealthJob = lifecycleScope.launch { runCameraHealthLoop() }
 
-                notificationManager.updateNotification(buildContentText(session))
+                refreshNotification() // cameraReadyActive はこの時点でまだ false（準備中の通知になる）
                 courseRepository.logWork(
                     WorkLogCategory.RECORDING,
-                    "運行記録を開始（セッション#${session.id}・${type.name}）",
+                    "運行記録を開始（セッション#${session.id}・${type.name}・試行${attempt}回目" +
+                        (if (requestedNoCamera) "・映像なし" else "") + "）",
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "記録開始処理に失敗しました", e)
-                courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の開始に失敗しました", e.toString())
-                stopRecording(RecordingSessionStatus.DISCARDED)
+                failStartup(e.message ?: e.toString())
             }
         }
     }
@@ -325,7 +406,7 @@ class BusRecordingService : LifecycleService() {
         }
         cameraWarningActive = warning
         lifecycleScope.launch { recordingStateStore.setCameraWarning(warning) }
-        currentSession?.let { notificationManager.updateNotification(buildContentText(it), cameraWarningActive, gnssWarningActive) }
+        refreshNotification()
     }
 
     /** GNSS衛星の捕捉状況が変化した時に[GnssLocationSource]から呼ばれる（毎回ではなく、判定結果を[gnssHealthMonitor]へ渡す）。 */
@@ -367,7 +448,51 @@ class BusRecordingService : LifecycleService() {
         }
         gnssWarningActive = warning
         lifecycleScope.launch { recordingStateStore.setGnssWarning(warning) }
-        currentSession?.let { notificationManager.updateNotification(buildContentText(it), cameraWarningActive, gnssWarningActive) }
+        refreshNotification()
+    }
+
+    /**
+     * よーいドン式（2026-08-01）: カメラの最初のLORESフレームが撮れた瞬間に一度だけ呼ばれる
+     * （[LoresFrameAnalyzer] から `analysisExecutor` スレッド経由で呼ばれる＝メインスレッドではない）。
+     * ここで初めて「カメラが上がった」とみなし、準備中タイムアウトを解除して緑シグナルを出す。
+     * 測位は緑の条件に一切含めない（オーナー指示・2026-08-01「測位はいつでも切れる可能性があるので無視」）。
+     */
+    private fun onCameraFirstFrame() {
+        if (cameraReadyActive) return // analyzerの単一スレッド性から理論上二重発火しないが、念のための保険
+        cameraReadyActive = true
+        cameraReadyTimeoutJob?.cancel()
+        cameraReadyTimeoutJob = null
+        lifecycleScope.launch {
+            recordingStateStore.setCameraReady(true)
+            refreshNotification()
+        }
+    }
+
+    /**
+     * よーいドン式: セッションの立ち上げそのものが失敗した（カメラが時間内に起動しない、または
+     * 起動処理中に例外が起きた）。**始めない**——セッションを破棄しFGSを畳み、UIへ失敗を伝える。
+     * [reason] はログ用（人向けの文言は画面側が持つ。ここでは内部理由を残すだけ）。
+     */
+    private fun failStartup(reason: String) {
+        if (startupFailureHandled) return
+        startupFailureHandled = true
+        cameraReadyTimeoutJob?.cancel()
+        cameraReadyTimeoutJob = null
+        Log.w(TAG, "運行記録の開始に失敗しました: $reason")
+        val failedAt = System.currentTimeMillis()
+        lifecycleScope.launch {
+            courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の開始に失敗しました", reason)
+            stopRecording(RecordingSessionStatus.DISCARDED, startupFailedAt = failedAt)
+        }
+    }
+
+    /** 常駐通知を現在の状態（準備完了・カメラ/GNSS警告）から組み立て直す（各所からはこれだけ呼べばよい）。 */
+    private fun refreshNotification() {
+        val session = currentSession ?: return
+        notificationManager.updateNotification(
+            buildContentText(session), cameraWarningActive, gnssWarningActive,
+            cameraReady = cameraReadyActive || noCameraMode,
+        )
     }
 
     /**
@@ -394,6 +519,9 @@ class BusRecordingService : LifecycleService() {
      *      （映像が無ければ部分成功＝映像なしとして扱う。これは3の位置鮮度チェックとは独立）
      */
     private fun onManualStopMark(clickSeq: Int? = null) {
+        // よーいドン式（2026-08-01）: 通知にはカメラ準備完了までボタンが出ないはずだが、
+        // 念のためサービス側でも二重に防ぐ（画面側のボタンも準備中はenabled=falseで無効化される）。
+        if (!(cameraReadyActive || noCameraMode)) return
         // ------------------------------------------------------------------
         // POC段階1（2026-07-31）: 玄関の再設計（記録先行・撮影後付け・吸着なし・無言分岐なし）の検証装置。
         // **debug ビルド種別限定**。⚠ BuildConfig.DEBUG では判定しない——field も isDebuggable=true のため
@@ -787,9 +915,16 @@ class BusRecordingService : LifecycleService() {
         thermalDegraded = degraded
     }
 
-    /** 明示的な録画終了（`ACTION_STOP_RECORDING`）。セッションを確定しリソースを解放してサービスを畳む。 */
-    private fun stopRecording(status: RecordingSessionStatus) {
-        lifecycleScope.launch {
+    /**
+     * 明示的な録画終了（`ACTION_STOP_RECORDING`）。セッションを確定しリソースを解放してサービスを畳む。
+     *
+     * [startupFailedAt] はよーいドン式（2026-08-01）の失敗通知用。**必ず [RecordingStateStore.clear] の
+     * "後" に書く**（[clear] は全キーを消すため、先に書くと消えてしまう）。
+     */
+    private fun stopRecording(status: RecordingSessionStatus, startupFailedAt: Long? = null) {
+        // teardownJob（前述のKDoc参照）: startRunIfNeededがこのJobをjoin()して、
+        // このコルーチンの完了（＝DataStoreへの全書き込みが終わったこと）を待てるようにする。
+        teardownJob = lifecycleScope.launch {
             runCatching { sessionRepository.endSession(status) }
                 .onSuccess {
                     courseRepository.logWork(WorkLogCategory.RECORDING, "運行記録を終了（${status.name}）")
@@ -799,6 +934,7 @@ class BusRecordingService : LifecycleService() {
                     courseRepository.logWork(WorkLogCategory.ERROR, "運行記録の終了処理に失敗しました", it.toString())
                 }
             recordingStateStore.clear()
+            if (startupFailedAt != null) recordingStateStore.setStartupFailedAt(startupFailedAt)
             releaseControllers()
             ServiceCompat.stopForeground(this@BusRecordingService, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -808,6 +944,13 @@ class BusRecordingService : LifecycleService() {
     private fun releaseControllers() {
         notificationManager.unregisterStopMarkReceiver()
         notificationManager.unregisterPocTelemetryReceiver() // 未登録（field）でも安全＝冪等
+        cameraReadyTimeoutJob?.cancel()
+        cameraReadyTimeoutJob = null
+        // よーいドン式（2026-08-01）: セッション単位フィールドの二次防御としてここでも初期化する
+        // （本来の防御は startRunIfNeeded 冒頭。stopSelf()後の同一インスタンス再入りに備えた保険）。
+        cameraReadyActive = false
+        noCameraMode = false
+        startupFailureHandled = false
         gnssLocationSource?.stop()
         gnssLocationSource = null
         shockDetector?.stop()
@@ -843,6 +986,12 @@ class BusRecordingService : LifecycleService() {
         const val EXTRA_TARGET_FROM_STOP_CARD_ID = "com.istech.buscourse.extra.TARGET_FROM_STOP_CARD_ID"
         const val EXTRA_TARGET_TO_STOP_CARD_ID = "com.istech.buscourse.extra.TARGET_TO_STOP_CARD_ID"
 
+        /** よーいドン式（2026-08-01）: 何回目の試行か（UI側が管理・1始まり）。省略時は1。 */
+        const val EXTRA_ATTEMPT = "com.istech.buscourse.extra.ATTEMPT"
+
+        /** よーいドン式: 「映像なしで開始する」（試走の画面でのみ選べる）。 */
+        const val EXTRA_NO_CAMERA = "com.istech.buscourse.extra.NO_CAMERA"
+
         /** 録画停止アクション（設計書には明示のUI導線は無いが、サービスを正常終了させるために必要）。 */
         const val ACTION_STOP_RECORDING = "com.istech.buscourse.action.STOP_RECORDING"
 
@@ -858,6 +1007,12 @@ class BusRecordingService : LifecycleService() {
 
         /** カメラ健全性チェックの周期（S0-b、2026-07-15追加）。判定ロジックの詳細は[runCameraHealthLoop]参照。 */
         private const val CAMERA_HEALTH_CHECK_INTERVAL_MS = 20_000L
+
+        /** よーいドン式: カメラ起動待ちの上限（1回目）。 */
+        private const val CAMERA_READY_TIMEOUT_FIRST_MS = 20_000L
+
+        /** よーいドン式: カメラ起動待ちの上限（2回目以降のリトライ）。 */
+        private const val CAMERA_READY_TIMEOUT_RETRY_MS = 10_000L
 
         /**
          * 手動停留所マーク時、lastKnownLocationの経過時間がこれ以上古ければ「信用できない」と判定する

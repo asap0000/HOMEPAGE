@@ -134,38 +134,59 @@ class RecordingNotificationManager(private val context: Context) {
      * [gnssWarning]（S0-d、2026-07-16追加）はカメラ警告と対称の考え方で、`GnssHealthMonitor`が
      * 衛星捕捉喪失（測位が失われている）を検知した状態の表示に切り替える。カメラ・GNSS両方が
      * 同時に異常な場合は専用のタイトル文言（両方異常）を出す（どちらか片方の警告に埋もれさせない）。
+     *
+     * [cameraReady]（よーいドン式、2026-08-01）: false の間は「準備中」タイトルを最優先で出し、
+     * **「停留所マーク」ボタン自体を追加しない**（押せる場所が存在しなければ、準備中に押されて
+     * 沈黙する分岐も存在しない）。カメラ・GNSS警告は記録が始まってからの話なので、cameraReady=false
+     * の間はそれらの判定より手前で分岐が確定する。
      */
-    fun buildOngoingNotification(contentText: String, cameraWarning: Boolean = false, gnssWarning: Boolean = false): Notification {
-        val markStopIntent = PendingIntent.getBroadcast(
-            context,
-            REQ_MARK_STOP,
-            Intent(ACTION_MARK_STOP).setPackage(context.packageName),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val title = when {
-            cameraWarning && gnssWarning -> context.getString(R.string.notification_title_camera_gnss_warning)
-            cameraWarning -> context.getString(R.string.notification_title_camera_warning)
-            gnssWarning -> context.getString(R.string.notification_title_gnss_warning)
-            else -> context.getString(R.string.notification_title_recording)
-        }
-        return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle(title)
+    fun buildOngoingNotification(
+        contentText: String,
+        cameraWarning: Boolean = false,
+        gnssWarning: Boolean = false,
+        cameraReady: Boolean = false,
+    ): Notification {
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(R.drawable.ic_stop_mark, context.getString(R.string.notification_action_mark_stop), markStopIntent)
-            .build()
+
+        val title = when {
+            !cameraReady -> context.getString(R.string.notification_title_preparing)
+            cameraWarning && gnssWarning -> context.getString(R.string.notification_title_camera_gnss_warning)
+            cameraWarning -> context.getString(R.string.notification_title_camera_warning)
+            gnssWarning -> context.getString(R.string.notification_title_gnss_warning)
+            else -> context.getString(R.string.notification_title_recording)
+        }
+        builder.setContentTitle(title)
+
+        if (cameraReady) {
+            val markStopIntent = PendingIntent.getBroadcast(
+                context,
+                REQ_MARK_STOP,
+                Intent(ACTION_MARK_STOP).setPackage(context.packageName),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(R.drawable.ic_stop_mark, context.getString(R.string.notification_action_mark_stop), markStopIntent)
+        }
+        return builder.build()
     }
 
     /**
      * 通知内容を更新する（例：セッション開始後にコース名・開始時刻を反映、[cameraWarning]でS0-bの
-     * 警告表示に切り替え、[gnssWarning]でS0-dの警告表示に切り替え）。
+     * 警告表示に切り替え、[gnssWarning]でS0-dの警告表示に切り替え、[cameraReady]でよーいドン式の
+     * 準備中/記録中を切り替え）。
      */
-    fun updateNotification(contentText: String, cameraWarning: Boolean = false, gnssWarning: Boolean = false) {
-        notificationManager.notify(NOTIFICATION_ID, buildOngoingNotification(contentText, cameraWarning, gnssWarning))
+    fun updateNotification(
+        contentText: String,
+        cameraWarning: Boolean = false,
+        gnssWarning: Boolean = false,
+        cameraReady: Boolean = false,
+    ) {
+        notificationManager.notify(NOTIFICATION_ID, buildOngoingNotification(contentText, cameraWarning, gnssWarning, cameraReady))
     }
 
     /** 動的登録される「停留所マーク」ボタンの受信先（設計書§4.8.3）。 */

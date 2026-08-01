@@ -70,9 +70,12 @@ class CameraCaptureController(
      *
      * @param intervalProvider 連写間隔（ミリ秒）を返す関数。速度連動fps（§4.5.3）と
      *   ThermalGuardによるデグレード（§4.10.2）は呼び出し元（BusRecordingService）が合成して渡す。
+     * @param onFirstFrame よーいドン式（2026-08-01）: 最初のLORESフレームが実際に撮れた瞬間に一度だけ
+     *   呼ばれる（[LoresFrameAnalyzer] 参照）。`analysisExecutor` スレッドから呼ばれる＝呼び出し元は
+     *   メインスレッド前提のAPIを直接叩かないこと。
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    suspend fun start(intervalProvider: () -> Long) {
+    suspend fun start(intervalProvider: () -> Long, onFirstFrame: () -> Unit) {
         cameraProvider = ProcessCameraProvider.getInstance(context).await()
         // ↑ ListenableFuture#await() は kotlinx-coroutines-guava 依存（設計書§2.3・§4.5.2）
 
@@ -91,7 +94,7 @@ class CameraCaptureController(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .applyLowFpsRangeIfSupported(lowFpsRange) // §4.5.1a：センサー駆動レート自体を低減（対応機種のみ）
             .build().apply {
-                setAnalyzer(analysisExecutor, LoresFrameAnalyzer(intervalProvider) { jpeg, ts ->
+                setAnalyzer(analysisExecutor, LoresFrameAnalyzer(intervalProvider, onFirstFrame) { jpeg, ts ->
                     sessionRepository.enqueueLoresFrame(jpeg, ts, lastKnownLocation)
                 })
             }
@@ -214,12 +217,19 @@ class CameraCaptureController(
 /**
  * 低fps連写ストリームの `ImageAnalysis.Analyzer`（設計書§4.5.2）。
  * `intervalMsProvider()` が返す間隔以上経過したフレームだけをNV21→JPEG変換して [onFrame] へ渡す。
+ *
+ * [onFirstFrame]（よーいドン式、2026-08-01）: JPEG変換が実際に成功した最初の1回だけ呼ぶ
+ * （変換が例外で落ちた回はカウントしない＝実際に使える画像ができた瞬間だけを
+ * 「カメラが上がった」とみなす）。`analyze()` は `analysisExecutor`（単一スレッド）上で
+ * 順に呼ばれるため、[firstFrameReported] は非atomicな `var` のままで安全。
  */
 class LoresFrameAnalyzer(
     private val intervalMsProvider: () -> Long,
+    private val onFirstFrame: () -> Unit,
     private val onFrame: (ByteArray, Long) -> Unit,
 ) : ImageAnalysis.Analyzer {
     private var lastCaptureElapsed = 0L
+    private var firstFrameReported = false
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -232,6 +242,10 @@ class LoresFrameAnalyzer(
                 // 保存フレームが倒れたまま残る（既存フレームはこの修正では直らない）。
                 val rotation = image.imageInfo.rotationDegrees
                 val jpeg = image.toNv21JpegByteArray(quality = 75, rotationDegrees = rotation)
+                if (!firstFrameReported) {
+                    firstFrameReported = true
+                    onFirstFrame()
+                }
                 onFrame(jpeg, System.currentTimeMillis())
             }
         } catch (e: Exception) {

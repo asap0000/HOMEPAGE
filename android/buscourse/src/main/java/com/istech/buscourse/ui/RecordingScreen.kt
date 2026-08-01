@@ -59,6 +59,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +87,7 @@ import com.istech.buscourse.recording.RecordingNotificationManager
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.RecordingStateStore
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicInteger
@@ -119,6 +121,36 @@ fun RecordingScreen(
     val isRecording by stateStore.isRecordingFlow.collectAsState(initial = false)
     val activeSessionId by stateStore.sessionIdFlow.collectAsState(initial = null)
 
+    // よーいドン式（2026-08-01）: 「何回目の試行か」はこの親レベルで保持する。
+    // RecordingSetupContent/RecordingActiveContentはisRecordingのtrue/false切り替えのたびに
+    // 破棄・再生成される（Composeのif分岐の性質上）ため、子側のremember stateでは
+    // 失敗のたびにリセットされてしまい「1回目/2回目以降」の区別ができない。
+    // この画面自体（RecordingScreen）は「戻る」で離脱するまで生き続けるので、ここに置けば
+    // 「戻って入り直せば試行回数がリセットされる」という約束も自然に満たされる。
+    var attemptCount by remember { mutableStateOf(1) }
+    var lastHandledFailureAt by remember { mutableStateOf<Long?>(null) }
+
+    // よーいドン式（2026-08-01・実機検証で発覚したバグの修正）: 種別・コース・運転手/車両IDも
+    // 同じ理由でここに置く。RecordingSetupContentのローカルremember stateのままだと、
+    // 失敗のたびにコンポーザブルごと作り直されて選択内容が消える——実機で確認: TEST_DRIVEを選んで
+    // 記録を開始→失敗→再表示された画面はFULL_RUNに戻っていた（ユーザーの選択が黙って消える事故）。
+    val selectedCourseIdState = remember { mutableStateOf<Long?>(null) }
+    val sessionTypeState = remember { mutableStateOf(RecordingSessionType.FULL_RUN) }
+    val driverIdState = remember { mutableStateOf("") }
+    val vehicleIdState = remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        // 前回このDataStoreに残っていた可能性のある古い失敗イベントを、まず現在値として
+        // ベースラインに取り込む（そうしないと、過去の失敗が「たった今起きた」と誤検知される）。
+        lastHandledFailureAt = stateStore.startupFailedAtFlow.first()
+        stateStore.startupFailedAtFlow.collect { v ->
+            if (v != null && v != lastHandledFailureAt) {
+                lastHandledFailureAt = v
+                attemptCount += 1
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -142,14 +174,28 @@ fun RecordingScreen(
                     }
                 }
             } else {
-                RecordingSetupContent(repository = viewModel.repository)
+                RecordingSetupContent(
+                    repository = viewModel.repository,
+                    attemptCount = attemptCount,
+                    selectedCourseIdState = selectedCourseIdState,
+                    sessionTypeState = sessionTypeState,
+                    driverIdState = driverIdState,
+                    vehicleIdState = vehicleIdState,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun RecordingSetupContent(repository: CourseRepository) {
+private fun RecordingSetupContent(
+    repository: CourseRepository,
+    attemptCount: Int,
+    selectedCourseIdState: MutableState<Long?>,
+    sessionTypeState: MutableState<RecordingSessionType>,
+    driverIdState: MutableState<String>,
+    vehicleIdState: MutableState<String>,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -157,10 +203,13 @@ private fun RecordingSetupContent(repository: CourseRepository) {
     var courses by remember { mutableStateOf<List<CourseEntity>>(emptyList()) }
     LaunchedEffect(Unit) { courses = repository.getCourses() }
 
-    var selectedCourseId by remember { mutableStateOf<Long?>(null) }
-    var sessionType by remember { mutableStateOf(RecordingSessionType.FULL_RUN) }
-    var driverId by remember { mutableStateOf("") }
-    var vehicleId by remember { mutableStateOf("") }
+    // よーいドン式（2026-08-01）: 親（RecordingScreen）から受け取ったMutableStateへ委譲する。
+    // 失敗のたびにこのコンポーザブルは作り直されるため、ここでremember{}すると選択内容が消える
+    // （実機検証で発覚。詳細はRecordingScreen側のコメント参照）。`by`委譲なので以下は既存コードのまま。
+    var selectedCourseId by selectedCourseIdState
+    var sessionType by sessionTypeState
+    var driverId by driverIdState
+    var vehicleId by vehicleIdState
     var showCoursePicker by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
 
@@ -191,27 +240,47 @@ private fun RecordingSetupContent(repository: CourseRepository) {
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
 
+    // よーいドン式（2026-08-01）: attemptCount=1は「まだ一度も失敗していない（これから1回目）」。
+    // failureCountは既に失敗した回数。1以上ならエラー表示＋プレビュー停止（「戻る」で抜けて
+    // 入り直すまでプレビューは再開しない）。
+    val failureCount = attemptCount - 1
+    val previewSuppressed = failureCount >= 1
+
     // --- 画角調整用カメラプレビュー（バックログ「思いつき1」）---
     // 記録開始前のこの画面だけがPreviewをbindする。記録開始後はBusRecordingService側の
-    // CameraCaptureControllerがImageAnalysis/ImageCaptureを同じ背面カメラにbindするため、
-    // フォアグラウンドサービス起動直前とonDispose（画面離脱）の両方でunbindAll()して確実に譲る。
+    // CameraCaptureControllerがImageAnalysis/ImageCaptureを同じ背面カメラにbindする。
+    //
+    // ★surgical unbind（2026-08-01・カメラ初手失敗の根本原因の修正）: このコンポーザブルが自分で
+    // bindしたPreview UseCaseだけを剥がす。unbindAll()は絶対に使わない——記録サービスがbindした
+    // ImageAnalysis/ImageCaptureを巻き添えで剥がせる経路になり、これが「カメラが1枚も撮れない」
+    // 事故の実測済みの根本原因だった（このonDisposeが、サービスのbind直後に発火して剥がしていた）。
     val previewView = remember { PreviewView(context) }
     var previewCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
-    LaunchedEffect(cameraGranted) {
-        if (!cameraGranted) return@LaunchedEffect
+    var previewUseCase by remember { mutableStateOf<Preview?>(null) }
+
+    LaunchedEffect(cameraGranted, previewSuppressed) {
+        if (!cameraGranted || previewSuppressed) {
+            // previewSuppressedへの遷移直後に、直前のbindが残っていれば剥がして後始末する。
+            previewUseCase?.let { pu -> previewCameraProvider?.unbind(pu) }
+            previewUseCase = null
+            return@LaunchedEffect
+        }
         try {
             val provider = ProcessCameraProvider.getInstance(context).await()
             previewCameraProvider = provider
+            previewUseCase?.let { provider.unbind(it) }
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            provider.unbindAll()
+            previewUseCase = preview
             provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview)
         } catch (e: Exception) {
             Toast.makeText(context, "カメラプレビューを開始できませんでした: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
-    DisposableEffect(Unit) { onDispose { previewCameraProvider?.unbindAll() } }
+    DisposableEffect(Unit) {
+        onDispose { previewUseCase?.let { pu -> previewCameraProvider?.unbind(pu) } }
+    }
 
-    fun startRecording() {
+    fun startRecording(noCamera: Boolean = false) {
         if (!cameraGranted || !locationGranted) {
             Toast.makeText(context, "カメラと位置情報の権限を許可してください", Toast.LENGTH_LONG).show()
             permissionLauncher.launch(
@@ -225,10 +294,12 @@ private fun RecordingSetupContent(repository: CourseRepository) {
             putExtra(BusRecordingService.EXTRA_SESSION_TYPE, sessionType.name)
             if (driverId.isNotBlank()) putExtra(BusRecordingService.EXTRA_DRIVER_ID, driverId.trim())
             if (vehicleId.isNotBlank()) putExtra(BusRecordingService.EXTRA_VEHICLE_ID, vehicleId.trim())
+            putExtra(BusRecordingService.EXTRA_ATTEMPT, attemptCount)
+            if (noCamera) putExtra(BusRecordingService.EXTRA_NO_CAMERA, true)
         }
         // BusRecordingService（CameraCaptureController）が同じ背面カメラをbindし直すため、
-        // サービス起動前にプレビュー側のbindを解いて競合を避ける。
-        previewCameraProvider?.unbindAll()
+        // サービス起動前にプレビュー側のbindを解いて競合を避ける（★surgical unbind・前述のコメント参照）。
+        previewUseCase?.let { pu -> previewCameraProvider?.unbind(pu) }
         ContextCompat.startForegroundService(context, intent)
         // isRecordingFlowがtrueになり次第、RecordingScreen側で自動的にACTIVE表示へ切り替わる。
         // ここではボタンの二重タップ防止のためだけにstartingを使う。
@@ -246,16 +317,28 @@ private fun RecordingSetupContent(repository: CourseRepository) {
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // 画角調整用カメラプレビュー（記録開始前のみ表示。記録中画面(RecordingActiveContent)には出さない）
+        // 高さ240dpは失敗表示への差し替え時も変えない（下の要素の座標を動かさないため）。
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(240.dp)
                 .clip(RoundedCornerShape(12.dp)),
         ) {
-            if (cameraGranted) {
-                AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-            } else {
-                Box(
+            when {
+                previewSuppressed -> Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "プレビューなし（やり直し中）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                cameraGranted -> AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+                else -> Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -265,6 +348,39 @@ private fun RecordingSetupContent(repository: CourseRepository) {
                         "カメラを許可すると画角を調整できます",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // よーいドン式のエラーバナー（2026-08-01）。固定高さスロット＝出現・消滅で下の要素の座標を
+        // 動かさない（既存のマーカーボタン座標不変の原則と同じ考え方）。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(96.dp)
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (previewSuppressed) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "カメラを起動できませんでした。記録は開始していません。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    val hint = when {
+                        failureCount == 1 -> "もう一度お試しください"
+                        sessionType == RecordingSessionType.TEST_DRIVE -> "映像なしで開始することもできます"
+                        else -> "アプリを終了して開き直してください。本番運行は映像が必須です"
+                    }
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
                 }
             }
@@ -321,8 +437,12 @@ private fun RecordingSetupContent(repository: CourseRepository) {
             )
         }
 
+        // 主ボタン（青）。よーいドン式（2026-08-01・y×5承認）: 意味が「記録を開始」から
+        // 「もう一度ためす」に変わっても、位置・サイズ・色は変えない（同じボタンのラベルだけを
+        // 差し替える構造にすることで自然に座標不変になる）。
+        val primaryLabel = if (starting) "開始中…" else if (failureCount >= 2) "もう一度ためす" else "記録を開始"
         Button(
-            onClick = { startRecording() },
+            onClick = { startRecording(noCamera = false) },
             enabled = !starting,
             modifier = Modifier
                 .fillMaxWidth()
@@ -330,7 +450,24 @@ private fun RecordingSetupContent(repository: CourseRepository) {
         ) {
             Icon(Icons.Filled.FiberManualRecord, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text(if (starting) "開始中…" else "記録を開始")
+            Text(primaryLabel)
+        }
+
+        // 副次ボタン（失敗時のみ）。試走への切替、または映像なしでの開始。
+        if (previewSuppressed) {
+            if (sessionType == RecordingSessionType.FULL_RUN && failureCount >= 2) {
+                OutlinedButton(
+                    onClick = { sessionType = RecordingSessionType.TEST_DRIVE },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("試走に切り替えて記録する") }
+            }
+            if (sessionType == RecordingSessionType.TEST_DRIVE) {
+                OutlinedButton(
+                    onClick = { startRecording(noCamera = true) },
+                    enabled = !starting,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("映像なしで開始する") }
+            }
         }
     }
 
@@ -431,6 +568,11 @@ private fun RecordingActiveContent(
 
     // S0-d GNSS健全性チェックの結果（BusRecordingService → RecordingStateStore経由で公開、2026-07-16追加）。
     val gnssWarning by stateStore.gnssWarningFlow.collectAsState(initial = false)
+
+    // よーいドン式（2026-08-01）: カメラが上がった（または映像なしで開始した）＝緑シグナル。
+    // 測位は条件に含めない（オーナー指示「測位はいつでも切れる可能性があるので無視」）。
+    val readyToRecord by stateStore.readyToRecordFlow.collectAsState(initial = false)
+    val noCameraMode by stateStore.noCameraModeFlow.collectAsState(initial = false)
 
     var stopRequested by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
@@ -577,12 +719,32 @@ private fun RecordingActiveContent(
             Text("記録中", style = MaterialTheme.typography.titleMedium)
         }
 
-        // UI改善4（前回例示で承認済み）: 経過時間を時計サイズに（囲いなし）
-        val h = elapsedSec / 3600
-        val m = (elapsedSec % 3600) / 60
-        val s = elapsedSec % 60
-        Text("%02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.displayMedium)
-        Text("経過時間", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // UI改善4（前回例示で承認済み）: 経過時間を時計サイズに（囲いなし）。
+        // よーいドン式（2026-08-01）: readyToRecordがtrueになるまでは時計を隠し「準備中…」を出す。
+        // 高さ固定スロット＝準備中→記録中の切替で下のマーカーボタン座標を動かさない。
+        // 0秒の定義は「カメラが上がった瞬間」で足りる（オーナー方針）——elapsedSecの起点
+        // （session.startedAt）は変更しない。表示を隠すだけなので、緑になった瞬間に見える数字は
+        // 待たされた秒数からそのまま始まる（それでよい、というのがオーナーの明示判断）。
+        Box(Modifier.height(80.dp), contentAlignment = Alignment.Center) {
+            if (readyToRecord) {
+                val h = elapsedSec / 3600
+                val m = (elapsedSec % 3600) / 60
+                val s = elapsedSec % 60
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("%02d:%02d:%02d".format(h, m, s), style = MaterialTheme.typography.displayMedium)
+                    Text("経過時間", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("準備中…", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "カメラの起動を待っています",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
 
         // UI改善（停車ストップウォッチ・2026-07-31 承認）: 5km/h 以下（AUTO 検知と同じ閾値＝機械の
         // 停車認識そのもの）で出現し、発進で消える。表示のみでどこにも記録しない（停車の記録は
@@ -632,25 +794,45 @@ private fun RecordingActiveContent(
 
         // カメラ行（S0-c の表現替え）: 正常＝撮影枚数のプレーン表示／
         // 異常＝黄色の標識風ビックリマーク＋停止枚数（同じ行の中身が入れ替わる）。
+        // よーいドン式（2026-08-01）: 準備中／映像なしモードの2分岐を追加（既存2分岐の手前に挿入）。
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.height(40.dp),
         ) {
-            if (cameraWarning) {
-                Icon(
-                    Icons.Filled.Warning,
-                    contentDescription = null,
-                    tint = Color(0xFFF9A825), // 道路標識の黄
-                    modifier = Modifier.size(22.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "カメラが停止しています（${frameCount}枚で停止）",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            } else {
-                Text("撮影 ${frameCount}枚", style = MaterialTheme.typography.titleMedium)
+            when {
+                !readyToRecord -> {
+                    // アイコンは追加しない（既存の正常時表示もアイコン無しのため踏襲）。
+                    Text(
+                        "まもなく撮影を開始します",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                noCameraMode -> {
+                    Text(
+                        "映像なしで記録中",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                cameraWarning -> {
+                    Icon(
+                        Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = Color(0xFFF9A825), // 道路標識の黄
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "カメラが停止しています（${frameCount}枚で停止）",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                else -> {
+                    // オーナー指示（2026-08-01）: 撮影枚数カウントのフォントをもう少し大きく。
+                    Text("撮影 ${frameCount}枚", style = MaterialTheme.typography.headlineSmall)
+                }
             }
         }
 
@@ -667,6 +849,9 @@ private fun RecordingActiveContent(
         // この画面で「ボタンに見える」形をしてよいのはこのマーカーだけ（2026-07-31 オーナー指示）。
         Button(
             onClick = { markStop() },
+            // よーいドン式（2026-08-01）: カメラ準備中は押せない。位置・サイズ・色は変えない
+            // （y×5承認「新規画面もボタン座標を固定する」を既存のこのボタンにも適用する形）。
+            enabled = readyToRecord,
             // POC追加計測（2026-08-01）: 押下開始・離す・キャンセルを観測するためのフック。
             // **標準APIの差し込みで、ボタンの見た目も当たり判定もジェスチャ処理も変わらない**。
             interactionSource = markInteractionSource,
