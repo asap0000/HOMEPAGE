@@ -129,7 +129,9 @@ private val STATUS_DOT_CARD_COLOR = Color(0xFF43A047)
  *   frame_id/event_idを保持したまま書き換え、区間/route_pointを再構築）。
  * - 区間（CONFIRMED/PENDING）セクション・GPX取込（`importAsSegmentTrack`）は撤去した
  *   （ボトムアップ＝試走待ちの名残。FULL_RUN由来のトップダウン創設では発生しないため）。
- * - コース全体のGPXエクスポート・コース削除・地図表示（[RouteMapScreen]）への導線・定員警告表示は維持。
+ * - コース削除・地図表示（[RouteMapScreen]）への導線・定員警告表示は維持。
+ *   **コース全体のGPXエクスポートは 2026-07-26 に撤去した**（下の該当箇所のコメント参照。
+ *   2026-08-02 まで本KDocだけ「維持」と書かれたままで、同一ファイル内で記述が矛盾していた）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

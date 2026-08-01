@@ -115,8 +115,10 @@ fun HomeScreen(
             HomeMenuCard(
                 icon = Icons.Filled.Route,
                 title = "コース編集",
-                // コース全体のGPXエクスポートは2026-07-26に撤去したため「入出力」→「取り込み」。
-                description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX取り込み）",
+                // 2026-08-02 文言是正: 旧文言「区間軌跡を割り当てます（GPX取り込み）」は
+                // **どちらも既に存在しない機能を案内していた**（区間UIとGPX取込は S6a・2026-07-18 で
+                // 撤去済み、GPXエクスポートは 2026-07-26 に撤去）。実際にできることへ書き直す。
+                description = "コースの停留所を並べ替え・追加・削除します（コースの新規作成もここ）",
                 onClick = onOpenCourses,
             )
             HomeMenuCard(
@@ -128,7 +130,9 @@ fun HomeScreen(
             HomeMenuCard(
                 icon = Icons.AutoMirrored.Filled.ListAlt,
                 title = "作業進捗ログ",
-                description = "カード作成・編成確定・記録・抽出・エラーの操作履歴を確認します",
+                // 2026-08-02 文言是正: 旧文言の「編成確定」「抽出」は撤去済みの語彙だった。
+                // 個々の操作名を並べると実装の変化で古びるため、記録される対象（＝WorkLogCategory）で書く。
+                description = "カード・コース・記録・地図・バックアップ・エラーの操作履歴を確認します",
                 onClick = onOpenWorkLog,
             )
             HomeMenuCard(
