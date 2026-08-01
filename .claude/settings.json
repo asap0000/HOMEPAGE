@@ -1,8 +1,8 @@
 {
   "permissions": {
     "additionalDirectories": [
-      "C:\\Users\\ishix\\dev\\istech\\teams\\android",
-      "C:\\Users\\ishix\\dev\\istech\\docs"
+      "D:\\dev\\istech\\teams\\android",
+      "D:\\dev\\istech\\docs"
     ],
     "allow": [
       "Bash(git status)",
