@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,6 +16,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,6 +75,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.CourseEntity
@@ -84,6 +88,7 @@ import com.istech.buscourse.recording.RecordingStateStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 運行記録の開始・終了（設計書§4.3の`RunSetupActivity`相当）。
@@ -437,15 +442,82 @@ private fun RecordingActiveContent(
         ContextCompat.startForegroundService(context, intent)
     }
 
+    // ------------------------------------------------------------------
+    // POC段階1 追加計測（2026-08-01・**debug ビルド種別限定**）: 「届かなかったタッチ」を数字にする
+    //
+    // 8/1 の実走で「タッチのCG反応（リップル）は出るのにシャッター音もカウンタも出ない」場面があり、
+    // オーナーが何度も押した。しかし poc_press_log にはその押下が1件しか無い。POC版はデバウンスを
+    // 持たないので、**サービスまで届いた押下は必ず全部残る**——残っていない＝**届いていない**。
+    // リップルが出た以上、押下は Compose までは来ている。⇒ **画面側の層を別々に記録して切り分ける**。
+    //
+    // ⚠ ここでやるのは**観測だけ**。ボタンのジェスチャ処理は一切変えない（変えると測る対象が消える）。
+    //   有力仮説＝この画面は `verticalScroll` の中にあり、**指のわずかな縦移動でスクロールへ持って行かれ、
+    //   Press（＝リップル）は出たまま onClick が発火しない**。走行中の車内なら常時起こりうる。
+    //   ただし**仮説であって、直す前に測る**（7/12 の「カメラ競合」が一度も実測されないまま
+    //   割り切りの根拠になった失敗の再来を避ける）。
+    // ------------------------------------------------------------------
+    val pocEnabled = BuildConfig.BUILD_TYPE == "debug"
+    val markInteractionSource = remember { MutableInteractionSource() }
+    val pocUiSeq = remember { AtomicInteger(0) }
+    // Press インスタンス → 通し番号。Release/Cancel は自分を生んだ Press を持つので、
+    // 連打や多点タッチでも取り違えずに対応付けられる（「直前の押下」で代用しない）。
+    val pocPressSeqOf = remember { mutableMapOf<PressInteraction.Press, Int>() }
+
+    // onClick の通し番号。**press とは別系統で同期採番する**。
+    // ⚠ 2026-08-01 のスモークで実測した罠: `onClick` はタッチの up で同期的に走るのに対し、
+    //   `PressInteraction.Press` はフロー経由で**あとから**届く。初版は onClick で「直近の press 番号」を
+    //   読んでいたため、**まだ採番前で1つ前の番号を載せ、画面タップが `src:"notif"` と記録された**。
+    // ⚠ `mutableStateOf` にしない——**計測が再コンポーズを誘発してはいけない**（走行中の画面に
+    //   観測者効果を持ち込まないため）。onClick からしか読まないので状態である必要が無い。
+    val pocClickSeq = remember { AtomicInteger(0) }
+
+    fun sendPocUiTelemetry(uiEv: String, uiSeq: Int?, clickSeq: Int?) {
+        if (!pocEnabled) return
+        val intent = Intent(RecordingNotificationManager.ACTION_POC_UI_TELEMETRY)
+            .setPackage(context.packageName)
+            .putExtra(RecordingNotificationManager.EXTRA_UI_EV, uiEv)
+            .putExtra(RecordingNotificationManager.EXTRA_UI_T_MS, System.currentTimeMillis())
+            .putExtra(RecordingNotificationManager.EXTRA_UI_ERT_NS, SystemClock.elapsedRealtimeNanos())
+        uiSeq?.let { intent.putExtra(RecordingNotificationManager.EXTRA_UI_SEQ, it) }
+        clickSeq?.let { intent.putExtra(RecordingNotificationManager.EXTRA_CLICK_SEQ, it) }
+        context.sendBroadcast(intent)
+    }
+
+    LaunchedEffect(markInteractionSource, pocEnabled) {
+        if (!pocEnabled) return@LaunchedEffect
+        markInteractionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is PressInteraction.Press -> {
+                    val seq = pocUiSeq.incrementAndGet()
+                    pocPressSeqOf[interaction] = seq
+                    sendPocUiTelemetry("press", seq, null)
+                }
+                // Release ＝ 指を離してクリック成立へ／Cancel ＝ ジェスチャが取り消された（＝onClick は来ない）
+                // ⚠ 対応する Press を観測できていなくても**必ず1行出す**（`ui_seq` は null で残す）。
+                //   取りこぼしを数える道具が、自分の取りこぼしを黙って捨てては本末転倒（レビュー指摘・2026-08-01）。
+                is PressInteraction.Release ->
+                    sendPocUiTelemetry("release", pocPressSeqOf.remove(interaction.press), null)
+                is PressInteraction.Cancel ->
+                    sendPocUiTelemetry("cancel", pocPressSeqOf.remove(interaction.press), null)
+            }
+        }
+    }
+
     // 実車データ(session8, 2026-07-13)で通知バーの「停留所マーク」ボタンの押し損ね・
     // 「効いていないと思っての再押し」が確認されたため、記録中画面にもオンスクリーンの
     // マークボタンを追加する。通知ボタンと同じ経路（ACTION_MARK_STOP ブロードキャスト）を使うことで、
     // 受信先（StopMarkReceiver → BusRecordingService.onManualStopMark）・デバウンス・
     // フィードバック（Toast・振動）を通知ボタンと完全に共通化する（UI側で独自ロジックは持たない）。
     fun markStop() {
-        context.sendBroadcast(
-            Intent(RecordingNotificationManager.ACTION_MARK_STOP).setPackage(context.packageName)
-        )
+        val intent = Intent(RecordingNotificationManager.ACTION_MARK_STOP).setPackage(context.packageName)
+        // 突き合わせキー。field では付かない＝サービス側は null を「通知バー由来」と読む
+        val clickSeq = if (pocEnabled) pocClickSeq.incrementAndGet() else null
+        clickSeq?.let { intent.putExtra(RecordingNotificationManager.EXTRA_CLICK_SEQ, it) }
+
+        // ★本体を先に送る（レビュー指摘・2026-08-01）。計測便を先に送ると、**測りたい「押下がサービスへ
+        //   届くまでの時間」を計測自身が押し下げる**（観測者効果）。計測は本体を出したあとで送る。
+        context.sendBroadcast(intent)
+        clickSeq?.let { sendPocUiTelemetry("click", null, it) }
     }
 
     // スクロール可能にしておくこと（S0-d 実機検証 2026-07-16 で判明した不具合の修正）。
@@ -595,6 +667,9 @@ private fun RecordingActiveContent(
         // この画面で「ボタンに見える」形をしてよいのはこのマーカーだけ（2026-07-31 オーナー指示）。
         Button(
             onClick = { markStop() },
+            // POC追加計測（2026-08-01）: 押下開始・離す・キャンセルを観測するためのフック。
+            // **標準APIの差し込みで、ボタンの見た目も当たり判定もジェスチャ処理も変わらない**。
+            interactionSource = markInteractionSource,
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,

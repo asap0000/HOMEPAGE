@@ -9,8 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.R
 
 /**
@@ -33,6 +35,7 @@ class RecordingNotificationManager(private val context: Context) {
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private var stopMarkReceiver: StopMarkReceiver? = null
+    private var pocTelemetryReceiver: PocTelemetryReceiver? = null
 
     /** 通知チャンネルを作成する（冪等・API26未満では何もしない）。サービス起動時に必ず呼ぶこと。 */
     fun createChannelIfNeeded() {
@@ -49,8 +52,15 @@ class RecordingNotificationManager(private val context: Context) {
         }
     }
 
-    /** 「停留所マーク」ボタンの動的レシーバを登録する。[onMarkStop] はメインスレッドで呼ばれる。 */
-    fun registerStopMarkReceiver(onMarkStop: () -> Unit) {
+    /**
+     * 「停留所マーク」ボタンの動的レシーバを登録する。[onMarkStop] はメインスレッドで呼ばれる。
+     *
+     * [onMarkStop] の引数 `clickSeq` ＝ 押下がオンスクリーンのマーカーボタン由来なら、その onClick の通し番号。
+     * **null は「通知バーのボタン由来」**（通知の`PendingIntent`は extra を持たない）**または POC 計測を
+     * 積んでいないビルド**を意味する。POC段階1の追加計測（2026-08-01）の突き合わせキーで、
+     * **「画面では onClick が出たのにサービスへ届かなかった押下」**を検出するために使う。
+     */
+    fun registerStopMarkReceiver(onMarkStop: (clickSeq: Int?) -> Unit) {
         if (stopMarkReceiver != null) return
         val receiver = StopMarkReceiver(onMarkStop)
         stopMarkReceiver = receiver
@@ -65,6 +75,51 @@ class RecordingNotificationManager(private val context: Context) {
             runCatching { context.unregisterReceiver(it) }
         }
         stopMarkReceiver = null
+    }
+
+    // ------------------------------------------------------------------
+    // POC段階1の追加計測（2026-08-01）: 「届かなかったタッチ」を数字にする
+    // ------------------------------------------------------------------
+
+    /**
+     * 画面側のタッチ計測を受け取る動的レシーバを登録する（**debug ビルド種別限定**・呼び出し側でガードする）。
+     *
+     * **なぜ既存の [ACTION_MARK_STOP] に相乗りさせないか**: 測りたい事象の本体は
+     * **「押下は始まったのに onClick が出なかった」＝ジェスチャのキャンセル**であり、
+     * **キャンセルには onClick が無いので相乗りできる便が存在しない**。
+     * また「計測専用フラグ付きの MARK_STOP」という形は、**フラグの読み落としが実記録の誤発火に化ける**ので採らない。
+     *
+     * ⚠ **正確に言うと「field に存在しない」のはレシーバの"登録"だけで、クラスもアクション名も定数も
+     * field APK に収録される**（POC は暫定の計測装置なので `src/debug/` への分離まではやっていない。
+     * レビュー指摘・2026-08-01 で当初コメントの「field には存在しない」が事実に反していたため訂正）。
+     * ⇒ **呼び出し側のガードに依存せず、この関数自身でも弾く**（下の早期 return）。
+     *
+     * [onTelemetry] はメインスレッドで呼ばれる。`uiEv` は [EXTRA_UI_EV] の値（`press`/`release`/`cancel`/`click`）。
+     * **番号が2系統ある理由は [EXTRA_CLICK_SEQ] の説明を読むこと**（スモークで実測した順序の罠）。
+     */
+    fun registerPocTelemetryReceiver(
+        onTelemetry: (uiEv: String, uiSeq: Int?, clickSeq: Int?, tMs: Long, ertNs: Long) -> Unit,
+    ) {
+        // 例外でなく「登録しないで返す」にする＝記録用ビルドで落とさない側に倒す（fail safe）。
+        // 落ちて困るのは実データを録っている現場であり、ここで守りたいのは「漏れないこと」だから。
+        if (BuildConfig.BUILD_TYPE != "debug") {
+            Log.e(TAG, "POC計測レシーバは debug ビルド専用です（BUILD_TYPE=${BuildConfig.BUILD_TYPE}）。登録しません")
+            return
+        }
+        if (pocTelemetryReceiver != null) return
+        val receiver = PocTelemetryReceiver(onTelemetry)
+        pocTelemetryReceiver = receiver
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(ACTION_POC_UI_TELEMETRY), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    /** POC 計測レシーバを解除する。冪等（未登録でも安全）。 */
+    fun unregisterPocTelemetryReceiver() {
+        pocTelemetryReceiver?.let {
+            runCatching { context.unregisterReceiver(it) }
+        }
+        pocTelemetryReceiver = null
     }
 
     /**
@@ -114,18 +169,66 @@ class RecordingNotificationManager(private val context: Context) {
     }
 
     /** 動的登録される「停留所マーク」ボタンの受信先（設計書§4.8.3）。 */
-    private class StopMarkReceiver(private val onMarkStop: () -> Unit) : BroadcastReceiver() {
+    private class StopMarkReceiver(private val onMarkStop: (uiSeq: Int?) -> Unit) : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_MARK_STOP) {
-                onMarkStop()
+                // extra が無い＝通知バー由来（PendingIntent は extra を持たない）。-1 を「無し」の番兵に使う
+                val clickSeq = intent.getIntExtra(EXTRA_CLICK_SEQ, -1).takeIf { it >= 0 }
+                onMarkStop(clickSeq)
             }
         }
     }
 
+    /** POC 計測（画面側タッチ）の受信先。debug ビルド種別でのみ登録される。 */
+    private class PocTelemetryReceiver(
+        private val onTelemetry: (uiEv: String, uiSeq: Int?, clickSeq: Int?, tMs: Long, ertNs: Long) -> Unit,
+    ) : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != ACTION_POC_UI_TELEMETRY) return
+            val uiEv = intent.getStringExtra(EXTRA_UI_EV) ?: return
+            onTelemetry(
+                uiEv,
+                intent.getIntExtra(EXTRA_UI_SEQ, -1).takeIf { it >= 0 },
+                intent.getIntExtra(EXTRA_CLICK_SEQ, -1).takeIf { it >= 0 },
+                intent.getLongExtra(EXTRA_UI_T_MS, 0L),
+                intent.getLongExtra(EXTRA_UI_ERT_NS, 0L),
+            )
+        }
+    }
+
     companion object {
+        private const val TAG = "RecordingNotification"
         const val CHANNEL_ID = "recording_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_MARK_STOP = "com.istech.buscourse.action.MARK_STOP"
         private const val REQ_MARK_STOP = 1
+
+        /** POC計測（2026-08-01・debug 限定）: 画面側タッチの計測便。実記録は一切起こさない。 */
+        const val ACTION_POC_UI_TELEMETRY = "com.istech.buscourse.action.POC_UI_TELEMETRY"
+
+        /** 押下（Press/Release/Cancel）の通し番号。**採番は非同期のコレクタ側**。 */
+        const val EXTRA_UI_SEQ = "ui_seq"
+
+        /**
+         * onClick の通し番号。[ACTION_MARK_STOP] にも載せて、画面ログとサービスログを突き合わせる。
+         *
+         * **なぜ [EXTRA_UI_SEQ] と別系統にするか（2026-08-01 スモークで実測した罠）**:
+         * `onClick` は**タッチの up で同期的に走る**のに対し、`PressInteraction.Press` は
+         * `interactionSource.interactions` フロー経由で**あとから**コレクタに届く。
+         * ⇒ 初版は onClick で「直近の press 番号」を読んでいたが、**まだ採番が済んでいないため
+         * 1つ前の番号（初回は「無し」）を載せてしまい、画面タップが `src:"notif"` と記録された**。
+         * 番号を2系統に分け、**click は同期採番**にすることで突き合わせが正しくなる。
+         * 解析は「press 数 対 click 数」と「cancel 数」で取りこぼしを見る（別カウンタでも支障は無い）。
+         */
+        const val EXTRA_CLICK_SEQ = "click_seq"
+
+        /** 計測事象の種別（`press`/`release`/`cancel`/`click`）。 */
+        const val EXTRA_UI_EV = "ui_ev"
+
+        /** 画面側で観測した壁時計時刻（ms）。 */
+        const val EXTRA_UI_T_MS = "ui_t_ms"
+
+        /** 画面側で観測した単調時計（ns）。壁時計の飛びに強い間隔計算用。 */
+        const val EXTRA_UI_ERT_NS = "ui_ert_ns"
     }
 }

@@ -189,6 +189,11 @@ class BusRecordingService : LifecycleService() {
                 shockDetector = shock
 
                 notificationManager.registerStopMarkReceiver(::onManualStopMark)
+                // POC計測（2026-08-01・debug ビルド種別限定）: 画面側タッチの計測便を受ける。
+                // field には登録しない＝アクションもレシーバも存在しない（POC は経路ごと分ける）。
+                if (BuildConfig.BUILD_TYPE == "debug") {
+                    notificationManager.registerPocTelemetryReceiver(::onPocUiTelemetry)
+                }
 
                 guard.start(thermalExecutor)
                 shock.start(handlerThread)
@@ -388,14 +393,14 @@ class BusRecordingService : LifecycleService() {
      *   4. 完全成功：`stop_visit_event`記録 ＋ LORESフレームへのマーク成功 → 成功の振動＋Toast
      *      （映像が無ければ部分成功＝映像なしとして扱う。これは3の位置鮮度チェックとは独立）
      */
-    private fun onManualStopMark() {
+    private fun onManualStopMark(clickSeq: Int? = null) {
         // ------------------------------------------------------------------
         // POC段階1（2026-07-31）: 玄関の再設計（記録先行・撮影後付け・吸着なし・無言分岐なし）の検証装置。
         // **debug ビルド種別限定**。⚠ BuildConfig.DEBUG では判定しない——field も isDebuggable=true のため
         // DEBUG が true になり、実データを持つ記録用ビルドへ POC が漏れる（癖リスト0「既定で有効な他経路」）。
         // ------------------------------------------------------------------
         if (BuildConfig.BUILD_TYPE == "debug") {
-            pocManualStopMark()
+            pocManualStopMark(clickSeq)
             return
         }
         if (isDebounced(lastStopMarkElapsedMs)) return
@@ -528,7 +533,7 @@ class BusRecordingService : LifecycleService() {
      * `stop_visit_event` へは一切書かない（stop_card_id NOT NULL の v20 nullable 化＝版鋳造＝官房マターは
      * POC の実測が出てから起案する。測ってから鋳造する）。
      */
-    private fun pocManualStopMark() {
+    private fun pocManualStopMark(clickSeq: Int? = null) {
         // ① 押下の事実を最初に固定する（この3行より前に return する分岐を作らない）
         val pressTs = System.currentTimeMillis()
         val pressErtNs = SystemClock.elapsedRealtimeNanos()
@@ -561,6 +566,11 @@ class BusRecordingService : LifecycleService() {
                 put("acc", location?.takeIf { it.hasAccuracy() }?.accuracy?.toDouble() ?: JSONObject.NULL)
                 put("loc_age_ms", locAgeMs ?: JSONObject.NULL)
                 put("lores_before_id", loresBeforeId ?: JSONObject.NULL)
+                // 追加計測（2026-08-01）: 画面側の onClick 通し番号。**null = 通知バーのボタン由来**。
+                // 解析は「`ui`行に click があるのに、同じ click_seq の press 行が無い」＝配送の欠落、
+                // 「press があるのに click が無い（＝cancel 行がある）」＝ジェスチャのキャンセル、と読み分ける。
+                put("click_seq", clickSeq ?: JSONObject.NULL)
+                put("src", if (clickSeq == null) "notif" else "screen")
             })
 
             // ③ HIRES は最後。captureHiRes でなく captureToFile を使う——失敗コールバックを持つのは後者だけで、
@@ -601,6 +611,43 @@ class BusRecordingService : LifecycleService() {
                 }
             }
         }
+    }
+
+    /**
+     * POC追加計測（2026-08-01）: 画面側タッチの計測便を `poc_press_log.jsonl` へ流す（`"ev":"ui"`）。
+     *
+     * **何のために測るか**: POC実走（8/1）で、オーナーが「**タッチのCG反応は出るのにシャッター音とカウンタが
+     * 出ず、何度もタッチした**」場面があった。しかしログにはその押下が1件しか無く、**取りこぼしを数える手段が
+     * 無かった**（POC版はデバウンス無しなので、届いた押下は必ず全部残る＝残っていない＝届いていない）。
+     * リップルが出ている以上、押下自体は Compose に届いている。⇒ **どこで消えたかを層で切り分ける**:
+     *   - `press` はあるが対応する `cancel` が出て `click` が無い → **ジェスチャがキャンセルされた**
+     *     （有力仮説＝記録中画面の縦スクロール容器に指の縦移動を取られる）
+     *   - `click` はあるが同 `click_seq` の `press`行（`ev:"press"`）が無い → **ブロードキャストが届いていない**
+     *   - 両方ある → 画面〜サービス間は健全。以後の遅れは撮影側の問題
+     *
+     * ⚠ `ui_seq`（press/release/cancel）と `click_seq`（onClick）は**別系統の採番**である。
+     * 理由は [RecordingNotificationManager.EXTRA_CLICK_SEQ] の KDoc（スモークで実測した順序の罠）。
+     *
+     * **解析は個々の press↔click を突き合わせない。件数の恒等式で層を切り分ける**
+     * （レビュー指摘「別採番だと個別対応が復元できない」への回答。**恒等式なら個別対応は要らない**）:
+     *   - `press 数 == release 数 + cancel 数`  … 押下は必ずどちらかで終わる。破れたら**計測器自身の取りこぼし**
+     *   - `release 数 == click 数`             … 破れた分が**Compose から先へ出なかった押下**
+     *   - `click 数 == click_seq が一致する ev:"press" 行の数` … 破れた分が**ブロードキャストの欠落**
+     * `cancel` が主犯なら「指のズレでスクロールに取られた」、`click`〜`press` 間が主犯なら配送、という読み。
+     * 連打時の個別対応が要る場面が出たら、そのとき press 側に固有IDを足す（今は恒等式で足りる）。
+     *
+     * **副作用を持たせない**: この経路は記録も撮影もフィードバックも一切起こさない。追記のみ
+     * （[RecordingSessionRepository.appendPocPressLog] は背景スコープ＝押下経路をブロックしない）。
+     */
+    private fun onPocUiTelemetry(uiEv: String, uiSeq: Int?, clickSeq: Int?, tMs: Long, ertNs: Long) {
+        sessionRepository.appendPocPressLog(JSONObject().apply {
+            put("ev", "ui")
+            put("ui_ev", uiEv)
+            put("ui_seq", uiSeq ?: JSONObject.NULL)
+            put("click_seq", clickSeq ?: JSONObject.NULL)
+            put("t", tMs)
+            put("ert", ertNs)
+        })
     }
 
     /** POC の HIRES 結果行（`"ev":"hires"`）。press 行と `seq` で突き合わせる。 */
@@ -760,6 +807,7 @@ class BusRecordingService : LifecycleService() {
 
     private fun releaseControllers() {
         notificationManager.unregisterStopMarkReceiver()
+        notificationManager.unregisterPocTelemetryReceiver() // 未登録（field）でも安全＝冪等
         gnssLocationSource?.stop()
         gnssLocationSource = null
         shockDetector?.stop()
