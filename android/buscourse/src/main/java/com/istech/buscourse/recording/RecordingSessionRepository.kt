@@ -494,8 +494,14 @@ class RecordingSessionRepository(
     // ストレージローテーション（§4.10.3、StorageRotationWorkerから呼ばれる）
     // ------------------------------------------------------------------
 
-    /** 保持日数を超えたセッションを削除する。個々の削除失敗（FK制約）はスキップして継続する。 */
+    /**
+     * 保持日数を超えたセッションを削除する。個々の削除失敗（FK制約）はスキップして継続する。
+     *
+     * **[days] が 0 以下なら1件も削除しない**（[RecordingConfigRepository.RETENTION_UNLIMITED]＝既定）。
+     * ガードを呼び出し元でなくここに置くのは、**呼び出し元が増えても無期限の約束が破れないようにする**ため。
+     */
     suspend fun deleteSessionsOlderThan(days: Int) {
+        if (days <= 0) return
         val cutoffMs = System.currentTimeMillis() - days * MILLIS_PER_DAY
         val old = recordingSessionDao.getStartedBefore(cutoffMs)
         for (s in old) {
