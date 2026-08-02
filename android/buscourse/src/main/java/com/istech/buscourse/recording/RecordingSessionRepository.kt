@@ -427,6 +427,7 @@ class RecordingSessionRepository(
         distanceAtEventM: Double?,
         positionErrorM: Double?,
         hiresFrameId: Long?,
+        eventTs: Long = System.currentTimeMillis(),
     ): Long = withContext(writeDispatcher) {
         val current = session ?: error("RecordingSessionRepository: セッションが開始されていません")
         val event = StopVisitEventEntity(
@@ -434,7 +435,7 @@ class RecordingSessionRepository(
             stopCardId = stopCardId,
             eventType = eventType.name,
             triggerType = triggerType?.name,
-            eventTs = System.currentTimeMillis(),
+            eventTs = eventTs,
             lat = location?.latitude,
             lon = location?.longitude,
             distanceAtEventM = distanceAtEventM,
@@ -445,6 +446,17 @@ class RecordingSessionRepository(
         val fresh = recordingSessionDao.getById(current.id) ?: current
         writeMetaSnapshotBlocking(fresh)
         id
+    }
+
+    /**
+     * 押下イベントへ HIRES フレームの参照を結ぶ（v20・2026-08-02）。
+     *
+     * 玄関の③（撮影完了コールバック）から呼ばれる。**筆頭写真はこの参照からの正選択のみ**で決まる
+     * （design-gate 条件「AUTO を判定する組み込みコードを書かない」＝時刻順の探索や出自の判定はしない）。
+     * 押下経路（②の insert）はブロックしない——撮影完了後の別コルーチンで走る UPDATE 1行。
+     */
+    suspend fun linkHiresFrameToEvent(eventId: Long, frameId: Long) = withContext(writeDispatcher) {
+        stopVisitEventDao.updateHiresFrameId(eventId, frameId)
     }
 
     /** `shock_event` を記録する（設計書§4.9.1）。バースト終端フレームは未確定のままnullで挿入できる。 */

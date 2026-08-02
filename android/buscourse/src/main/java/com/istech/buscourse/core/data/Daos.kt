@@ -403,6 +403,13 @@ interface StopVisitEventDao {
     suspend fun getBySession(sessionId: Long): List<StopVisitEventEntity>
 
     /**
+     * 押下イベント → HIRES フレームの参照を結ぶ（v20、2026-08-02）。撮影完了コールバックからの
+     * UPDATE 1行。筆頭写真の唯一の正選択経路（[com.istech.buscourse.recording.RecordingSessionRepository.linkHiresFrameToEvent]）。
+     */
+    @Query("UPDATE stop_visit_event SET hires_frame_id = :frameId WHERE id = :eventId")
+    suspend fun updateHiresFrameId(eventId: Long, frameId: Long)
+
+    /**
      * 単一イベントの取得（S6a「コース編集画面の刷新」、2026-07-18追加）。編集画面のロード
      * （[com.istech.buscourse.course.CourseRepository.getCourseEditDetails]）が `course_stop.event_id`
      * から座標（`lat`/`lon`）を解決するために使う（[TimelapseFrameDao.getById]のevent版）。

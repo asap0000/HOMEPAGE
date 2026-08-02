@@ -83,7 +83,6 @@ class BusRecordingService : LifecycleService() {
     private var shockDetector: ShockDetector? = null
     private var shockHandlerThread: HandlerThread? = null
     private var thermalGuard: ThermalGuard? = null
-    private var stopMasters: List<StopMaster> = emptyList()
 
     /** カメラ健全性チェック（S0-b、2026-07-15追加）の判定ロジック本体と定期実行ジョブ。 */
     private val cameraHealthMonitor = CameraHealthMonitor()
@@ -95,14 +94,12 @@ class BusRecordingService : LifecycleService() {
 
     @Volatile private var currentSpeedKmh: Double = 0.0
     @Volatile private var thermalDegraded: Boolean = false
-    @Volatile private var lastStopMarkElapsedMs: Long = 0L
 
     /** 常駐通知のタイトル切り替え用（S0-b/S0-d、カメラ・GNSSを独立管理する）。 */
     @Volatile private var cameraWarningActive: Boolean = false
     @Volatile private var gnssWarningActive: Boolean = false
 
     /** 手動停留所マークのセッション内成功回数（Toastフィードバック用、2026-07-13追加）。 */
-    @Volatile private var stopMarkCount: Int = 0
 
     /** 通知テキストの再構築用に現在セッションを保持する（S0-b、カメラ警告表示の切替に使用、2026-07-15追加）。 */
     @Volatile private var currentSession: RecordingSessionEntity? = null
@@ -228,7 +225,6 @@ class BusRecordingService : LifecycleService() {
                 cameraHealthMonitor.reset()
                 gnssHealthMonitor.reset()
 
-                stopMasters = loadStopMasters(courseId)
 
                 val camera = CameraCaptureController(this@BusRecordingService, this@BusRecordingService, sessionRepository)
                 cameraCaptureController = camera
@@ -297,19 +293,6 @@ class BusRecordingService : LifecycleService() {
                 failStartup(e.message ?: e.toString())
             }
         }
-    }
-
-    private suspend fun loadStopMasters(courseId: Long?): List<StopMaster> {
-        val cards = if (courseId != null) {
-            val stops = database.courseStopDao().getOrderedStops(courseId)
-            // course_stop.stop_card_id はNULL許容化された（[CourseStopWithCard]のクラスKDoc参照）が、
-            // ここは既存の「カードが見つからなければ除外」という既存のmapNotNullの緩やかな扱いに
-            // 合わせ、null安全にたどるだけで例外は投げない（frame座標のみの点は3パス化スコープ）
-            stops.mapNotNull { stop -> stop.stopCardId?.let { database.busStopCardDao().getById(it) } }
-        } else {
-            database.busStopCardDao().getAllActive()
-        }
-        return cards.filter { !it.isArchived }.map { StopMaster.from(it) }
     }
 
     private fun hasRequiredPermissions(): Boolean {
@@ -484,144 +467,131 @@ class BusRecordingService : LifecycleService() {
     }
 
     /**
-     * 常駐通知の「停留所マーク」ボタン（設計書§4.8.3）。最寄りの登録済み停留所を対象にする。
+     * 停留所マーク（通知バーのボタン／記録画面のマーカーボタン。設計書§4.8.3 を v20 で改定）。
      *
-     * オーナー確定方針（2026-07-12、運行記録③機能）：手動マークではHIRES撮影を行わない。
-     * (a) `stop_visit_event` を `hires_frame_id = null` でARRIVED記録し、(b) 押下時刻に最も近い
-     * 直前のLORESフレームへ `stop_card_id` をマーカーとして付与する（②のスクラバ用）。
-     * ⚠ 旧KDocは「AUTO検出はHIRES撮影＋イベント記録の従来方式のまま」と書いていたが、
-     * **AUTO 検知は 2026-08-02 に撤去済み**（退役はオーナー確定済みだったが実装が残存し、実走 #35 で
-     * 2回発火してカメラを奪っていた＝セッション開始6秒後と走行中。イベントはコース創設パス1が
-     * MANUAL しか拾わないため誰にも読まれていなかった）。**現在この経路の呼び出し元は手動マークのみ。**
+     * **v20（2026-08-02・官房認可・design-gate 改訂復唱 y×5）: 玄関＝「押下の事実と測位を確定しきる」だけ。**
+     * POC 段階1〜3 の実走（押下 100% 記録・カメラ初手失敗 0・GPS 欠測 0%）で立証された形を全ビルドの正とする。
+     *   ① 押下の事実を最初に固定する（この前に return する分岐を作らない。**デバウンスなし**＝連打も全部記録し、
+     *      畳みはコース創設側の仕事——確定規則「同じ停車の中＋広がり15m」）
+     *   ② `stop_visit_event` を **1行だけ** 書く（`stop_card_id=NULL`・押下時の実測 lat/lon・trigger=MANUAL）。
+     *      **押下経路に足してよいのは event 1行 insert まで**（オーナー確定の性能境界）。
+     *      **吸着はしない**（最寄りカードへの記録時吸着＝#17 で24件中21件が 300m〜3.3km の誤吸着、の根の除去。
+     *      これをもって旧 `stopMasters`/`loadStopMasters` は読み手を失い撤去済み）
+     *   ③ HIRES 単写は最後（失敗しても①②は確定済み＝押下は消えない）。**成功したら押下イベントへ
+     *      `hires_frame_id` を結ぶ**——筆頭写真はこの参照からの**正選択のみ**
+     *      （design-gate 条件「AUTO を判定する組み込みコードを書かない」＝排除ではなく参照で選ぶ）。
      *
-     * 【S0-a 4分岐フィードバック、2026-07-15追加、S0-dで位置鮮度チェックを追加、2026-07-16】
-     * 実車事故（本番運行セッション#17、2026-07-15、FULL_RUN・77分）：カメラが1枚も撮影しないまま
-     * マーカーボタンを24回押し、24回とも成功の振動・Toastを受け取っていた。実際は毎回下記(b)の
-     * LORESフレーム探索が失敗し、黙って捨てられていた。この事故を防ぐため、押下結果を4分岐で
-     * 正直に伝える。
-     *   1. 現在地未取得：`cameraCaptureController.lastKnownLocation`がnull → 振動なし＋Toast
-     *   2. カード無し（`nearest == null`）→ 振動なし＋Toast（従来どおり）
-     *   3. 位置情報が古すぎる（S0-d、2026-07-16追加）：`lastKnownLocation`は測位停止中も凍結した
-     *      古い値のまま残り続けるため（`GnssHealthMonitor`のクラスKDoc参照）、押下時点での経過時間が
-     *      [STALE_LOCATION_THRESHOLD_MS]以上なら「成功」として扱わない →
-     *      成功・映像なしのいずれとも区別できる振動パターン＋Toastで位置の不確かさを明示する
-     *   4. 完全成功：`stop_visit_event`記録 ＋ LORESフレームへのマーク成功 → 成功の振動＋Toast
-     *      （映像が無ければ部分成功＝映像なしとして扱う。これは3の位置鮮度チェックとは独立）
+     * 旧実装（〜2026-08-02）の4つの沈黙/失敗分岐（デバウンス無言 return・現在地なし・カードなし・
+     * LORES探索失敗＝S0-a 4分岐）はこの形で全廃——**どの押下も必ず記録され、必ず手応えが返る**。
+     * 計測 JSONL（`poc_press_log.jsonl`）は **debug ビルドのみ**継続（field には event 行だけが残る）。
      */
     private fun onManualStopMark(clickSeq: Int? = null) {
         // よーいドン式（2026-08-01）: 通知にはカメラ準備完了までボタンが出ないはずだが、
         // 念のためサービス側でも二重に防ぐ（画面側のボタンも準備中はenabled=falseで無効化される）。
         if (!(cameraReadyActive || noCameraMode)) return
-        // ------------------------------------------------------------------
-        // POC段階1（2026-07-31）: 玄関の再設計（記録先行・撮影後付け・吸着なし・無言分岐なし）の検証装置。
-        // **debug ビルド種別限定**。⚠ BuildConfig.DEBUG では判定しない——field も isDebuggable=true のため
-        // DEBUG が true になり、実データを持つ記録用ビルドへ POC が漏れる（癖リスト0「既定で有効な他経路」）。
-        // ------------------------------------------------------------------
-        if (BuildConfig.BUILD_TYPE == "debug") {
-            pocManualStopMark(clickSeq)
-            return
-        }
-        if (isDebounced(lastStopMarkElapsedMs)) return
-        lastStopMarkElapsedMs = SystemClock.elapsedRealtime()
+
+        // ① 押下の事実を最初に固定する
+        val pressTs = System.currentTimeMillis()
+        val pressErtNs = SystemClock.elapsedRealtimeNanos()
+        val seq = pocPressSeq.incrementAndGet()
 
         val location = cameraCaptureController?.lastKnownLocation
-        if (location == null) {
-            // 以前は下のnearest==nullの分岐に紛れ込んでいたが、「現在地が取れていない」ことと
-            // 「近くにカードが無い」ことは原因が別であり、誤ったメッセージは調査を混乱させる
-            // （S0-a同様の考え方）。
-            Log.w(TAG, "手動停留所マーク: 現在地が取得できていないため記録できません")
-            Toast.makeText(this, "現在地が取得できていません", Toast.LENGTH_SHORT).show()
-            return
-        }
+        val locAgeMs = location?.let { (pressErtNs - it.elapsedRealtimeNanos) / 1_000_000L }
 
-        val nearest = stopMasters.minByOrNull {
-            GeoMath.haversineM(location.latitude, location.longitude, it.latitude, it.longitude)
-        }
-        if (nearest == null) {
-            // 要確認（設計との齟齬）：stop_visit_event.stop_card_id はNOT NULL・FK RESTRICT
-            // （core.data.StopVisitEventEntity）のため、登録済み停留所が1件も無い場合はイベント行を
-            // 作成できない。設計書§4.8.1は「未登録の臨時停車」も手動ボタンの対象に挙げているが、
-            // フェーズ0で凍結済みのスキーマ上は表現できない。
-            // HIRES撮影をやめた新方式では stop_card_id 参照が無くマーカーもイベントも作れないため、
-            // 写真保存はせず警告ログのみに留める。
-            // 実車データ(session8, 2026-07-13)で「押下しても効いていないように見えて数十秒後に
-            // 再押しする」誤操作が確認されたため、無反応にせずToastで明示する（振動はしない＝
-            // 成功時の振動パターンと区別できるようにする）。
-            Log.w(TAG, "手動停留所マーク: 対象停留所を特定できないため記録できません")
-            Toast.makeText(this, "近くに停留所カードがありません", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        // S0-d：測位が止まっていても cameraCaptureController.lastKnownLocation は最後の値のまま
-        // 凍結し続ける（`GnssHealthMonitor`のクラスKDoc参照）。押下時点でこの位置がどれだけ古いか
-        // 確認する。Location.elapsedRealtimeNanos は SystemClock.elapsedRealtimeNanos() と同一の
-        // 単調クロックなので、壁時計変更の影響を受けずに正しく経過時間を計算できる。
-        val locationAgeMs = (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000L
-        val isStaleLocation = locationAgeMs >= STALE_LOCATION_THRESHOLD_MS
-
-        val markTs = System.currentTimeMillis()
-        val distance = GeoMath.haversineM(location.latitude, location.longitude, nearest.latitude, nearest.longitude)
-        val stopLabel = nearest.name?.takeIf { it.isNotBlank() } ?: "停留所#${nearest.id}"
+        // 手応えは毎押下・即時。「押下が記録された」の意味に限定する（写真の成否はここでは分からない）
+        vibrateMarkSuccess()
+        shutterSound.play(MediaActionSound.SHUTTER_CLICK)
+        Toast.makeText(
+            this,
+            "記録 ${seq}件目" + (if (location == null) "（現在地なし）" else ""),
+            Toast.LENGTH_SHORT,
+        ).show()
 
         lifecycleScope.launch {
-            sessionRepository.recordStopVisitEvent(
-                stopCardId = nearest.id,
-                eventType = StopVisitEventType.ARRIVED,
-                triggerType = StopVisitTriggerType.MANUAL,
-                location = location,
-                distanceAtEventM = distance,
-                positionErrorM = distance,
-                hiresFrameId = null,
-            )
-            // 位置情報の記録はここまでで完了している（＝「失敗」ではない）。以降はLORESフレームへの
-            // マーカー付与が成功したかどうか・位置がどれだけ古いかだけで、振動・Toastの内容を出し分ける。
-            stopMarkCount++
-
-            val frameId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = markTs)
-            if (frameId != null) {
-                sessionRepository.markStopCardOnLoresFrame(frameId, nearest.id)
+            // ② v20: 押下イベント1行（カードなし・押下時の実測位置・押下時刻）
+            val eventId = try {
+                sessionRepository.recordStopVisitEvent(
+                    stopCardId = null,
+                    eventType = StopVisitEventType.ARRIVED,
+                    triggerType = StopVisitTriggerType.MANUAL,
+                    location = location,
+                    distanceAtEventM = null,
+                    positionErrorM = null,
+                    hiresFrameId = null,
+                    eventTs = pressTs,
+                )
+            } catch (e: IllegalStateException) {
+                // セッション終了直後の押下など。debug なら押下の痕跡は計測ログに残る
+                Log.w(TAG, "手動停留所マーク: セッション未開始のためイベント行を書けません", e)
+                null
             }
 
-            // S0-d：位置が古すぎる場合は、映像の有無に関わらず「成功」の振動は鳴らさない。
-            // 記録自体（位置・可能なら映像タグ）は行う（古くても無いよりはまし、という既存方針を
-            // 踏襲）が、位置の信頼度を正直に伝える。
-            when {
-                isStaleLocation -> {
-                    Log.w(
-                        TAG,
-                        "手動停留所マーク: 位置情報が${locationAgeMs}ms前と古いため、成功として扱いません stopCardId=${nearest.id}"
-                    )
-                    vibrateMarkStaleLocation()
-                    Toast.makeText(
-                        this@BusRecordingService,
-                        "${stopLabel}を記録しましたが、位置情報が${locationAgeMs / 1000}秒前のものです。位置がずれている場合があります。",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-                frameId != null -> {
-                    vibrateMarkSuccess()
-                    shutterSound.play(MediaActionSound.SHUTTER_CLICK) // UI改善2: 完全成功時のみ（映像なしで鳴らすと嘘になる）
-                    Toast.makeText(
-                        this@BusRecordingService, "停留所マーク: ${stopLabel}（${stopMarkCount}件目）", Toast.LENGTH_SHORT
-                    ).show()
-                }
-                else -> {
-                    // ここがセッション#17で24回連続発生した箇所。位置は記録済みだが映像側に異常がある
-                    // ことを、成功時とは違う振動パターン・より長く表示するToastではっきり伝える。
-                    Log.w(TAG, "手動停留所マーク: マーカーを付与するLORESフレームが見つかりません stopCardId=${nearest.id}")
-                    vibrateMarkNoVideo()
-                    Toast.makeText(
-                        this@BusRecordingService,
-                        "${stopLabel}の位置は記録しました。ただし映像が撮れていません。",
-                        Toast.LENGTH_LONG,
-                    ).show()
+            // 計測（debug ビルドのみ・POC の装置を維持）: press 行
+            if (BuildConfig.BUILD_TYPE == "debug") {
+                val loresBeforeId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = pressTs)
+                sessionRepository.appendPocPressLog(JSONObject().apply {
+                    put("ev", "press")
+                    put("seq", seq)
+                    put("t", pressTs)
+                    put("ert", pressErtNs)
+                    put("lat", location?.latitude ?: JSONObject.NULL)
+                    put("lon", location?.longitude ?: JSONObject.NULL)
+                    put("spd", location?.takeIf { it.hasSpeed() }?.speed?.toDouble() ?: JSONObject.NULL)
+                    put("acc", location?.takeIf { it.hasAccuracy() }?.accuracy?.toDouble() ?: JSONObject.NULL)
+                    put("loc_age_ms", locAgeMs ?: JSONObject.NULL)
+                    put("lores_before_id", loresBeforeId ?: JSONObject.NULL)
+                    put("event_id", eventId ?: JSONObject.NULL)
+                    put("click_seq", clickSeq ?: JSONObject.NULL)
+                    put("src", if (clickSeq == null) "notif" else "screen")
+                })
+            }
+
+            // ③ HIRES は最後。captureToFile を使う（失敗コールバックを持つのは後者だけ＝失敗も測る）
+            val controller = cameraCaptureController
+            if (controller == null) {
+                logHiresResult(seq, "no_camera", 0L, null, null)
+                return@launch
+            }
+            val hiresFile = try {
+                sessionRepository.newHiResFile(HiResReason.STOP_MANUAL)
+            } catch (e: IllegalStateException) {
+                logHiresResult(seq, "no_session", 0L, null, null)
+                return@launch
+            }
+            val hiresStartMs = SystemClock.elapsedRealtime()
+            controller.captureToFile(
+                hiresFile,
+                location,
+                onFailure = {
+                    lifecycleScope.launch {
+                        logHiresResult(seq, "fail", SystemClock.elapsedRealtime() - hiresStartMs, null, null)
+                    }
+                },
+            ) { file ->
+                lifecycleScope.launch {
+                    val frameId = try {
+                        sessionRepository.recordHiResFrame(file, System.currentTimeMillis(), location)
+                    } catch (e: IllegalStateException) {
+                        null
+                    }
+                    // 押下イベント → HIRES の参照を結ぶ（筆頭写真の唯一の正選択経路）
+                    if (eventId != null && frameId != null) {
+                        sessionRepository.linkHiresFrameToEvent(eventId, frameId)
+                    }
+                    logHiresResult(seq, "ok", SystemClock.elapsedRealtime() - hiresStartMs, frameId, file.length())
                 }
             }
         }
     }
 
+    /** 計測 JSONL の hires 行（debug ビルドのみ書く。field では何もしない）。 */
+    private suspend fun logHiresResult(seq: Int, result: String, ms: Long, frameId: Long?, bytes: Long?) {
+        if (BuildConfig.BUILD_TYPE != "debug") return
+        sessionRepository.appendPocPressLog(pocHiresResult(seq, result, ms, frameId, bytes))
+    }
+
     // ------------------------------------------------------------------
-    // POC段階1（2026-07-31）: 玄関の再設計の検証装置。debug ビルド種別のみ到達（onManualStopMark 冒頭のガード）。
+    // 押下計測（POC 段階1 由来・2026-07-31）: JSONL 計測は debug ビルドのみ（onManualStopMark 内のガード）。
     // ------------------------------------------------------------------
 
     /** POC押下の通し番号（サービス生存期間内で単調増加。ログ行の突き合わせキー）。 */
@@ -637,98 +607,6 @@ class BusRecordingService : LifecycleService() {
      */
     private val shutterSound by lazy {
         MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
-    }
-
-    /**
-     * POC版の停留所マーク。検証したい玄関の形＝
-     *   ① 押下の事実と測位を最優先で確定する（カード0件でも・連打でも・毎回。#2 の「何も残らない」の逆）
-     *   ② 押下直前の LORES フレームを特定だけする（`stop_card_id` タグは付けない＝既存テーブル・既存読み手は不変）
-     *   ③ 最後に HIRES 単写を投げる（失敗しても①②は確定済み＝測位は消えない）
-     * 従来の4つの沈黙/失敗分岐（デバウンス無言 return・現在地なし・カードなし・LORES探索失敗）を
-     * すべて「記録したうえでフィードバック」へ置き換える。連打も間引かず全押下を記録する
-     * （0〜10秒に20回押せば20行残る——ノイズの実態こそが計測対象。間引きの要否はデータで決める）。
-     * 計測は `sessions/<id>/poc_press_log.jsonl` へ（[RecordingSessionRepository.appendPocPressLog]）。
-     * `stop_visit_event` へは一切書かない（stop_card_id NOT NULL の v20 nullable 化＝版鋳造＝官房マターは
-     * POC の実測が出てから起案する。測ってから鋳造する）。
-     */
-    private fun pocManualStopMark(clickSeq: Int? = null) {
-        // ① 押下の事実を最初に固定する（この3行より前に return する分岐を作らない）
-        val pressTs = System.currentTimeMillis()
-        val pressErtNs = SystemClock.elapsedRealtimeNanos()
-        val seq = pocPressSeq.incrementAndGet()
-
-        val location = cameraCaptureController?.lastKnownLocation
-        val locAgeMs = location?.let { (pressErtNs - it.elapsedRealtimeNanos) / 1_000_000L }
-
-        // 手応えは毎押下・即時。「押下が記録された」の意味に限定する（写真の成否はここでは分からない）
-        vibrateMarkSuccess()
-        shutterSound.play(MediaActionSound.SHUTTER_CLICK)
-        Toast.makeText(
-            this,
-            "POC ${seq}件目" + (if (location == null) "（現在地なし）" else ""),
-            Toast.LENGTH_SHORT,
-        ).show()
-
-        lifecycleScope.launch {
-            // ② 押下“直前”の LORES を特定だけする。Δt・前後間隔は解析側が capturedAt と突き合わせて出す
-            val loresBeforeId = sessionRepository.findClosestLoresFrameId(before = true, tsEpochMs = pressTs)
-
-            sessionRepository.appendPocPressLog(JSONObject().apply {
-                put("ev", "press")
-                put("seq", seq)
-                put("t", pressTs)
-                put("ert", pressErtNs)
-                put("lat", location?.latitude ?: JSONObject.NULL)
-                put("lon", location?.longitude ?: JSONObject.NULL)
-                put("spd", location?.takeIf { it.hasSpeed() }?.speed?.toDouble() ?: JSONObject.NULL)
-                put("acc", location?.takeIf { it.hasAccuracy() }?.accuracy?.toDouble() ?: JSONObject.NULL)
-                put("loc_age_ms", locAgeMs ?: JSONObject.NULL)
-                put("lores_before_id", loresBeforeId ?: JSONObject.NULL)
-                // 追加計測（2026-08-01）: 画面側の onClick 通し番号。**null = 通知バーのボタン由来**。
-                // 解析は「`ui`行に click があるのに、同じ click_seq の press 行が無い」＝配送の欠落、
-                // 「press があるのに click が無い（＝cancel 行がある）」＝ジェスチャのキャンセル、と読み分ける。
-                put("click_seq", clickSeq ?: JSONObject.NULL)
-                put("src", if (clickSeq == null) "notif" else "screen")
-            })
-
-            // ③ HIRES は最後。captureHiRes でなく captureToFile を使う——失敗コールバックを持つのは後者だけで、
-            //    「失敗も含めて測る」POC に、失敗が黙って消える経路（captureHiRes の onFailure={}）は使えない
-            val controller = cameraCaptureController
-            if (controller == null) {
-                sessionRepository.appendPocPressLog(pocHiresResult(seq, "no_camera", 0L, null, null))
-                return@launch
-            }
-            val hiresFile = try {
-                sessionRepository.newHiResFile(HiResReason.STOP_MANUAL)
-            } catch (e: IllegalStateException) {
-                sessionRepository.appendPocPressLog(pocHiresResult(seq, "no_session", 0L, null, null))
-                return@launch
-            }
-            val hiresStartMs = SystemClock.elapsedRealtime()
-            controller.captureToFile(
-                hiresFile,
-                location,
-                onFailure = {
-                    lifecycleScope.launch {
-                        sessionRepository.appendPocPressLog(
-                            pocHiresResult(seq, "fail", SystemClock.elapsedRealtime() - hiresStartMs, null, null)
-                        )
-                    }
-                },
-            ) { file ->
-                lifecycleScope.launch {
-                    // セッションが撮影完了前に終了していたら DB 行は起こせないが、ログには成否を残す
-                    val frameId = try {
-                        sessionRepository.recordHiResFrame(file, System.currentTimeMillis(), location)
-                    } catch (e: IllegalStateException) {
-                        null
-                    }
-                    sessionRepository.appendPocPressLog(
-                        pocHiresResult(seq, "ok", SystemClock.elapsedRealtime() - hiresStartMs, frameId, file.length())
-                    )
-                }
-            }
-        }
     }
 
     /**
@@ -780,28 +658,14 @@ class BusRecordingService : LifecycleService() {
             put("bytes", bytes ?: JSONObject.NULL)
         }
 
-    /** 通知アクションボタンの二度押し対策。前回発火からの経過時間が短ければtrue。 */
-    private fun isDebounced(previousElapsedMs: Long, intervalMs: Long = NOTIFICATION_BUTTON_DEBOUNCE_MS): Boolean =
-        SystemClock.elapsedRealtime() - previousElapsedMs < intervalMs
-
     /**
      * 停留所マーク完全成功時の触覚フィードバック（短-強の2連、2026-07-13強化）。
      * 実車データ(session8)で「押した実感が無く再押ししてしまう」誤操作が確認されたため、
      * 単発50msの[VibrationEffect.createOneShot]から、はっきり分かる波形パターンへ変更した。
-     * カード無し（[isDebounced]直後の分岐）は振動しない（Toastのみ）ことで成功/失敗を区別できるようにする。
+     * v20（2026-08-02）以降は毎押下で必ず鳴る（沈黙分岐の全廃）。
      */
     private fun vibrateMarkSuccess() {
         vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1))
-    }
-
-    /**
-     * 停留所マーク「部分成功＝映像なし」時の触覚フィードバック（S0-a、2026-07-15追加）。
-     * [vibrateMarkSuccess]の「短-短」パターンと逆順の「長-短」にすることで、走行中に画面を見なくても
-     * 触感だけで完全成功と区別できるようにする（オーナー観察：振動自体は感じ取りにくいため、
-     * 主表示はS0-cの画面側に置き、振動はあくまで気づきのきっかけと位置付ける）。
-     */
-    private fun vibrateMarkNoVideo() {
-        vibrate(VibrationEffect.createWaveform(longArrayOf(0, 120, 80, 40), -1))
     }
 
     /**
@@ -818,14 +682,6 @@ class BusRecordingService : LifecycleService() {
      */
     private fun vibrateGnssWarning() {
         vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300, 200, 300), -1))
-    }
-
-    /**
-     * 停留所マーク時、位置情報が古すぎて信用できない場合の触覚フィードバック（S0-d、2026-07-16追加）。
-     * 既存の成功（短-短）・映像なし（長-短）と区別できるよう、短連打3回にする。
-     */
-    private fun vibrateMarkStaleLocation() {
-        vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 40, 40, 40, 40), -1))
     }
 
     /** [VibrationEffect]をAPIバージョンに応じた経路で発火する共通ヘルパー（2026-07-15、3パターンへの拡張に伴い共通化）。 */
@@ -987,7 +843,6 @@ class BusRecordingService : LifecycleService() {
 
         private const val SHOCK_PRE_WINDOW_MS = 2_000L
         private const val SHOCK_POST_WINDOW_MS = 3_000L
-        private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
 
         /**
          * 停車ストップウォッチの閾値（km/h）。人と機械の停車認識を合わせる、というこの表示の目的
@@ -1007,17 +862,5 @@ class BusRecordingService : LifecycleService() {
         /** よーいドン式: カメラ起動待ちの上限（2回目以降のリトライ）。 */
         private const val CAMERA_READY_TIMEOUT_RETRY_MS = 10_000L
 
-        /**
-         * 手動停留所マーク時、lastKnownLocationの経過時間がこれ以上古ければ「信用できない」と判定する
-         * しきい値（S0-d、2026-07-16追加）。
-         *
-         * 60秒とした理由：GnssHealthMonitor（衛星ベースの継続監視、LOST_FIX_TIMEOUT_MS=30秒）が
-         * 既に画面・通知で持続的な警告を出しているため、この値は「マーク押下という一瞬の操作に対する
-         * 補助的なバックストップ」と位置付ける。ただし実データ（本番セッション#8）では距離フィルタにより
-         * 正常な長時間停車でも位置更新が最大271秒来ないことが確認されている。60秒はこの実測最大値より
-         * 短いため、非常に長い停車中に押すと稀に誤って「古い」と判定される可能性がある
-         * （＝この値は完全に安全ではないトレードオフ。オーナー確認事項として報告する）。
-         */
-        private const val STALE_LOCATION_THRESHOLD_MS = 60_000L
     }
 }

@@ -260,6 +260,12 @@ data class CourseCreationStopPreview(
     val longitude: Double,
     /** [cardId] のカードが拠点（[BusStopCardEntity.isHub]）かどうか。拠点分割UIの初期選択に使う。 */
     val isHubCandidate: Boolean,
+    /** v20: この点に畳まれた押下数（1=畳みなし）。「同じ停車の中」の連打・押し直しが1停留所に見えている数。 */
+    val foldedPressCount: Int = 1,
+    /** v20: 畳まなかった理由（広がり15m超過）。畳んだ点・単独点は null。画面と EX への報告に使う。 */
+    val foldNote: String? = null,
+    /** v20: 畳んだグループの差し渡し（`course_stop.error_space_m`）。 */
+    val errorSpaceM: Double? = null,
 )
 
 /** [splitCourseCreationStops] が返す1断片（拠点マーク間の非拠点点列）。 */
@@ -1700,6 +1706,12 @@ class CourseRepository(
         val eventId: Long?,
         val latitude: Double,
         val longitude: Double,
+        /** v20: 畳んだグループの差し渡し（`course_stop.error_space_m` へ書く）。単独押下は null。 */
+        val errorSpaceM: Double? = null,
+        /** v20: この点に畳まれた押下数（1=畳みなし）。画面の「N回押下」表示用。 */
+        val foldedPressCount: Int = 1,
+        /** v20: 畳まなかった理由（広がり超過）。畳んだ点・単独点は null。 */
+        val foldNote: String? = null,
     )
 
     /**
@@ -1794,7 +1806,11 @@ class CourseRepository(
                 longitude = lon,
             )
         }
-        val eventPoints = orphanEvents.map { event ->
+        // v20（2026-08-02・design-gate 済み）: カードなし押下（新しい玄関の産物）は確定規則で畳む。
+        // カードつきの旧 MANUAL イベントは従来どおり1件=1点（歴史データ＝「版つき原本」方針・畳まない）。
+        val (cardlessEvents, legacyEvents) = orphanEvents.partition { it.stopCardId == null }
+
+        val legacyPoints = legacyEvents.map { event ->
             val (lat, lon) = requireNotNull(
                 resolveStopPosition(eventLatitude = event.lat, eventLongitude = event.lon)
             ) { "manualEventsはlat!=null/lon!=nullで絞っているはず" }
@@ -1807,6 +1823,30 @@ class CourseRepository(
                 longitude = lon,
             )
         }
+
+        val foldedPoints = if (cardlessEvents.isEmpty()) emptyList() else {
+            val track = gpsPointDao.getBySession(sessionId).map { PressFolder.TrackPoint(it.tsEpochMs, it.lat, it.lon) }
+            val presses = cardlessEvents
+                .sortedBy { it.eventTs }
+                .map { PressFolder.Press(eventId = it.id, ts = it.eventTs, lat = it.lat!!, lon = it.lon!!) }
+            PressFolder.fold(presses, track).groups.map { g ->
+                // 代表＝先頭の押下（実記録）。座標もイベント参照も筆頭写真（hires_frame_id）も先頭から。
+                // 代表座標を計算で作らない＝出自は RECORDED のまま、畳んだ範囲は error_space_m が持つ。
+                val rep = g.representative
+                DraftCourseStop(
+                    capturedAt = rep.ts,
+                    frameId = null,
+                    cardId = null,
+                    eventId = rep.eventId,
+                    latitude = rep.lat,
+                    longitude = rep.lon,
+                    errorSpaceM = if (g.folded) g.spanM else null,
+                    foldedPressCount = g.presses.size,
+                    foldNote = g.unfoldedReason,
+                )
+            }
+        }
+        val eventPoints = legacyPoints + foldedPoints
 
         return (framePoints + eventPoints).sortedBy { it.capturedAt }
     }
@@ -1870,6 +1910,9 @@ class CourseRepository(
                 latitude = p.latitude,
                 longitude = p.longitude,
                 isHubCandidate = card?.isHub == true,
+                foldedPressCount = p.foldedPressCount,
+                foldNote = p.foldNote,
+                errorSpaceM = p.errorSpaceM,
             )
         }
     }
@@ -1907,6 +1950,9 @@ class CourseRepository(
                     eventId = stop.eventId,
                     sequenceIndex = index,
                     expectedChainageM = null, // 成熟（regenerateCourseSegments）後にRoutePreprocessorが再計算
+                    // v20: 畳んだ点は「まとめた範囲＝差し渡し」を空間誤差として持つ（官房裁定・正典 条2）。
+                    // 座標は先頭押下の実記録なので provenance は既定の RECORDED のまま。
+                    errorSpaceM = stop.errorSpaceM,
                 )
             }
         )
