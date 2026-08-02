@@ -13,7 +13,7 @@ import kotlin.math.sqrt
  *
  * `core.geo` は基盤レイヤーであり、`recording` パッケージの型（`StopMaster`等）には依存しない。
  * 設計書§4.8.2の擬似コードは `haversineM(loc: Location, stop: StopMaster): Double` という
- * シグネチャだが、`StopMaster` は `recording.StopDetector` 側の値オブジェクトのため、
+ * シグネチャだが、`StopMaster` は `recording` パッケージ側の値オブジェクトのため、
  * ここでは緯度経度のプリミティブ値を受け取る形に一般化した（呼び出し側で
  * `GeoMath.haversineM(loc.latitude, loc.longitude, stop.latitude, stop.longitude)` のように使う）。
  */

@@ -8,7 +8,7 @@ package com.istech.buscourse.recording
  * 「成功」の振動・Toastを受け取り、誰も77分間気づけなかった。この再発防止として、記録中
  * 定期的にLORESフレームの累計枚数を監視し、増加していなければ異常とみなす。
  *
- * `StopDetector`・`ThermalGuard`と同様、Androidコンポーネントに依存しない純粋ロジックとして
+ * `ThermalGuard`・`GnssHealthMonitor`と同様、Androidコンポーネントに依存しない純粋ロジックとして
  * 切り出す（JVM単体テスト可能）。呼び出し元（`BusRecordingService`）が一定間隔（20秒を想定）で
  * [evaluate] にDB上の累計フレーム数を渡す。
  */

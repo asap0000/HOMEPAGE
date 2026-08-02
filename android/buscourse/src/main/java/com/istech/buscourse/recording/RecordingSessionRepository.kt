@@ -34,10 +34,19 @@ import java.util.concurrent.atomic.AtomicInteger
 /** `timelapse_frame.kind` の許容値（設計書§3.5、D6）。 */
 enum class FrameKind { LORES, HIRES }
 
-/** `stop_visit_event.event_type` の許容値（設計書§3.5・§3.6）。StopDetectorはARRIVEDのみ発火させる（§4.8.2）。 */
+/**
+ * `stop_visit_event.event_type` の許容値（設計書§3.5・§3.6）。
+ * **現在アプリが書くのは ARRIVED のみ**（他の3値は設計書由来で、書き手は存在しない）。
+ */
 enum class StopVisitEventType { APPROACHING, ARRIVED, PASSED, MISSED }
 
-/** `stop_visit_event.trigger_type` の許容値（設計書§4.8.1）。ARRIVED時のみ意味を持つ。 */
+/**
+ * `stop_visit_event.trigger_type` の許容値（設計書§4.8.1）。ARRIVED時のみ意味を持つ。
+ *
+ * **⚠ [AUTO] の書き手は 2026-08-02 に撤去済み**（停留所自動検知＝`StopDetector`。退役はオーナー確定済みだったが
+ * 実装が残存し、実走 #35 で2回発火してカメラを奪っていた）。**値は既存データが持つため残す**
+ * （過去セッションの `trigger_type='AUTO'` 行を読めなくしない）。**新規に書かれることはない。**
+ */
 enum class StopVisitTriggerType { AUTO, MANUAL }
 
 /** `recording_session.status` の許容値（設計書§4.4）。 */

@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * 記録エンジンFGS本体（設計書§4.1〜§4.4）。`foregroundServiceType = "camera|location"`。
  *
- * 各Controller（[CameraCaptureController] / [GnssLocationSource] / [StopDetector] /
+ * 各Controller（[CameraCaptureController] / [GnssLocationSource] /
  * [ShockDetector] / [ThermalGuard] / [RecordingSessionRepository] / [RecordingNotificationManager]）の
  * 起動・停止を統括する。起動は必ずフォアグラウンドUIの「運行開始」操作を起点にし（§4.3）、
  * `onStartCommand` は `START_NOT_STICKY` を返す（§4.4：`ACCESS_BACKGROUND_LOCATION`を要求しない
@@ -80,7 +80,6 @@ class BusRecordingService : LifecycleService() {
 
     private var cameraCaptureController: CameraCaptureController? = null
     private var gnssLocationSource: GnssLocationSource? = null
-    private var stopDetector: StopDetector? = null
     private var shockDetector: ShockDetector? = null
     private var shockHandlerThread: HandlerThread? = null
     private var thermalGuard: ThermalGuard? = null
@@ -230,7 +229,6 @@ class BusRecordingService : LifecycleService() {
                 gnssHealthMonitor.reset()
 
                 stopMasters = loadStopMasters(courseId)
-                stopDetector = StopDetector(stopMasters)
 
                 val camera = CameraCaptureController(this@BusRecordingService, this@BusRecordingService, sessionRepository)
                 cameraCaptureController = camera
@@ -343,7 +341,7 @@ class BusRecordingService : LifecycleService() {
         if (gnssHealthMonitor.onLocationReceived(SystemClock.elapsedRealtime())) onGnssHealthChanged(false)
 
         // UI改善（停車ストップウォッチ、2026-07-31・オーナー承認済み）: 5km/h 以下を「停車」として
-        // UI に見せる。閾値は AUTO 検知（StopDetector.speedThresholdKmh=5.0）と同じ＝
+        // UI に見せる（閾値は [STATIONARY_THRESHOLD_KMH]）。
         // 「機械が停車と認識している時間」がそのまま見える（人と機械の停車認識を合わせる、が目的）。
         // 書き込みは**境界をまたいだ遷移時のみ**（毎秒ではない）。表示専用で、どこにも記録しない。
         // 測位・撮影のどの処理にも介入しない（この既存コールバックの末尾で値を見るだけ）。
@@ -354,16 +352,6 @@ class BusRecordingService : LifecycleService() {
             lifecycleScope.launch { recordingStateStore.setStationarySince(since) }
         }
 
-        val fired = stopDetector?.onLocation(location)
-        if (fired != null) {
-            val distance = GeoMath.haversineM(location.latitude, location.longitude, fired.latitude, fired.longitude)
-            captureAndRecordStopVisit(
-                stopCardId = fired.id,
-                triggerType = StopVisitTriggerType.AUTO,
-                location = location,
-                distanceM = distance,
-            )
-        }
     }
 
     /**
@@ -501,8 +489,10 @@ class BusRecordingService : LifecycleService() {
      * オーナー確定方針（2026-07-12、運行記録③機能）：手動マークではHIRES撮影を行わない。
      * (a) `stop_visit_event` を `hires_frame_id = null` でARRIVED記録し、(b) 押下時刻に最も近い
      * 直前のLORESフレームへ `stop_card_id` をマーカーとして付与する（②のスクラバ用）。
-     * AUTO検出（[captureAndRecordStopVisit] 経由、[onLocationUpdate] 参照）はHIRES撮影＋イベント記録の
-     * 従来方式のまま変更しない（意図的な非対称。オーナー確認済み）。
+     * ⚠ 旧KDocは「AUTO検出はHIRES撮影＋イベント記録の従来方式のまま」と書いていたが、
+     * **AUTO 検知は 2026-08-02 に撤去済み**（退役はオーナー確定済みだったが実装が残存し、実走 #35 で
+     * 2回発火してカメラを奪っていた＝セッション開始6秒後と走行中。イベントはコース創設パス1が
+     * MANUAL しか拾わないため誰にも読まれていなかった）。**現在この経路の呼び出し元は手動マークのみ。**
      *
      * 【S0-a 4分岐フィードバック、2026-07-15追加、S0-dで位置鮮度チェックを追加、2026-07-16】
      * 実車事故（本番運行セッション#17、2026-07-15、FULL_RUN・77分）：カメラが1枚も撮影しないまま
@@ -1000,8 +990,11 @@ class BusRecordingService : LifecycleService() {
         private const val NOTIFICATION_BUTTON_DEBOUNCE_MS = 2_000L
 
         /**
-         * 停車ストップウォッチの閾値（km/h）。**AUTO 検知の `StopDetector.speedThresholdKmh` と同じ値**
-         * に揃える（人と機械の停車認識を合わせる、というこの表示の目的そのもの。2026-07-31）。
+         * 停車ストップウォッチの閾値（km/h）。人と機械の停車認識を合わせる、というこの表示の目的
+         * そのもの（2026-07-31）。
+         *
+         * 由来: 撤去済みの AUTO 検知（`StopDetector.speedThresholdKmh`）が使っていた値を引き継いでいる
+         * （2026-08-02 の AUTO 撤去後は、この定数が停車判定の唯一の正）。
          */
         private const val STATIONARY_THRESHOLD_KMH = 5.0
 
