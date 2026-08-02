@@ -113,7 +113,7 @@ fun CourseListScreen(
                             onClick = {},
                             enabled = false,
                             label = {
-                                Text(if (course.kind == CourseKind.TEMPORARY.name) "臨時" else "正規")
+                                Text(courseKindBadgeLabel(course.kind))
                             },
                         )
                     }
@@ -138,7 +138,7 @@ fun CourseListScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    CourseKind.entries.forEach { kind ->
+                    listOf(CourseKind.STANDARD, CourseKind.TEMPORARY).forEach { kind ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -150,6 +150,7 @@ fun CourseListScreen(
                                 when (kind) {
                                     CourseKind.STANDARD -> "正規コース（STANDARD）"
                                     CourseKind.TEMPORARY -> "臨時編成コース（TEMPORARY）"
+                                    CourseKind.DRAFT -> error("予約は洗浄画面からのみ作成します")
                                 }
                             )
                         }
@@ -181,4 +182,10 @@ fun CourseListScreen(
             },
         )
     }
+}
+
+internal fun courseKindBadgeLabel(kind: String): String = when (kind) {
+    CourseKind.DRAFT.name -> "予約"
+    CourseKind.TEMPORARY.name -> "臨時"
+    else -> "正規"
 }

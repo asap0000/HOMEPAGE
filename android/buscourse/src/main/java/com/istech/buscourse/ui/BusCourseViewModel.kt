@@ -364,6 +364,20 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun washAndReserve(
+        sessionId: Long,
+        stayDepartM: Double,
+        onResult: (Result<com.istech.buscourse.course.WashReserveResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { repository.washAndReserve(sessionId, stayDepartM) }
+            logOutcome(result, WorkLogCategory.COURSE, "洗浄して予約") { r ->
+                "セッション#${sessionId}を洗浄して予約（停留所${r.stopCount}件）"
+            }
+            onResult(result)
+        }
+    }
+
     /**
      * find-or-create候補選択UI（思いつき2、[CourseCreateScreen] 「創設」処理のa2段、2026-07-14追加）で
      * 「付替え」を選んだフレームを、既存カードへ再吸着する。[reassignments] は frameId → 付替え先
@@ -411,7 +425,11 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             val result = runCatching { repository.createCourse(name, kind, baseCourseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの作成") {
-                "コース『$name』を作成" + if (kind == CourseKind.TEMPORARY) "（臨時）" else ""
+                "コース『$name』を作成" + when (kind) {
+                    CourseKind.TEMPORARY -> "（臨時）"
+                    CourseKind.DRAFT -> "（予約）"
+                    CourseKind.STANDARD -> ""
+                }
             }
             onResult(result)
         }

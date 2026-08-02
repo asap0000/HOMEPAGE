@@ -40,7 +40,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** `course.kind` の許容値（設計書§3.5）。Room側は素のString列（TypeConverterを増やさない、フェーズ0方針）。 */
-enum class CourseKind { STANDARD, TEMPORARY }
+enum class CourseKind { STANDARD, TEMPORARY, DRAFT }
 
 /** `course_segment.status` の許容値（設計書§3.5）。 */
 enum class CourseSegmentStatus { CONFIRMED, PENDING }
@@ -298,6 +298,20 @@ data class CourseCreationResult(
      */
     val frameOnlyStopCount: Int,
 )
+
+data class WashPreview(
+    val stops: List<CourseCreationStopPreview>,
+    val pressCount: Int,
+    val foldedPressCount: Int,
+    val oversizeChainCount: Int,
+    val noCoordPressCount: Int,
+    val gpsPointCount: Int,
+    val gpsGapPct: Double?,
+    val loresCount: Int,
+    val hiresCount: Int,
+)
+
+data class WashReserveResult(val courseId: Long, val stopCount: Int)
 
 /**
  * [stops] を拠点（[hubStopCardIds]、`cardId` がこの集合に含まれる点）で断片化する（設計ドラフトv2
@@ -1714,6 +1728,14 @@ class CourseRepository(
         val foldNote: String? = null,
     )
 
+    private data class Pass1Result(
+        val stops: List<DraftCourseStop>,
+        val pressCount: Int,
+        val foldedPressCount: Int,
+        val oversizeChainCount: Int,
+        val noCoordPressCount: Int,
+    )
+
     /**
      * `course_stop` の位置解決（[CourseStopEntity]のKDoc「位置解決の順序」参照、2026-07-16実装）。
      * 位置 = **coalesce(frame座標, event座標, card座標)**。3引数とも省略可能で、非nullの座標ペアを
@@ -1778,12 +1800,16 @@ class CourseRepository(
      *
      * 順序はセッションの時系列（撮影時刻／イベント時刻）＝一筆書き。
      */
-    private suspend fun generatePass1RawStops(sessionId: Long): List<DraftCourseStop> {
+    private suspend fun generatePass1RawStops(
+        sessionId: Long,
+        stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
+    ): Pass1Result {
         val markedLoresFrames = timelapseFrameDao.getMarkedFrames(sessionId)
             .filter { it.kind == FrameKind.LORES.name && it.latitude != null && it.longitude != null }
 
-        val manualEvents = stopVisitEventDao.getBySession(sessionId)
-            .filter { it.triggerType == StopVisitTriggerType.MANUAL.name && it.lat != null && it.lon != null }
+        val allManualEvents = stopVisitEventDao.getBySession(sessionId)
+            .filter { it.triggerType == StopVisitTriggerType.MANUAL.name }
+        val manualEvents = allManualEvents.filter { it.lat != null && it.lon != null }
 
         // 対応するマーカー付きLORESフレームが既にあるMANUALイベントは重複として除外する
         val orphanEvents = manualEvents.filter { event ->
@@ -1824,12 +1850,14 @@ class CourseRepository(
             )
         }
 
-        val foldedPoints = if (cardlessEvents.isEmpty()) emptyList() else {
+        val foldResult = if (cardlessEvents.isEmpty()) PressFolder.Result(emptyList(), 0, 0) else {
             val track = gpsPointDao.getBySession(sessionId).map { PressFolder.TrackPoint(it.tsEpochMs, it.lat, it.lon) }
             val presses = cardlessEvents
                 .sortedBy { it.eventTs }
                 .map { PressFolder.Press(eventId = it.id, ts = it.eventTs, lat = it.lat!!, lon = it.lon!!) }
-            PressFolder.fold(presses, track).groups.map { g ->
+            PressFolder.fold(presses, track, stayDepartM)
+        }
+        val foldedPoints = foldResult.groups.map { g ->
                 // 代表＝先頭の押下（実記録）。座標もイベント参照も筆頭写真（hires_frame_id）も先頭から。
                 // 代表座標を計算で作らない＝出自は RECORDED のまま、畳んだ範囲は error_space_m が持つ。
                 val rep = g.representative
@@ -1844,11 +1872,16 @@ class CourseRepository(
                     foldedPressCount = g.presses.size,
                     foldNote = g.unfoldedReason,
                 )
-            }
         }
         val eventPoints = legacyPoints + foldedPoints
 
-        return (framePoints + eventPoints).sortedBy { it.capturedAt }
+        return Pass1Result(
+            stops = (framePoints + eventPoints).sortedBy { it.capturedAt },
+            pressCount = allManualEvents.size,
+            foldedPressCount = foldResult.foldedPressCount,
+            oversizeChainCount = foldResult.oversizeChainCount,
+            noCoordPressCount = allManualEvents.size - manualEvents.size,
+        )
     }
 
     /**
@@ -1883,8 +1916,13 @@ class CourseRepository(
     }
 
     /** パス1＋パス2をまとめて実行する（[previewCourseCreation]・[createCoursesFromSession]で共用）。 */
-    private suspend fun buildPass1Pass2Stops(sessionId: Long): List<DraftCourseStop> =
-        attachPass2Cards(generatePass1RawStops(sessionId))
+    private suspend fun buildPass1Pass2Stops(
+        sessionId: Long,
+        stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
+    ): Pass1Result {
+        val pass1 = generatePass1RawStops(sessionId, stayDepartM)
+        return pass1.copy(stops = attachPass2Cards(pass1.stops))
+    }
 
     /** [DraftCourseStop] のリストを表示用の [CourseCreationStopPreview] へ変換する（カード名解決込み）。 */
     private suspend fun resolvePreviewStops(sessionId: Long, draftStops: List<DraftCourseStop>): List<CourseCreationStopPreview> {
@@ -1923,8 +1961,34 @@ class CourseRepository(
      * 拠点分割は [splitCourseCreationStops] にこの返り値と選択拠点集合を渡してUI側（純Kotlin、
      * DBアクセス無し）で行う想定（拠点選択のたびに読み取り専用の重い解析をやり直さないため）。
      */
-    suspend fun previewCourseCreation(sessionId: Long): List<CourseCreationStopPreview> = withContext(Dispatchers.IO) {
-        resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId))
+    suspend fun previewCourseCreation(
+        sessionId: Long,
+        stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
+    ): List<CourseCreationStopPreview> = withContext(Dispatchers.IO) {
+        resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId, stayDepartM).stops)
+    }
+
+    suspend fun previewWash(
+        sessionId: Long,
+        stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
+    ): WashPreview = withContext(Dispatchers.IO) {
+        val pass1 = buildPass1Pass2Stops(sessionId, stayDepartM)
+        val gps = gpsPointDao.getBySession(sessionId)
+        val durationMs = if (gps.size >= 2) gps.last().tsEpochMs - gps.first().tsEpochMs else 0L
+        val gapMs = gps.zipWithNext().sumOf { (a, b) ->
+            (b.tsEpochMs - a.tsEpochMs).takeIf { it > 3_000L } ?: 0L
+        }
+        WashPreview(
+            stops = resolvePreviewStops(sessionId, pass1.stops),
+            pressCount = pass1.pressCount,
+            foldedPressCount = pass1.foldedPressCount,
+            oversizeChainCount = pass1.oversizeChainCount,
+            noCoordPressCount = pass1.noCoordPressCount,
+            gpsPointCount = gps.size,
+            gpsGapPct = if (gps.size < 2 || durationMs <= 0L) null else gapMs.toDouble() / durationMs * 100.0,
+            loresCount = timelapseFrameDao.countBySessionAndKind(sessionId, FrameKind.LORES.name),
+            hiresCount = timelapseFrameDao.countBySessionAndKind(sessionId, FrameKind.HIRES.name),
+        )
     }
 
     /**
@@ -1973,6 +2037,8 @@ class CourseRepository(
     suspend fun findExistingCoursesFromSession(sessionId: Long): List<CourseEntity> =
         courseDao.getBySourceSession(sessionId)
 
+    suspend fun getDraftSourceSessionIds(): Set<Long> = courseDao.getDraftSourceSessionIds().toSet()
+
     /**
      * コース創設（トップダウン、パス1＋パス2、2026-07-15全面改訂）。[sessionId] からパス1（悉皆生成）
      * →パス2（吸着・昇格）で点列を作り、[hubStopCardIds] で拠点分割（[splitCourseCreationStops]）して
@@ -1995,8 +2061,9 @@ class CourseRepository(
         hubStopCardIds: Set<Long>,
         courseNames: List<String> = emptyList(),
         kind: CourseKind = CourseKind.STANDARD,
+        stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
     ): CourseCreationResult = withContext(Dispatchers.IO) {
-        val previewStops = resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId))
+        val previewStops = resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId, stayDepartM).stops)
         val fragments = splitCourseCreationStops(previewStops, hubStopCardIds)
 
         val createdCourseIds = mutableListOf<Long>()
@@ -2023,6 +2090,28 @@ class CourseRepository(
             frameOnlyStopCount = frameOnlyStopCount,
         )
     }
+
+    /**
+     * 洗浄結果を未分割の予約1本として作り直す。成形に入った予約は置き換えない規則は成形機能の
+     * 増分で導入する。現時点では成形が存在しないため、同じセッションのDRAFT全置換が正しい。
+     */
+    suspend fun washAndReserve(sessionId: Long, stayDepartM: Double): WashReserveResult =
+        withContext(Dispatchers.IO) {
+            database.withTransaction {
+                courseDao.getDraftIdsBySourceSession(sessionId).forEach { courseDao.deleteById(it) }
+                val created = createCoursesFromSession(
+                    sessionId = sessionId,
+                    hubStopCardIds = emptySet(),
+                    courseNames = listOf("#${sessionId} の予約"),
+                    kind = CourseKind.DRAFT,
+                    stayDepartM = stayDepartM,
+                )
+                WashReserveResult(
+                    courseId = checkNotNull(created.createdCourseIds.singleOrNull()) { "洗浄結果から予約を作成できませんでした" },
+                    stopCount = created.totalStopCount,
+                )
+            }
+        }
 
     // ------------------------------------------------------------------
     // パス3: 停車推定の示唆（トップダウン創設 S3、設計ドラフトv2 §3「パス3」・§4.2（軌跡コリドー）・
@@ -2076,7 +2165,7 @@ class CourseRepository(
 
         // 除外判定に使う「パス1で既に点になっている座標」。パス1自体は書き込みを伴わない純粋な
         // 素材収集のため、ここで呼んでも副作用は無い（[createCoursesFromSession]と同じ関数を再利用）。
-        val pass1Points = generatePass1RawStops(sessionId)
+        val pass1Points = generatePass1RawStops(sessionId).stops
 
         clusters.mapNotNull { cluster ->
             val dwellSec = (cluster.last().tsEpochMs - cluster.first().tsEpochMs) / 1000.0

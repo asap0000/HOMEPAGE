@@ -136,6 +136,12 @@ interface CourseDao {
     @Query("SELECT * FROM course WHERE source_session_id = :sessionId ORDER BY created_at")
     suspend fun getBySourceSession(sessionId: Long): List<CourseEntity>
 
+    @Query("SELECT source_session_id FROM course WHERE kind = 'DRAFT' AND source_session_id IS NOT NULL")
+    suspend fun getDraftSourceSessionIds(): List<Long>
+
+    @Query("SELECT id FROM course WHERE kind = 'DRAFT' AND source_session_id = :sessionId")
+    suspend fun getDraftIdsBySourceSession(sessionId: Long): List<Long>
+
     /**
      * コース削除（コース削除機能、2026-07-14追加、
      * [com.istech.buscourse.course.CourseRepository.deleteCourse]が使用）。
@@ -329,6 +335,9 @@ interface TimelapseFrameDao {
 
     @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
+
+    @Query("SELECT COUNT(*) FROM timelapse_frame WHERE session_id = :sessionId AND kind = :kind")
+    suspend fun countBySessionAndKind(sessionId: Long, kind: String): Int
 
     /**
      * 単一フレームの取得（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加）。find-or-create適用の

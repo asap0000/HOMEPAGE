@@ -145,9 +145,9 @@ class CourseRepositoryTest {
      */
     private suspend fun insertManualEvent(
         sessionId: Long,
-        stopCardId: Long,
-        lat: Double,
-        lon: Double,
+        stopCardId: Long?,
+        lat: Double?,
+        lon: Double?,
         eventTs: Long,
     ): Long = db.stopVisitEventDao().insert(
         StopVisitEventEntity(
@@ -163,6 +163,79 @@ class CourseRepositoryTest {
             hiresFrameId = null,
         )
     )
+
+    @Test
+    fun previewWash_countsAndFolding() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(100.0), 139.0, t + 2_000)
+        insertManualEvent(sessionId, null, null, null, t + 3_000)
+
+        val preview = repository.previewWash(sessionId)
+
+        assertThat(preview.pressCount).isEqualTo(4)
+        assertThat(preview.foldedPressCount).isEqualTo(1)
+        assertThat(preview.noCoordPressCount).isEqualTo(1)
+        assertThat(preview.stops).hasSize(2)
+    }
+
+    @Test
+    fun previewWash_stayDepartM_changesGrouping() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+
+        assertThat(repository.previewWash(sessionId, 20.0).stops).hasSize(1)
+        assertThat(repository.previewWash(sessionId, 0.5).stops).hasSize(2)
+    }
+
+    @Test
+    fun previewWash_gpsGapPct() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        db.gpsPointDao().insertAll(
+            listOf(0L, 1_000L, 6_000L).mapIndexed { index, offset ->
+                GpsPointEntity(
+                    sessionId = sessionId,
+                    seq = index,
+                    tsEpochMs = t + offset,
+                    elapsedRealtimeNanos = offset * 1_000_000,
+                    lat = 35.0,
+                    lon = 139.0,
+                    altM = null,
+                    speedMps = null,
+                    bearingDeg = null,
+                    accuracyM = null,
+                )
+            }
+        )
+
+        assertThat(repository.previewWash(sessionId).gpsGapPct).isWithin(0.01).of(5_000.0 / 6_000.0 * 100.0)
+        assertThat(repository.previewWash(insertSession()).gpsGapPct).isNull()
+    }
+
+    @Test
+    fun washAndReserve_createsDraftAndReplaces() = runTest {
+        val sessionId = insertSession()
+        val standardId = repository.createCourse("既存正規", CourseKind.STANDARD)
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+
+        val first = repository.washAndReserve(sessionId, 20.0)
+        assertThat(db.courseDao().getById(first.courseId)?.kind).isEqualTo(CourseKind.DRAFT.name)
+        assertThat(db.courseStopDao().getOrderedStops(first.courseId)).hasSize(first.stopCount)
+
+        val second = repository.washAndReserve(sessionId, 0.5)
+        assertThat(second.courseId).isNotEqualTo(first.courseId)
+        assertThat(db.courseDao().getById(first.courseId)).isNull()
+        assertThat(db.courseDao().getById(standardId)).isNotNull()
+        assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(1)
+        assertThat(db.courseStopDao().getOrderedStops(second.courseId)).hasSize(second.stopCount)
+    }
 
     /** [sessionId] に緯度方向へ直進する軌跡(seq0〜9、走行速度扱いの5.0m/s)を投入する。 */
     private suspend fun insertGpsTrack(sessionId: Long, baseLat: Double, baseLon: Double) {
