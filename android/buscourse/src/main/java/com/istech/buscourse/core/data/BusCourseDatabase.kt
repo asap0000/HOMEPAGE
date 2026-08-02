@@ -111,6 +111,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * （復元・推定した値を実記録と同格に置かない／誤差は軸ごとに別列で持つ）。
  * **実収録テーブル（`gps_point`/`timelapse_frame`/`stop_visit_event`）は一切変更しない**
  * ——官房 v18 認可条件(b)（v19 へ引き継がれた条件）。既存行は無変更で通り、`provenance` は `'RECORDED'` が入る。
+ *
+ * version 20（2026-08-02、**押下イベントのカードなし記録**。官房認可・design-gate 通過済み〔改訂復唱 y×5〕）:
+ * `stop_visit_event.stop_card_id` を NOT NULL → NULL 許容へ（[MIGRATION_19_20]）。
+ * SQLite は NOT NULL 解除を ALTER でできないため**テーブル再作成＝データ移送**
+ * （[MIGRATION_10_11] と同じ手法）。FK・索引は不変。変更理由は [StopVisitEventEntity.stopCardId] の KDoc。
+ * ⚠ v19 が守った「実収録テーブル不変」を本版は破るが、これは**列制約の緩和のみ**で
+ * 既存行の値・列構成には触れない（[BusCourseDatabaseMigration20Test] が機械担保）。
  */
 @Database(
     entities = [
@@ -159,7 +166,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
          * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
          * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
          */
-        const val SCHEMA_VERSION = 19
+        const val SCHEMA_VERSION = 20
 
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
@@ -185,6 +192,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_15_16,
                 MIGRATION_16_17,
                 MIGRATION_17_19,
+                MIGRATION_19_20,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -492,6 +500,51 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `resolved_longitude` REAL DEFAULT NULL")
                 db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `provenance` TEXT NOT NULL DEFAULT 'RECORDED'")
                 db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `error_space_m` REAL DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v20（2026-08-02）: `stop_visit_event.stop_card_id` の NOT NULL 解除（NULL 許容化）。
+         *
+         * SQLite は列の NOT NULL 解除を ALTER でできないため、[MIGRATION_10_11] と同じ
+         * テーブル再作成＝データ移送で行う。**列構成・FK 3本（session=CASCADE／stop_card=RESTRICT／
+         * hires_frame=SET_NULL）・索引2本は不変**。変わるのは `stop_card_id` の制約だけ。
+         * 既存行はすべて有効なまま移送される（制約の緩和なので値の変換は一切ない）。
+         */
+        val MIGRATION_19_20 = object : androidx.room.migration.Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 新スキーマ（stop_card_id が NULL 許容）のテーブルを別名で作成。
+                //    Room の期待スキーマ（entity 定義から生成される形）と FK・索引まで一致させる。
+                db.execSQL(
+                    "CREATE TABLE stop_visit_event_new (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "session_id INTEGER NOT NULL, " +
+                        "stop_card_id INTEGER, " +
+                        "event_type TEXT NOT NULL, " +
+                        "trigger_type TEXT, " +
+                        "event_ts INTEGER NOT NULL, " +
+                        "lat REAL, " +
+                        "lon REAL, " +
+                        "distance_at_event_m REAL, " +
+                        "position_error_m REAL, " +
+                        "hires_frame_id INTEGER, " +
+                        "FOREIGN KEY(session_id) REFERENCES recording_session(id) ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(stop_card_id) REFERENCES bus_stop_card(id) ON UPDATE NO ACTION ON DELETE RESTRICT, " +
+                        "FOREIGN KEY(hires_frame_id) REFERENCES timelapse_frame(id) ON UPDATE NO ACTION ON DELETE SET NULL)"
+                )
+                // 2. 既存データを全列そのままコピー（値の変換なし＝制約の緩和のみ）。
+                db.execSQL(
+                    "INSERT INTO stop_visit_event_new (id, session_id, stop_card_id, event_type, trigger_type, " +
+                        "event_ts, lat, lon, distance_at_event_m, position_error_m, hires_frame_id) " +
+                        "SELECT id, session_id, stop_card_id, event_type, trigger_type, " +
+                        "event_ts, lat, lon, distance_at_event_m, position_error_m, hires_frame_id FROM stop_visit_event"
+                )
+                // 3. 旧テーブルを削除して新テーブルへリネーム。
+                db.execSQL("DROP TABLE stop_visit_event")
+                db.execSQL("ALTER TABLE stop_visit_event_new RENAME TO stop_visit_event")
+                // 4. 索引を再作成（entity の indices = [session_id, stop_card_id] と同一）。
+                db.execSQL("CREATE INDEX index_stop_visit_event_session_id ON stop_visit_event (session_id)")
+                db.execSQL("CREATE INDEX index_stop_visit_event_stop_card_id ON stop_visit_event (stop_card_id)")
             }
         }
     }

@@ -153,7 +153,18 @@ data class GpsPointEntity(
 data class StopVisitEventEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     @ColumnInfo(name = "session_id") val sessionId: Long,
-    @ColumnInfo(name = "stop_card_id") val stopCardId: Long,
+    /**
+     * 訪問イベントの停留所カード参照。**v20（2026-08-02）で NULL 許容化**（官房認可・design-gate 通過済み）。
+     *
+     * NOT NULL は「押下時点でカードが未定なら書けない」を強制し、**嘘のカード id を入れる（誤吸着）か
+     * 何も残さないかの二択**を生んでいた（実車 #17＝24件中21件が誤吸着）。v20 以降の玄関は
+     * **`stop_card_id = NULL`＋押下時の実測 lat/lon** で押下を必ず記録し、カードの判定はコース創設に委ねる。
+     * FK（実在カードのみ参照可・RESTRICT）と索引は維持（SQLite は NULL を FK 違反にしない）。
+     *
+     * ⚠ 同名フィールドが3エンティティにある（本テーブル／`timelapse_frame`／`navi_event`）。
+     * grep では同じに見えるが別物（2026-08-02 に官房・当チーム双方が実際に取り違えた罠）。
+     */
+    @ColumnInfo(name = "stop_card_id") val stopCardId: Long?,
     /** APPROACHING | ARRIVED | PASSED | MISSED */
     @ColumnInfo(name = "event_type") val eventType: String,
     /** AUTO | MANUAL（ARRIVED時のみ意味を持つ） */

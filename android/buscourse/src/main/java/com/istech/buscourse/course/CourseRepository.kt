@@ -2081,14 +2081,17 @@ class CourseRepository(
             "抽出可能なセッション種別ではありません（現在: ${session.type}）"
         }
 
-        // 到着イベント（時系列順）→ 訪問停留所列。連続する同一停留所は1回とみなす
+        // 到着イベント（時系列順）→ 訪問停留所列。連続する同一停留所は1回とみなす。
+        // v20（2026-08-02）: stop_card_id が NULL のイベント（カードなし押下）は除外する
+        // ——カードなしは「停留所間の区間」を構成できないため（官房裁定「除外が自然」・design-gate 済み）。
         val arrivals = stopVisitEventDao.getBySession(sessionId)
             .filter { it.eventType == StopVisitEventType.ARRIVED.name }
             .sortedBy { it.eventTs }
         val visited = mutableListOf<Pair<Long, Long>>() // (stopCardId, eventTs)
         for (ev in arrivals) {
-            if (visited.isEmpty() || visited.last().first != ev.stopCardId) {
-                visited += ev.stopCardId to ev.eventTs
+            val cardId = ev.stopCardId ?: continue
+            if (visited.isEmpty() || visited.last().first != cardId) {
+                visited += cardId to ev.eventTs
             }
         }
         check(visited.size >= 2) {

@@ -413,9 +413,14 @@ class RecordingSessionRepository(
     // 停留所通過イベント・衝撃検知イベント
     // ------------------------------------------------------------------
 
-    /** `stop_visit_event` を記録する（設計書§4.8）。 */
+    /**
+     * `stop_visit_event` を記録する（設計書§4.8）。
+     *
+     * v20（2026-08-02）: [stopCardId] は NULL 可（カードなし押下＝押下の事実と測位だけを残す形。
+     * [StopVisitEventEntity.stopCardId] の KDoc 参照）。既存呼び出し元は従来どおり非 null を渡す。
+     */
     suspend fun recordStopVisitEvent(
-        stopCardId: Long,
+        stopCardId: Long?,
         eventType: StopVisitEventType,
         triggerType: StopVisitTriggerType?,
         location: Location?,
