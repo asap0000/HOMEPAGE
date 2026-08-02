@@ -218,6 +218,10 @@ private fun CourseCreateDialog(
         ) { padding ->
             if (loading && preview == null) {
                 Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("解析中…") }
+            } else if (preview == null) {
+                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                    Text("洗浄の解析に失敗しました。")
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(padding),

@@ -53,6 +53,7 @@ fun CourseListScreen(
     viewModel: BusCourseViewModel,
     onBack: () -> Unit,
     onOpen: (Long) -> Unit,
+    includeDrafts: Boolean = true,
 ) {
     val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -61,8 +62,8 @@ fun CourseListScreen(
     var loaded by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        courses = repository.getCourses()
+    LaunchedEffect(includeDrafts) {
+        courses = repository.getCourses().filter { includeDrafts || it.kind != CourseKind.DRAFT.name }
         loaded = true
     }
 
@@ -78,8 +79,10 @@ fun CourseListScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showCreateDialog = true }) {
-                Icon(Icons.Filled.Add, contentDescription = "新規コース")
+            if (includeDrafts) {
+                FloatingActionButton(onClick = { showCreateDialog = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "新規コース")
+                }
             }
         },
     ) { padding ->
@@ -123,7 +126,7 @@ fun CourseListScreen(
         }
     }
 
-    if (showCreateDialog) {
+    if (includeDrafts && showCreateDialog) {
         var newName by remember { mutableStateOf("") }
         var newKind by remember { mutableStateOf(CourseKind.STANDARD) }
         AlertDialog(
@@ -168,7 +171,11 @@ fun CourseListScreen(
                         // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
                         viewModel.createCourse(newName.trim(), newKind) { result ->
                             result.onSuccess { id ->
-                                scope.launch { courses = repository.getCourses() }
+                                scope.launch {
+                                    courses = repository.getCourses().filter {
+                                        includeDrafts || it.kind != CourseKind.DRAFT.name
+                                    }
+                                }
                                 onOpen(id)
                             }.onFailure { e ->
                                 Toast.makeText(context, "作成に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()

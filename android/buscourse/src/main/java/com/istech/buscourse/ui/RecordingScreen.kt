@@ -80,6 +80,7 @@ import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.CourseEntity
+import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.recording.BusRecordingService
@@ -201,7 +202,10 @@ private fun RecordingSetupContent(
     val scope = rememberCoroutineScope()
 
     var courses by remember { mutableStateOf<List<CourseEntity>>(emptyList()) }
-    LaunchedEffect(Unit) { courses = repository.getCourses() }
+    LaunchedEffect(Unit) {
+        // 予約（DRAFT）は洗浄の産物で走行・ナビの対象ではない。記録に紐づけると再洗浄の全置換で course_id が SET_NULL に消える。
+        courses = repository.getCourses().filter { it.kind != CourseKind.DRAFT.name }
+    }
 
     // よーいドン式（2026-08-01）: 親（RecordingScreen）から受け取ったMutableStateへ委譲する。
     // 失敗のたびにこのコンポーザブルは作り直されるため、ここでremember{}すると選択内容が消える

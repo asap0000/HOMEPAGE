@@ -229,6 +229,7 @@ private fun AppNavHost() {
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpen = { id -> navController.navigate("navi/$id") },
+                includeDrafts = false,
             )
         }
         composable(Routes.NAVI_MAIN) { backStackEntry ->
