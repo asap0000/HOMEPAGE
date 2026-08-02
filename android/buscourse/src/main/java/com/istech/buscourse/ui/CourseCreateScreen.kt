@@ -2,7 +2,8 @@ package com.istech.buscourse.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,11 +38,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -50,10 +51,8 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.PressFolder
 import com.istech.buscourse.course.WashPreview
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -305,29 +304,32 @@ private fun WashSpecsCard(session: RecordingSessionEntity, preview: WashPreview)
 
 @Composable
 private fun RepeatButton(label: String, enabled: Boolean, onStep: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val latestOnStep by rememberUpdatedState(onStep)
+    val isPressed by interactionSource.collectIsPressedAsState()
+    // 連続が1歩でも動いた後の release は onClick も発火するため、その1回だけ飲む（二重ステップ防止）。
+    var suppressNextClick by remember { mutableStateOf(false) }
+
+    // Button 内部の clickable が down を消費するため外側の detectTapGestures は発火しない（実機で確認）。
+    // さらにスクロール容器内では素早いタップの Press 相互作用が観測されないことがあるため、
+    // 1歩＝onClick／連続＝押しっぱなし（400ms 後から 250ms 間隔）と役割を分ける。
+    LaunchedEffect(isPressed, enabled) {
+        if (isPressed && enabled) {
+            delay(400)
+            while (isActive && enabled) {
+                latestOnStep()
+                suppressNextClick = true
+                delay(250)
+            }
+        } else {
+            suppressNextClick = false
+        }
+    }
+
     OutlinedButton(
-        onClick = {},
+        onClick = { if (suppressNextClick) suppressNextClick = false else latestOnStep() },
         enabled = enabled,
-        modifier = Modifier.pointerInput(enabled) {
-            detectTapGestures(
-                onPress = {
-                    if (enabled) {
-                        onStep()
-                        coroutineScope {
-                            val repeating = launch {
-                                delay(400)
-                                while (isActive) {
-                                    onStep()
-                                    delay(250)
-                                }
-                            }
-                            tryAwaitRelease()
-                            repeating.cancel()
-                        }
-                    }
-                },
-            )
-        },
+        interactionSource = interactionSource,
     ) { Text(label) }
 }
 
