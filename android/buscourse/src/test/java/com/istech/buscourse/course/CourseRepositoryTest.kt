@@ -6,6 +6,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.CourseStopEntity
+import com.istech.buscourse.core.data.CourseEntity
+import com.istech.buscourse.core.data.NaviBlockReason
 import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
@@ -47,6 +49,31 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = android.app.Application::class)
 class CourseRepositoryTest {
+
+    private fun courseForState(
+        kind: CourseKind = CourseKind.STANDARD,
+        updatedAt: Long = 100,
+        shapingStartedAt: Long? = null,
+        blockReason: String? = null,
+    ) = CourseEntity(
+        id = 1, name = "テスト", description = null, kind = kind.name, baseCourseId = null,
+        createdAt = 1, updatedAt = updatedAt, shapingStartedAt = shapingStartedAt,
+        naviBlockReason = blockReason,
+    )
+
+    @Test
+    fun resolveShapingState_resolvesFiveStatesInPriorityOrder() {
+        assertThat(resolveShapingState(courseForState(kind = CourseKind.DRAFT), null))
+            .isEqualTo(CourseShapingState.RESERVED)
+        assertThat(resolveShapingState(courseForState(shapingStartedAt = 1), null))
+            .isEqualTo(CourseShapingState.SHAPING)
+        assertThat(resolveShapingState(courseForState(updatedAt = 100), 100))
+            .isEqualTo(CourseShapingState.SENT)
+        assertThat(resolveShapingState(courseForState(updatedAt = 101), 100))
+            .isEqualTo(CourseShapingState.CHANGED)
+        assertThat(resolveShapingState(courseForState(updatedAt = 101, blockReason = NaviBlockReason.NO_TRACK.name), 100))
+            .isEqualTo(CourseShapingState.BLOCKED)
+    }
 
     /**
      * 緯度1度あたりのおおよその距離（m、球体近似）。70m/180m等の半径しきい値をまたぐ
@@ -237,6 +264,22 @@ class CourseRepositoryTest {
         assertThat(db.courseDao().getById(standardId)).isNotNull()
         assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(1)
         assertThat(db.courseStopDao().getOrderedStops(second.courseId)).hasSize(second.stopCount)
+    }
+
+    @Test
+    fun washAndReserve_doesNotReplaceShapedDraft() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.001, 139.0, t + 1_000)
+        val first = repository.washAndReserve(sessionId, 20.0)
+        val firstCourse = db.courseDao().getById(first.courseId)!!
+        db.courseDao().upsert(firstCourse.copy(shapingStartedAt = t))
+
+        repository.washAndReserve(sessionId, 20.0)
+
+        assertThat(db.courseDao().getById(first.courseId)).isNotNull()
+        assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(2)
     }
 
     /** [sessionId] に緯度方向へ直進する軌跡(seq0〜9、走行速度扱いの5.0m/s)を投入する。 */
@@ -1026,6 +1069,27 @@ class CourseRepositoryTest {
     // ------------------------------------------------------------------
     // setCourseStopsPreservingPointers（S6a、2026-07-18追加）
     // ------------------------------------------------------------------
+
+    @Test
+    fun setCourseStopsPreservingPointers_setsShapingStartedAtOnce() = runTest {
+        val cardId = createCard("A", 35.0, 139.0)
+        val courseId = repository.createCourse("予約", CourseKind.DRAFT)
+        val edit = listOf(CourseStopEdit(null, null, cardId))
+        repository.setCourseStopsPreservingPointers(courseId, edit)
+        val first = db.courseDao().getById(courseId)!!.shapingStartedAt
+        repository.setCourseStopsPreservingPointers(courseId, edit)
+        assertThat(first).isNotNull()
+        assertThat(db.courseDao().getById(courseId)!!.shapingStartedAt).isEqualTo(first)
+    }
+
+    @Test
+    fun setCourseStopsPreservingPointers_clearsNaviBlockReason() = runTest {
+        val cardId = createCard("A", 35.0, 139.0)
+        val courseId = repository.createCourse("成形中", CourseKind.STANDARD)
+        repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+        repository.setCourseStopsPreservingPointers(courseId, listOf(CourseStopEdit(null, null, cardId)))
+        assertThat(db.courseDao().getById(courseId)!!.naviBlockReason).isNull()
+    }
 
     /**
      * 並べ替え後も frame_id/event_id/stop_card_id はそのまま保持される（[CourseRepository.setCourseStops]

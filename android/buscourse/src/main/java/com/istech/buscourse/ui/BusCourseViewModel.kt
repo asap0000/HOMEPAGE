@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.MapDataPackageEntity
+import com.istech.buscourse.core.data.NaviBlockReason
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
@@ -20,8 +21,16 @@ import com.istech.buscourse.course.SegmentExtractionResult
 import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
+import com.istech.buscourse.navimap.NaviMapGenerationException
+import com.istech.buscourse.navimap.NaviMapGenerator
 import kotlinx.coroutines.launch
 import java.io.File
+
+sealed interface SendToNaviResult {
+    object Success : SendToNaviResult
+    data class Retryable(val message: String) : SendToNaviResult
+    data class Blocked(val reason: NaviBlockReason) : SendToNaviResult
+}
 
 /**
  * フェーズ2 UI 共有 ViewModel（設計書§2.1 course パッケージのUI面）。
@@ -61,6 +70,8 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     private val mapPackageImporter: MapPackageImporter by lazy {
         MapPackageImporter(getApplication<BusCourseApplication>(), mapRepository)
     }
+
+    private val naviMapGenerator by lazy { NaviMapGenerator(database) }
 
     /**
      * courseIdごとの編成下書き（画面破棄・戻る操作で失われないようViewModelに保持する）。
@@ -469,6 +480,50 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = repository.updateCourseIdentity(courseId, busId, courseNo, year)
             if (result == UpdateIdentityResult.Success) {
                 repository.logWork(WorkLogCategory.COURSE, "識別情報を設定（${year}年 ${busId}${courseNo}）")
+            }
+            onResult(result)
+        }
+    }
+
+    fun sendCourseToNavi(
+        courseId: Long,
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        onResult: (SendToNaviResult) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val identityResult = repository.updateCourseIdentity(courseId, busId, courseNo, year)
+            val result = when (identityResult) {
+                UpdateIdentityResult.DuplicateIdentity -> SendToNaviResult.Retryable(
+                    "同じ『${year}年 ${busId.trim()}${courseNo}コース』が別のコースに使われています。番号を変えてもう一度お試しください。"
+                )
+                UpdateIdentityResult.InvalidInput -> SendToNaviResult.Retryable("バス識別子・コース番号・年度を正しく入力してください。")
+                UpdateIdentityResult.CourseNotFound -> SendToNaviResult.Retryable("コースが見つかりませんでした。")
+                UpdateIdentityResult.Success -> {
+                    if (mapRepository.getSelected() == null) {
+                        SendToNaviResult.Retryable("オフライン地図（.iscmap）が選ばれていません。地図データ管理で選んでください。")
+                    } else {
+                        try {
+                            naviMapGenerator.generateFromCourse(courseId)
+                            SendToNaviResult.Success
+                        } catch (e: NaviMapGenerationException) {
+                            if (e.reason == NaviMapGenerationException.Reason.INSUFFICIENT_TRACK_POINTS) {
+                                repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+                                SendToNaviResult.Blocked(NaviBlockReason.NO_TRACK)
+                            } else {
+                                SendToNaviResult.Retryable("ナビ用の地図を作れませんでした。入力と地図データを確認して、もう一度お試しください。")
+                            }
+                        } catch (e: Exception) {
+                            SendToNaviResult.Retryable("ナビ用の地図を作れませんでした。入力と地図データを確認して、もう一度お試しください。")
+                        }
+                    }
+                }
+            }
+            when (result) {
+                SendToNaviResult.Success -> repository.logWork(WorkLogCategory.COURSE, "ナビ用に送る")
+                is SendToNaviResult.Blocked -> repository.logWork(WorkLogCategory.ERROR, "ナビ用に送る", result.reason.name)
+                is SendToNaviResult.Retryable -> repository.logWork(WorkLogCategory.ERROR, "ナビ用に送る", result.message)
             }
             onResult(result)
         }

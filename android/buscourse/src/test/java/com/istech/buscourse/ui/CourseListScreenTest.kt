@@ -1,14 +1,14 @@
 package com.istech.buscourse.ui
 
 import com.google.common.truth.Truth.assertThat
-import com.istech.buscourse.course.CourseKind
+import com.istech.buscourse.course.CourseShapingState
 import org.junit.Test
 
 class CourseListScreenTest {
     @Test
-    fun courseKindBadgeLabel_mapsKinds() {
-        assertThat(courseKindBadgeLabel(CourseKind.DRAFT.name)).isEqualTo("予約")
-        assertThat(courseKindBadgeLabel(CourseKind.TEMPORARY.name)).isEqualTo("臨時")
-        assertThat(courseKindBadgeLabel(CourseKind.STANDARD.name)).isEqualTo("正規")
+    fun courseStateLabel_mapsStates() {
+        assertThat(CourseShapingState.entries.map(::courseStateLabel))
+            .containsExactly("予約", "成形中", "送り済み", "変更あり", "送れません").inOrder()
+        assertThat(CourseShapingState.entries.map(::courseStateColorArgb).distinct()).hasSize(5)
     }
 }

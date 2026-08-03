@@ -15,6 +15,9 @@ import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseStopEntity
 import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.CourseWithDetails
+import com.istech.buscourse.core.data.NaviBlockReason
+import com.istech.buscourse.core.data.RecordingSessionEntity
+import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RoutePointEntity
 import com.istech.buscourse.core.data.SegmentTrackEntity
@@ -42,6 +45,25 @@ import kotlin.math.roundToInt
 
 /** `course.kind` の許容値（設計書§3.5）。Room側は素のString列（TypeConverterを増やさない、フェーズ0方針）。 */
 enum class CourseKind { STANDARD, TEMPORARY, DRAFT }
+
+enum class CourseShapingState { RESERVED, SHAPING, SENT, CHANGED, BLOCKED }
+
+data class CourseListRow(
+    val course: CourseEntity,
+    val state: CourseShapingState,
+    val blockReason: NaviBlockReason?,
+)
+
+internal fun resolveShapingState(
+    course: CourseEntity,
+    activeNaviMapCreatedAt: Long?,
+): CourseShapingState = when {
+    course.naviBlockReason != null -> CourseShapingState.BLOCKED
+    activeNaviMapCreatedAt != null && course.updatedAt > activeNaviMapCreatedAt -> CourseShapingState.CHANGED
+    activeNaviMapCreatedAt != null -> CourseShapingState.SENT
+    course.kind == CourseKind.DRAFT.name && course.shapingStartedAt == null -> CourseShapingState.RESERVED
+    else -> CourseShapingState.SHAPING
+}
 
 /** `course_segment.status` の許容値（設計書§3.5）。 */
 enum class CourseSegmentStatus { CONFIRMED, PENDING }
@@ -738,6 +760,27 @@ class CourseRepository(
 
     suspend fun getCourses(): List<CourseEntity> = courseDao.getAll()
 
+    suspend fun getCourseListRows(): List<CourseListRow> {
+        val courses = courseDao.getAll()
+        val activeMaps = database.naviMapDao().getAllActiveMaps()
+        val newestByIdentity = activeMaps.groupBy { Triple(it.busId, it.courseNo, it.year) }
+            .mapValues { (_, maps) -> maps.maxOf { it.updatedAt } }
+        return courses.map { course ->
+            val mapUpdatedAt = course.identityOrNull()?.let {
+                newestByIdentity[Triple(it.busId, it.courseNo, it.year)]
+            }
+            val reason = course.naviBlockReason?.let { runCatching { NaviBlockReason.valueOf(it) }.getOrNull() }
+            CourseListRow(course, resolveShapingState(course, mapUpdatedAt), reason)
+        }
+    }
+
+    suspend fun getRecordingSessions(): Map<Long, RecordingSessionEntity> =
+        recordingSessionDao.getAll().associateBy { it.id }
+
+    suspend fun setNaviBlockReason(courseId: Long, reason: NaviBlockReason) {
+        courseDao.getById(courseId)?.let { courseDao.upsert(it.copy(naviBlockReason = reason.name)) }
+    }
+
     suspend fun getCourseWithDetails(courseId: Long): CourseWithDetails? = courseDao.getWithDetails(courseId)
 
     /**
@@ -932,7 +975,16 @@ class CourseRepository(
                 )
             }
             courseDao.getById(courseId)?.let {
-                courseDao.upsert(it.copy(updatedAt = System.currentTimeMillis()))
+                // 保存した時点で成形に入ったことにする（開いただけでは立てない＝覗いただけで洗浄し直せなくなるのを避ける）。
+                // navi_block_reason は必ずクリアする——中身が変わったのでもう一度送れるため（design-gate の状態遷移表）。
+                val now = System.currentTimeMillis()
+                courseDao.upsert(
+                    it.copy(
+                        updatedAt = now,
+                        shapingStartedAt = it.shapingStartedAt ?: now,
+                        naviBlockReason = null,
+                    )
+                )
             }
         }
         regenerateCourseSegments(courseId)
@@ -2105,13 +2157,15 @@ class CourseRepository(
     }
 
     /**
-     * 洗浄結果を未分割の予約1本として作り直す。成形に入った予約は置き換えない規則は成形機能の
-     * 増分で導入する。現時点では成形が存在しないため、同じセッションのDRAFT全置換が正しい。
+     * 洗浄結果を未分割の予約1本として作り直す。未成形の予約だけを置き換え、保存して成形に入った
+     * 予約は比較・やり直しに使えるよう残す。
      */
     suspend fun washAndReserve(sessionId: Long, stayDepartM: Double): WashReserveResult =
         withContext(Dispatchers.IO) {
             database.withTransaction {
-                courseDao.getDraftIdsBySourceSession(sessionId).forEach { courseDao.deleteById(it) }
+                courseDao.getBySourceSession(sessionId)
+                    .filter { it.kind == CourseKind.DRAFT.name && it.shapingStartedAt == null }
+                    .forEach { courseDao.deleteById(it.id) }
                 val created = createCoursesFromSession(
                     sessionId = sessionId,
                     hubStopCardIds = emptySet(),

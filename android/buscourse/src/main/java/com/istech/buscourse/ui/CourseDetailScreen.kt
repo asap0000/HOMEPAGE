@@ -155,6 +155,8 @@ fun CourseDetailScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     // identity（bus_id/course_no/year）設定ダイアログの状態（(e) コース identity設定UI、2026-07-24追加）
     var showIdentityDialog by remember { mutableStateOf(false) }
+    var showSendDialog by remember { mutableStateOf(false) }
+    var sendBlocked by remember { mutableStateOf(false) }
     var identityBusIdInput by remember { mutableStateOf("") }
     var identityCourseNoInput by remember { mutableStateOf("") }
     var identityYearInput by remember { mutableStateOf("") }
@@ -513,6 +515,19 @@ fun CourseDetailScreen(
                     ) {
                         Text(if (busy) "処理中…" else if (dirty) "保存 *" else "保存")
                     }
+                    Button(
+                        onClick = {
+                            val identity = details?.course?.identityOrNull()
+                            identityBusIdInput = identity?.busId ?: ""
+                            identityCourseNoInput = identity?.courseNo?.toString() ?: ""
+                            identityYearInput = identity?.year?.toString() ?: ""
+                            identityError = null
+                            sendBlocked = false
+                            showSendDialog = true
+                        },
+                        enabled = !busy && !dirty && details != null,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("ナビ用に送る") }
                 }
             }
         }
@@ -682,6 +697,55 @@ fun CourseDetailScreen(
             dismissButton = {
                 TextButton(onClick = { showIdentityDialog = false }) { Text("キャンセル") }
             },
+        )
+    }
+
+    if (showSendDialog) {
+        fun send() {
+            val courseNo = identityCourseNoInput.toIntOrNull()
+            val year = identityYearInput.toIntOrNull()
+            if (courseNo == null || year == null || identityBusIdInput.isBlank()) {
+                identityError = "バス識別子・コース番号・年度を正しく入力してください。"
+                return
+            }
+            busy = true
+            identityError = null
+            viewModel.sendCourseToNavi(courseId, identityBusIdInput, courseNo, year) { result ->
+                busy = false
+                when (result) {
+                    SendToNaviResult.Success -> {
+                        showSendDialog = false
+                        Toast.makeText(context, "ナビ用の地図を作りました", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    }
+                    is SendToNaviResult.Retryable -> identityError = result.message
+                    is SendToNaviResult.Blocked -> {
+                        sendBlocked = true
+                        identityError = "このコースは映像ナビを作れません（軌跡がありません）。停留所を直して保存すると、もう一度試せます。"
+                    }
+                }
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { if (!busy) showSendDialog = false },
+            title = { Text("ナビ用に送る") },
+            text = { Column {
+                OutlinedTextField(identityBusIdInput, { identityBusIdInput = it }, label = { Text("バス識別子") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(identityCourseNoInput, { identityCourseNoInput = it }, label = { Text("コース番号") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(identityYearInput, { identityYearInput = it }, label = { Text("年度") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                identityError?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            } },
+            confirmButton = {
+                if (!sendBlocked) TextButton(onClick = ::send, enabled = !busy) {
+                    Text(if (identityError == null) "送る" else "もう一度送る")
+                }
+            },
+            dismissButton = { TextButton(onClick = { showSendDialog = false }, enabled = !busy) { Text("やめて戻る") } },
         )
     }
 

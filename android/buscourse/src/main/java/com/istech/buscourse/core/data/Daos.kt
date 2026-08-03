@@ -296,6 +296,9 @@ interface RecordingSessionDao {
     @Query("SELECT * FROM recording_session WHERE id = :id")
     suspend fun getById(id: Long): RecordingSessionEntity?
 
+    @Query("SELECT * FROM recording_session")
+    suspend fun getAll(): List<RecordingSessionEntity>
+
     @Query("SELECT * FROM recording_session WHERE status = :status ORDER BY started_at DESC")
     suspend fun getByStatus(status: String): List<RecordingSessionEntity>
 
@@ -461,6 +464,9 @@ interface MapDataPackageDao {
     @Query("SELECT * FROM map_data_package WHERE is_selected = 1 LIMIT 1")
     fun observeSelected(): Flow<MapDataPackageEntity?>
 
+    @Query("SELECT * FROM map_data_package WHERE is_selected = 1 LIMIT 1")
+    suspend fun getSelected(): MapDataPackageEntity?
+
     /**
      * 選択状態を単一に保つ（`bus_stop_card.is_archived` と同様の単一選択パターン）。
      * 全解除→対象のみ選択、の2段をトランザクションで実行する。
@@ -527,6 +533,10 @@ interface NaviMapDao {
             "AND archived_at IS NULL ORDER BY (profile = 'ex_full') DESC, id DESC"
     )
     suspend fun getActiveMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    /** 一覧状態を N+1 クエリなしで解決するため、全 identity のアクティブ行をまとめて返す。 */
+    @Query("SELECT * FROM navi_map WHERE archived_at IS NULL ORDER BY id DESC")
+    suspend fun getAllActiveMaps(): List<NaviMapEntity>
 
     /** 同一identityのアクティブなapp_simpleだけをアーカイブする。 */
     @Query(
