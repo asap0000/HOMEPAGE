@@ -781,6 +781,32 @@ class CourseRepository(
         courseDao.getById(courseId)?.let { courseDao.upsert(it.copy(naviBlockReason = reason.name)) }
     }
 
+    /**
+     * ナビ用マップの生成に成功したときの後始末。
+     *
+     * - **[CourseEntity.naviBlockReason] を必ず消す**——消さないと、送れなかった理由が残ったまま
+     *   `navi_map` が実在する状態になり、**一覧が「送れません」と嘘をつき続ける**（状態判定はブロック理由が最優先のため）。
+     * - **[CourseEntity.shapingStartedAt] を立てる**（未設定なら）——**保存を一度もせずに送れる**ので、
+     *   ここで立てないと洗浄し直しで「ナビへ送った予約」が削除対象になる。
+     * - **[CourseEntity.updatedAt] は進めない**。進めると生成直後に「変更あり」＝送り直しが要る、と嘘をつく。
+     */
+    suspend fun markCourseSentToNavi(courseId: Long) {
+        courseDao.getById(courseId)?.let {
+            courseDao.upsert(
+                it.copy(
+                    shapingStartedAt = it.shapingStartedAt ?: System.currentTimeMillis(),
+                    naviBlockReason = null,
+                )
+            )
+        }
+    }
+
+    /** 現在の identity が [busId]/[courseNo]/[year] と同じか（同値なら `updateIdentity` を呼ばない＝`updated_at` を進めない）。 */
+    suspend fun hasSameIdentity(courseId: Long, busId: String, courseNo: Int, year: Int): Boolean =
+        courseDao.getById(courseId)?.let {
+            it.busId == busId.trim() && it.courseNo == courseNo && it.year == year
+        } ?: false
+
     suspend fun getCourseWithDetails(courseId: Long): CourseWithDetails? = courseDao.getWithDetails(courseId)
 
     /**

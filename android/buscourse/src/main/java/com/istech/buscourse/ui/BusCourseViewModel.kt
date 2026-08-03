@@ -493,7 +493,11 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         onResult: (SendToNaviResult) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val identityResult = repository.updateCourseIdentity(courseId, busId, courseNo, year)
+            // ★同じ identity を入れ直しただけのときは書かない——`updateIdentity` は同値でも `updated_at` を
+            // 進めるため、そのあと送信が失敗すると**内容を何も変えていないのに「送り済み→変更あり」**になる（実射で再現）。
+            val identityResult =
+                if (repository.hasSameIdentity(courseId, busId, courseNo, year)) UpdateIdentityResult.Success
+                else repository.updateCourseIdentity(courseId, busId, courseNo, year)
             val result = when (identityResult) {
                 UpdateIdentityResult.DuplicateIdentity -> SendToNaviResult.Retryable(
                     "同じ『${year}年 ${busId.trim()}${courseNo}コース』が別のコースに使われています。番号を変えてもう一度お試しください。"
@@ -506,6 +510,9 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         try {
                             naviMapGenerator.generateFromCourse(courseId)
+                            // 送れなかった理由を消し、成形済みにする（消さないと一覧が「送れません」と嘘をつき続け、
+                            // 立てないと保存せずに送った予約が洗浄し直しで消える）。
+                            repository.markCourseSentToNavi(courseId)
                             SendToNaviResult.Success
                         } catch (e: NaviMapGenerationException) {
                             if (e.reason == NaviMapGenerationException.Reason.INSUFFICIENT_TRACK_POINTS) {

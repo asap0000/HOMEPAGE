@@ -282,6 +282,54 @@ class CourseRepositoryTest {
         assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(2)
     }
 
+    /**
+     * ★送信に成功したら、送れなかった理由が消える（消さないと一覧が「送れません」と嘘をつき続ける）。
+     * 独立レビューが実射で再現した欠陥の回帰テスト（2026-08-03）。
+     */
+    @Test
+    fun markCourseSentToNavi_clearsBlockReasonAndKeepsUpdatedAt() = runTest {
+        val courseId = repository.createCourse("送れなかったコース", CourseKind.STANDARD)
+        repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+        val before = db.courseDao().getById(courseId)!!
+
+        repository.markCourseSentToNavi(courseId)
+
+        val after = db.courseDao().getById(courseId)!!
+        assertThat(after.naviBlockReason).isNull()
+        assertThat(after.shapingStartedAt).isNotNull()
+        // updated_at を進めない＝生成直後に「変更あり」と嘘をつかない
+        assertThat(after.updatedAt).isEqualTo(before.updatedAt)
+    }
+
+    /**
+     * ★一度も保存せずにナビへ送った予約が、洗浄し直しで消えない
+     * （送信時に成形済みとして扱うため）。独立レビューが実射で再現した欠陥の回帰テスト。
+     */
+    @Test
+    fun washAndReserve_doesNotReplaceDraftAlreadySentToNavi() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        val sent = repository.washAndReserve(sessionId, 20.0)
+        // 保存（setCourseStopsPreservingPointers）は通さず、送信成功の後始末だけを通す
+        repository.markCourseSentToNavi(sent.courseId)
+
+        repository.washAndReserve(sessionId, 20.0)
+
+        assertThat(db.courseDao().getById(sent.courseId)).isNotNull()
+    }
+
+    /** ★identity が同じなら書き直さない（書くと updated_at が進み「変更あり」に化ける）。 */
+    @Test
+    fun hasSameIdentity_detectsUnchangedIdentity() = runTest {
+        val courseId = repository.createCourse("B1", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+
+        assertThat(repository.hasSameIdentity(courseId, "B", 1, 2026)).isTrue()
+        assertThat(repository.hasSameIdentity(courseId, " B ", 1, 2026)).isTrue() // 前後の空白は無視
+        assertThat(repository.hasSameIdentity(courseId, "B", 2, 2026)).isFalse()
+    }
+
     /** [sessionId] に緯度方向へ直進する軌跡(seq0〜9、走行速度扱いの5.0m/s)を投入する。 */
     private suspend fun insertGpsTrack(sessionId: Long, baseLat: Double, baseLon: Double) {
         val points = (0 until 10).map { i ->
