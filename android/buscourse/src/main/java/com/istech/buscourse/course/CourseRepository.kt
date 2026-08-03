@@ -13,6 +13,7 @@ import com.istech.buscourse.core.photo.ExifAwareBitmap
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.CourseSegmentEntity
 import com.istech.buscourse.core.data.CourseStopEntity
+import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.CourseWithDetails
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RoutePointEntity
@@ -899,6 +900,12 @@ class CourseRepository(
      */
     suspend fun setCourseStopsPreservingPointers(courseId: Long, stops: List<CourseStopEdit>) {
         database.withTransaction {
+            // ★出自(provenance)・誤差(error_space_m)・解決済み座標は、全削除→再挿入で失われてはならない。
+            // これらは記録・洗浄の産物で、編集画面には入力欄が無い＝人が入れ直せないため、消えると復元できない
+            // （時空正典 条2「結合は出自と誤差を持つ」。洗浄で畳んだ広がりは EX へ渡す情報でもある）。
+            // 同じ点かどうかは3ポインタ組（frame/event/card）で照合する＝編集画面の並べ替えキーと同じ。
+            val carriedOver = courseStopDao.getOrderedStops(courseId)
+                .associateBy { Triple(it.frameId, it.eventId, it.stopCardId) }
             courseStopDao.deleteAllForCourse(courseId)
             if (stops.isNotEmpty()) {
                 courseStopDao.insertAll(
@@ -907,6 +914,7 @@ class CourseRepository(
                             stopCardId = s.cardId, frameId = s.frameId, eventId = s.eventId,
                             context = "courseId=$courseId, index=$index（編集画面の保存）",
                         )
+                        val previous = carriedOver[Triple(s.frameId, s.eventId, s.cardId)]
                         CourseStopEntity(
                             courseId = courseId,
                             stopCardId = s.cardId,
@@ -914,6 +922,11 @@ class CourseRepository(
                             eventId = s.eventId,
                             sequenceIndex = index,
                             expectedChainageM = null, // regenerate後にRoutePreprocessorが再計算
+                            // 編集画面で新しく足した点には前身が無いので既定値のまま（＝カード由来の点）。
+                            resolvedLatitude = previous?.resolvedLatitude,
+                            resolvedLongitude = previous?.resolvedLongitude,
+                            provenance = previous?.provenance ?: CourseStopProvenance.RECORDED.name,
+                            errorSpaceM = previous?.errorSpaceM,
                         )
                     }
                 )

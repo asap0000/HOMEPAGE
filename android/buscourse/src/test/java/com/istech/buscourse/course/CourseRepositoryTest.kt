@@ -5,6 +5,8 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.CourseStopEntity
+import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.core.data.RoutePointEntity
@@ -1060,6 +1062,76 @@ class CourseRepositoryTest {
         assertThat(stops.map { it.stopCardId }).containsExactly(cardId, null, null).inOrder()
         assertThat(stops.map { it.eventId }).containsExactly(null, eventId, null).inOrder()
         assertThat(stops.map { it.frameId }).containsExactly(null, null, frameId).inOrder()
+    }
+
+    /**
+     * ★編集画面で保存しても、出自(provenance)・誤差(error_space_m)・解決済み座標が失われない
+     * （2026-08-03 修正。従来は全削除→再挿入で既定値に戻り、**洗浄で畳んだ広がりが編集1回で消えていた**）。
+     * 編集画面にこれらの入力欄は無い＝人が入れ直せないため、消えると復元できない。
+     */
+    @Test
+    fun setCourseStopsPreservingPointers_reorder_preservesProvenanceAndErrorSpace() = runTest {
+        val sessionId = insertSession()
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val eventId = insertManualEvent(sessionId, stopCardId = null, lat = 35.010, lon = 139.010, eventTs = 1_700_000_000_000L)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        // 洗浄の産物（畳んだ広がり・出自）を持つ点を直接置く＝創設パス1の出力に相当する状態
+        db.courseStopDao().insertAll(
+            listOf(
+                CourseStopEntity(
+                    courseId = courseId, stopCardId = null, frameId = null, eventId = eventId,
+                    sequenceIndex = 0, expectedChainageM = null,
+                    resolvedLatitude = 35.010, resolvedLongitude = 139.010,
+                    provenance = CourseStopProvenance.GEOFENCE_MATCHED.name, errorSpaceM = 12.5,
+                ),
+                CourseStopEntity(
+                    courseId = courseId, stopCardId = cardId, frameId = null, eventId = null,
+                    sequenceIndex = 1, expectedChainageM = null,
+                ),
+            )
+        )
+
+        // 編集画面で順序を入れ替えて保存する
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardId),
+                CourseStopEdit(frameId = null, eventId = eventId, cardId = null),
+            ),
+        )
+
+        val stops = db.courseStopDao().getOrderedStops(courseId).sortedBy { it.sequenceIndex }
+        val moved = stops.single { it.eventId == eventId }
+        assertThat(moved.provenance).isEqualTo(CourseStopProvenance.GEOFENCE_MATCHED.name)
+        assertThat(moved.errorSpaceM).isEqualTo(12.5)
+        assertThat(moved.resolvedLatitude).isEqualTo(35.010)
+        assertThat(moved.resolvedLongitude).isEqualTo(139.010)
+        assertThat(moved.sequenceIndex).isEqualTo(1)
+    }
+
+    /** 編集画面で新しく足した点には前身が無いので既定値（RECORDED・誤差なし）で入る。 */
+    @Test
+    fun setCourseStopsPreservingPointers_newlyAddedStop_getsDefaults() = runTest {
+        val cardA = createCard("A", lat = 35.000, lon = 139.000)
+        val cardB = createCard("B", lat = 35.010, lon = 139.010)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId, listOf(CourseStopEdit(frameId = null, eventId = null, cardId = cardA)),
+        )
+
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardA),
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardB),
+            ),
+        )
+
+        val added = db.courseStopDao().getOrderedStops(courseId).single { it.stopCardId == cardB }
+        assertThat(added.provenance).isEqualTo(CourseStopProvenance.RECORDED.name)
+        assertThat(added.errorSpaceM).isNull()
+        assertThat(added.resolvedLatitude).isNull()
     }
 
     /** 削除も反映される（渡さなかった行はcourse_stopから消える）。 */
