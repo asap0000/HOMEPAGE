@@ -153,6 +153,8 @@ fun CourseDetailScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showCutConfirm by remember { mutableStateOf(false) }
+    var cutIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     // identity（bus_id/course_no/year）設定ダイアログの状態（(e) コース identity設定UI、2026-07-24追加）
     var showIdentityDialog by remember { mutableStateOf(false) }
     var showSendDialog by remember { mutableStateOf(false) }
@@ -240,6 +242,7 @@ fun CourseDetailScreen(
             val from = rawToStop(fromRaw)
             val to = rawToStop(toRaw)
             if (from in editedStops.indices && to in editedStops.indices) {
+                cutIndexes = emptySet()
                 editedStops.add(to, editedStops.removeAt(from))
                 persistDraft()
             }
@@ -251,6 +254,7 @@ fun CourseDetailScreen(
     fun moveStop(index: Int, delta: Int) {
         val target = index + delta
         if (index !in editedStops.indices || target !in editedStops.indices) return
+        cutIndexes = emptySet()
         editedStops.add(target, editedStops.removeAt(index))
         persistDraft()
     }
@@ -289,6 +293,21 @@ fun CourseDetailScreen(
                 onBack()
             }.onFailure { e ->
                 Toast.makeText(context, "削除に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun cutCourse() {
+        busy = true
+        showCutConfirm = false
+        viewModel.cutCourse(courseId, cutIndexes) { result ->
+            busy = false
+            result.onSuccess { cut ->
+                viewModel.clearCourseStopDraft(courseId)
+                Toast.makeText(context, "${cut.createdCourseIds.size} 本に分けました", Toast.LENGTH_SHORT).show()
+                onBack()
+            }.onFailure { e ->
+                Toast.makeText(context, "コースを切れませんでした: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -431,7 +450,34 @@ fun CourseDetailScreen(
                                     color = capacityColor,
                                 )
                             }
+                            if (index in cutIndexes) {
+                                Text(
+                                    "✂ ここで切る",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
                         }
+                        TextButton(
+                            onClick = {
+                                if (index in cutIndexes) {
+                                    cutIndexes = cutIndexes - index
+                                } else {
+                                    val invalid = index == 0 || index == editedStops.lastIndex ||
+                                        cutIndexes.any { kotlin.math.abs(it - index) == 1 }
+                                    if (invalid) {
+                                        Toast.makeText(
+                                            context,
+                                            "ここでは切れません（コースが空になります）",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    } else {
+                                        cutIndexes = cutIndexes + index
+                                    }
+                                }
+                            },
+                            enabled = !busy && !dirty,
+                        ) { Text(if (index in cutIndexes) "解除" else "✂") }
                         // 繰り上げ・繰り下げ（ループコースの右回り/左回り入替、手動追加分の位置調整用）
                         Column {
                             StopMoveButton(
@@ -449,6 +495,7 @@ fun CourseDetailScreen(
                         }
                         IconButton(
                             onClick = {
+                                cutIndexes = emptySet()
                                 editedStops.removeAt(index)
                                 persistDraft()
                             },
@@ -483,6 +530,27 @@ fun CourseDetailScreen(
             item {
                 StopStatusLegend()
                 HorizontalDivider()
+            }
+
+            item {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Button(
+                        onClick = { showCutConfirm = true },
+                        enabled = !busy && !dirty && cutIndexes.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("切る（${cutIndexes.size} か所）")
+                    }
+                    Text(
+                        when {
+                            dirty -> "先に保存してください"
+                            cutIndexes.isEmpty() -> "先に停留所を選んで「ここで切る」を付けてください"
+                            else -> "${cutIndexes.size + 1} 本に分けます"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (dirty) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             // 追加・保存
@@ -533,6 +601,46 @@ fun CourseDetailScreen(
         }
     }
 
+    if (showCutConfirm) {
+        val course = details?.course
+        val sortedCuts = cutIndexes.sorted()
+        val boundaries = listOf(0) + sortedCuts + editedStops.lastIndex
+        val fragments = boundaries.zipWithNext().map { (start, end) -> editedStops.subList(start, end + 1) }
+        AlertDialog(
+            onDismissRequest = { if (!busy) showCutConfirm = false },
+            title = { Text("コースを切りますか？") },
+            text = {
+                Column {
+                    Text("『${course?.name ?: "このコース"}』（${editedStops.size}停留所）を ${fragments.size} 本にします")
+                    Spacer(Modifier.height(10.dp))
+                    fragments.forEachIndexed { index, fragment ->
+                        val name = course?.sourceSessionId?.let { "S$it-${index + 1}" }
+                            ?: "${course?.name ?: "コース"}-${index + 1}"
+                        Text(
+                            "$name：${fragment.size}個（${fragment.first().displayName}〜${fragment.last().displayName}）",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    val cutNames = sortedCuts.map { editedStops[it].displayName }.joinToString("、")
+                    Text(
+                        "切った『$cutNames』は両方のコースに入ります（前の終点・後ろの始点）。" +
+                            "元の『${course?.name ?: "このコース"}』は無くなります。" +
+                            "やり直したいときは走行の洗浄からもう一度作れます。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = ::cutCourse, enabled = !busy) { Text("切る") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCutConfirm = false }, enabled = !busy) { Text("やめる") }
+            },
+        )
+    }
+
     if (showAddDialog) {
         // 既にeditedStopsに含まれるカードは候補から除外する（フェーズ2レビュー#10。
         // 無いと同じカードを重複追加できてしまう）。cardIdを持たない行（映像/イベントのみ）は
@@ -575,6 +683,7 @@ fun CourseDetailScreen(
                                                     riderCount = card.riderCount,
                                                 )
                                             )
+                                            cutIndexes = emptySet()
                                             persistDraft()
                                             showAddDialog = false
                                         }

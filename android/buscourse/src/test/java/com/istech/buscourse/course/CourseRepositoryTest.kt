@@ -8,6 +8,7 @@ import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.CourseStopEntity
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.NaviBlockReason
+import com.istech.buscourse.core.data.NaviMapEntity
 import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
@@ -1398,6 +1399,129 @@ class CourseRepositoryTest {
         val result = repository.updateCourseIdentity(courseId = 999_999L, busId = "バスA", courseNo = 1, year = 2026)
 
         assertThat(result).isEqualTo(UpdateIdentityResult.CourseNotFound)
+    }
+
+    private suspend fun seedCourseForCut(count: Int, sourceSessionId: Long? = null): Pair<Long, List<Long>> {
+        val courseId = repository.createCourse("切るテスト", CourseKind.DRAFT)
+        val cardIds = (0 until count).map { index ->
+            repository.createStopCard(
+                name = "停留所$index",
+                latitude = 35.0 + index * 0.001,
+                longitude = 139.0,
+                altitudeM = null,
+                notes = null,
+                riderCount = 0,
+                photoTempFile = null,
+            )
+        }
+        repository.setCourseStops(courseId, cardIds)
+        if (sourceSessionId != null) {
+            val course = requireNotNull(db.courseDao().getById(courseId))
+            db.courseDao().upsert(course.copy(sourceSessionId = sourceSessionId))
+        }
+        return courseId to cardIds
+    }
+
+    @Test
+    fun cutCourseAt_splitsIntoFragmentsWithSharedBoundary() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(5)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(result.createdCourseIds).hasSize(2)
+        val fragments = result.createdCourseIds.map { id ->
+            db.courseStopDao().getOrderedStops(id).map { it.stopCardId }
+        }
+        assertThat(fragments[0]).containsExactlyElementsIn(cardIds.subList(0, 3)).inOrder()
+        assertThat(fragments[1]).containsExactlyElementsIn(cardIds.subList(2, 5)).inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_preservesProvenanceAndPointers() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(5)
+        val original = db.courseStopDao().getOrderedStops(courseId)
+        db.courseStopDao().deleteAllForCourse(courseId)
+        db.courseStopDao().insertAll(
+            original.mapIndexed { index, stop ->
+                stop.copy(
+                    id = 0,
+                    provenance = if (index == 2) CourseStopProvenance.GEOFENCE_MATCHED.name else stop.provenance,
+                    errorSpaceM = if (index == 2) 12.5 else null,
+                    resolvedLatitude = if (index == 2) 35.5 else null,
+                    resolvedLongitude = if (index == 2) 139.5 else null,
+                )
+            }
+        )
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        result.createdCourseIds.forEach { id ->
+            val boundary = db.courseStopDao().getOrderedStops(id).firstOrNull { it.stopCardId == cardIds[2] }
+            assertThat(boundary?.provenance).isEqualTo(CourseStopProvenance.GEOFENCE_MATCHED.name)
+            assertThat(boundary?.errorSpaceM).isEqualTo(12.5)
+            assertThat(boundary?.resolvedLatitude).isEqualTo(35.5)
+            assertThat(boundary?.resolvedLongitude).isEqualTo(139.5)
+        }
+    }
+
+    @Test
+    fun cutCourseAt_newCoursesAreShapingDrafts() = runTest {
+        val sessionId = insertSession()
+        val (courseId, _) = seedCourseForCut(5, sourceSessionId = sessionId)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        result.createdCourseIds.forEach { id ->
+            val course = db.courseDao().getById(id)
+            assertThat(course?.kind).isEqualTo(CourseKind.DRAFT.name)
+            assertThat(course?.shapingStartedAt).isNotNull()
+            assertThat(course?.sourceSessionId).isEqualTo(sessionId)
+        }
+        assertThat(result.names).containsExactly("S$sessionId-1", "S$sessionId-2").inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_multipleCuts() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(7)
+
+        val result = repository.cutCourseAt(courseId, setOf(2, 4))
+
+        val fragments = result.createdCourseIds.map { id ->
+            db.courseStopDao().getOrderedStops(id).map { it.stopCardId }
+        }
+        assertThat(fragments).containsExactly(
+            cardIds.subList(0, 3), cardIds.subList(2, 5), cardIds.subList(4, 7),
+        ).inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_rejectsEdgeAndAdjacentCuts() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(0)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(4)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(2, 3)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun cutCourseAt_deletesOriginalAndArchivesActiveMap() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "旧地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(db.courseDao().getById(courseId)).isNull()
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNotNull()
     }
 
 }

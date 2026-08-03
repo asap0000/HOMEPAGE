@@ -12,6 +12,7 @@ import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
 import com.istech.buscourse.course.CourseCreationResult
+import com.istech.buscourse.course.CourseCutResult
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.CourseStopEdit
@@ -457,6 +458,21 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.deleteCourse(courseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの削除") {
                 "コース『${courseName ?: "ID:$courseId"}』を削除"
+            }
+            onResult(result)
+        }
+    }
+
+    fun cutCourse(
+        courseId: Long,
+        cutIndexes: Set<Int>,
+        onResult: (Result<CourseCutResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val courseName = runCatching { repository.getCourseEditDetails(courseId)?.course?.name }.getOrNull()
+            val result = runCatching { repository.cutCourseAt(courseId, cutIndexes) }
+            logOutcome(result, WorkLogCategory.COURSE, "コースを切る") { cut ->
+                "『${courseName ?: "ID:$courseId"}』を ${cut.createdCourseIds.size} 本に分割"
             }
             onResult(result)
         }

@@ -447,6 +447,8 @@ data class CourseEditDetails(
     val stops: List<CourseStopView>,
 )
 
+data class CourseCutResult(val createdCourseIds: List<Long>, val names: List<String>)
+
 /**
  * 並べ替え・削除・追加を保存する際の1点分の入力（S6a、[CourseRepository.setCourseStopsPreservingPointers]
  * の引数）。既存点は編集画面が [CourseStopView] からそのまま `frameId`/`eventId`/`cardId` を引き継いで
@@ -484,6 +486,7 @@ class CourseRepository(
     private val timelapseFrameDao = database.timelapseFrameDao()
     private val routePointDao = database.routePointDao()
     private val workLogDao = database.workLogDao()
+    private val naviMapDao = database.naviMapDao()
 
     /** route_point / expected_chainage_m の再生成主体（§3.5・§3.9。2026-07-08決定で course 所属）。 */
     val routePreprocessor = RoutePreprocessor(context, database)
@@ -1099,6 +1102,72 @@ class CourseRepository(
             courseDao.deleteById(courseId)
         }
     }
+
+    /** 切り点を両側に残すため、保存済みの順列を境界で複製してから元コースを置き換える。 */
+    suspend fun cutCourseAt(courseId: Long, cutSequenceIndexes: Set<Int>): CourseCutResult =
+        withContext(Dispatchers.IO) {
+            database.withTransaction {
+                val original = requireNotNull(courseDao.getById(courseId)) {
+                    "コースが見つかりません（ID: $courseId）"
+                }
+                val stops = courseStopDao.getOrderedStops(courseId)
+                val lastIndex = stops.lastIndex
+                val cuts = cutSequenceIndexes.sorted()
+                require(cuts.isNotEmpty()) { "切る位置を1か所以上指定してください" }
+                require(cuts.all { it > 0 && it < lastIndex }) {
+                    "先頭・末尾ではコースを切れません"
+                }
+                require(cuts.zipWithNext().all { (left, right) -> right - left > 1 }) {
+                    "隣り合う停留所では連続して切れません"
+                }
+
+                val boundaries = listOf(0) + cuts + lastIndex
+                val fragments = boundaries.zipWithNext().map { (start, end) ->
+                    stops.subList(start, end + 1)
+                }
+                val now = System.currentTimeMillis()
+                val names = fragments.indices.map { index ->
+                    original.sourceSessionId?.let { "S$it-${index + 1}" }
+                        ?: "${original.name}-${index + 1}"
+                }
+                val createdIds = fragments.mapIndexed { fragmentIndex, fragment ->
+                    val newCourseId = courseDao.insert(
+                        CourseEntity(
+                            name = names[fragmentIndex],
+                            description = original.description,
+                            kind = original.kind,
+                            baseCourseId = original.baseCourseId,
+                            createdAt = now,
+                            updatedAt = now,
+                            sourceSessionId = original.sourceSessionId,
+                            shapingStartedAt = now,
+                            naviBlockReason = null,
+                        )
+                    )
+                    courseStopDao.insertAll(
+                        fragment.mapIndexed { sequenceIndex, stop ->
+                            stop.copy(
+                                id = 0,
+                                courseId = newCourseId,
+                                sequenceIndex = sequenceIndex,
+                            )
+                        }
+                    )
+                    regenerateCourseSegments(newCourseId)
+                    original.sourceSessionId?.let { sessionId ->
+                        confirmCourseRouteFromSession(newCourseId, sessionId)
+                    }
+                    newCourseId
+                }
+
+                original.identityOrNull()?.let { identity ->
+                    naviMapDao.getActiveMapsByIdentity(identity.busId, identity.courseNo, identity.year)
+                        .forEach { naviMapDao.archiveMap(it.id, now) }
+                }
+                courseDao.deleteById(courseId)
+                CourseCutResult(createdCourseIds = createdIds, names = names)
+            }
+        }
 
     // ------------------------------------------------------------------
     // 試走ログからの区間自動抽出（§3.9）
