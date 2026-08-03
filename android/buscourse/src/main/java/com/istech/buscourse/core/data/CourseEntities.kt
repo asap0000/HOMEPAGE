@@ -43,7 +43,41 @@ data class CourseEntity(
     @ColumnInfo(name = "course_no") val courseNo: Int? = null,
     /** 年度（4月始まり）。2026 = 2026-04-01〜2027-03-31。 */
     @ColumnInfo(name = "year") val year: Int? = null,
+    /**
+     * 成形（コース編集）に入った時刻。**NULL＝まだ成形していない**（version 21、DB列台帳 A-3）。
+     *
+     * **開いた時点ではなく保存した時点で立てる**——覗いただけで固定されると、洗浄し直しで置き換えられなくなる
+     * （design-gate 復唱②「未成形の予約は洗浄し直しで置き換わる／成形に入った予約は置き換えず別に並ぶ」）。
+     * 判定に使うのは [com.istech.buscourse.course.CourseRepository.washAndReserve]（置き換え対象の選別）と
+     * 一覧の状態表示。
+     */
+    @ColumnInfo(name = "shaping_started_at") val shapingStartedAt: Long? = null,
+    /**
+     * 直しようがない理由でナビ用マップを作れなかった事実（version 21、DB列台帳 A-3）。
+     * **NULL＝そういう失敗はしていない**。値は [NaviBlockReason] の機械可読コード（官房推奨 2026-08-03）
+     * ——表示文言を入れると文言改訂のたびに旧行が古い言い回しで残り、「一覧表記は実在表記に固定」の規律と干渉する。
+     *
+     * **なぜ列が要るか**: 他の状態は導出できる（送り済み・変更あり＝`navi_map` の有無と [updatedAt] の前後、
+     * 予約＝[kind] と [shapingStartedAt]）。**`navi_map` は生成に成功したときしか行が無いので、
+     * 「送ろうとして直しようがない理由で失敗した」事実だけはどこにも残らない**。
+     * これが無いと一覧の印が「成形中」のままになり、利用者が同じ失敗をしに戻ってくる。
+     * **編集して保存したら必ずクリアする**（中身が変わったので再挑戦できる）。
+     */
+    @ColumnInfo(name = "navi_block_reason") val naviBlockReason: String? = null,
 )
+
+/**
+ * [CourseEntity.naviBlockReason] に入る機械可読の理由コード（version 21）。
+ * **表示文言はここに持たない**——UI 側で対応させる（官房推奨 2026-08-03）。
+ */
+enum class NaviBlockReason {
+    /**
+     * 軌跡が作れずナビ用マップを構成できない。
+     * カードだけで組まれたコース（実測 GPS も route_point も無い）が該当し、**編集で点を足せば解消しうる**
+     * ＝永久の断定ではないため、保存でクリアする運用と対になる。
+     */
+    NO_TRACK,
+}
 
 data class CourseIdentity(val busId: String, val courseNo: Int, val year: Int)
 

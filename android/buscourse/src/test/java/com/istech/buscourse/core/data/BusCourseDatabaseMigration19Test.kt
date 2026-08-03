@@ -130,6 +130,7 @@ class BusCourseDatabaseMigration19Test {
             // 「Migration didn't properly handle: course_stop」で落ちる。
             // Room が作った本物の表から **v19 の4列だけを落として** v17 の形に戻す。
             downgradeCourseStopToBeforeV19(this)
+            downgradeCourseToBeforeV21()
             execSQL("PRAGMA user_version = 17")
         }
         helper.close()
@@ -249,6 +250,7 @@ class BusCourseDatabaseMigration19Test {
         BusCourseDatabase.MIGRATION_13_14, BusCourseDatabase.MIGRATION_14_15,
         BusCourseDatabase.MIGRATION_15_16, BusCourseDatabase.MIGRATION_16_17,
         BusCourseDatabase.MIGRATION_17_19, BusCourseDatabase.MIGRATION_19_20,
+        BusCourseDatabase.MIGRATION_20_21,
     )
 
     private companion object {

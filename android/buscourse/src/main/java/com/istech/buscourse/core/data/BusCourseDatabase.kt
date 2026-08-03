@@ -118,6 +118,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * （[MIGRATION_10_11] と同じ手法）。FK・索引は不変。変更理由は [StopVisitEventEntity.stopCardId] の KDoc。
  * ⚠ v19 が守った「実収録テーブル不変」を本版は破るが、これは**列制約の緩和のみ**で
  * 既存行の値・列構成には触れない（[BusCourseDatabaseMigration20Test] が機械担保）。
+ *
+ * version 21（2026-08-03、**コースの成形状態**。官房認可・design-gate 通過済み〔復唱 y×6〕・DB列台帳 A-3）:
+ * `course` に nullable 列を2本追加する（[MIGRATION_20_21]。**軽量レーン第1号**＝テーブル再作成もデータ移送も無い）。
+ * - [CourseEntity.shapingStartedAt]: 成形（編集）に入った時刻。**保存した時点で立つ**。
+ * - [CourseEntity.naviBlockReason]: 直しようがない理由でナビ用マップを作れなかったこと。**機械可読の理由コード**。
+ *
+ * **なぜ列が要るか（他の状態はすべて導出できる）**: 送り済み・変更ありは `navi_map` の有無と `updated_at` の
+ * 前後で、予約は `kind='DRAFT'` と [CourseEntity.shapingStartedAt] で導出できる。**`navi_map` は生成に成功したときしか
+ * 行が無いため、「送ろうとして失敗した」事実だけはどこにも残らない**（官房が実射で裏取り）。
+ * この列が無いと一覧の印が「成形中」のままになり、**利用者が同じ失敗をしに戻ってくる**（オーナー指摘）。
  */
 @Database(
     entities = [
@@ -166,7 +176,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
          * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
          * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
          */
-        const val SCHEMA_VERSION = 20
+        const val SCHEMA_VERSION = 21
 
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
@@ -193,6 +203,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_16_17,
                 MIGRATION_17_19,
                 MIGRATION_19_20,
+                MIGRATION_20_21,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -545,6 +556,20 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 // 4. 索引を再作成（entity の indices = [session_id, stop_card_id] と同一）。
                 db.execSQL("CREATE INDEX index_stop_visit_event_session_id ON stop_visit_event (session_id)")
                 db.execSQL("CREATE INDEX index_stop_visit_event_stop_card_id ON stop_visit_event (stop_card_id)")
+            }
+        }
+
+        /**
+         * course に成形状態の2列を追加（2026-08-03・DB列台帳 A-3・**軽量レーン第1号**）。
+         *
+         * **nullable の ADD COLUMN のみ**＝テーブル再作成もデータ移送も無い（v20 と対照的）。既存行は
+         * 両列とも NULL で通り、意味は「まだ成形していない／送信に失敗していない」＝現行の振る舞いと一致する。
+         * FK・索引・既存列には一切触れない。
+         */
+        val MIGRATION_20_21 = object : androidx.room.migration.Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `course` ADD COLUMN `shaping_started_at` INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE `course` ADD COLUMN `navi_block_reason` TEXT DEFAULT NULL")
             }
         }
     }
