@@ -11,7 +11,6 @@ import com.istech.buscourse.core.data.NaviBlockReason
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
-import com.istech.buscourse.course.CourseCreationResult
 import com.istech.buscourse.course.CourseCutResult
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
@@ -335,8 +334,8 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * コース確定→route_point生成（②「コース編成(抽出)」フェーズC-1、SessionAnalysisDialog
      * 「欠損/割り込みレポート」の「このセッションでコースを確定（ルート生成）」ボタン、2026-07-14追加）。
-     * 承認済み（フェーズB）のセッションから、そのコースのナビ用連続トラックを拠点→拠点にクリップして
-     * 確定し、`route_point` へ保存する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
+     * 承認済み（フェーズB）のセッションから、そのコースのナビ用連続トラックをコース停留所の時間クラスタに
+     * クリップして確定し、`route_point` へ保存する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
      */
     fun confirmCourseRoute(
         courseId: Long,
@@ -347,30 +346,6 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.confirmCourseRouteFromSession(courseId, sessionId) }
             logOutcome(result, WorkLogCategory.EXTRACTION, "コース確定（ルート生成）") { count ->
                 "セッション#${sessionId}からコース#${courseId}を確定（route_point ${count}点）"
-            }
-            onResult(result)
-        }
-    }
-
-    /**
-     * コース創設（トップダウン、3パス成熟モデルのパス1＋パス2、S4「コース創設」画面
-     * [CourseCreateScreen] 「創設」ボタン、2026-07-14追加・2026-07-15全面改訂）。
-     * [hubStopCardIds] は拠点分割の選択拠点、[courseNames] は断片indexに対応するコース名（空なら
-     * 既定名）。書き込み（course_stop等の複数DAO操作）を伴うため、他の書き込み系関数と同様に
-     * [viewModelScope] 管理下で実行する（画面遷移によるスコープキャンセルで中途半端な創設状態を
-     * 残さないため）。
-     */
-    fun createCoursesFromSession(
-        sessionId: Long,
-        hubStopCardIds: Set<Long>,
-        courseNames: List<String> = emptyList(),
-        onResult: (Result<CourseCreationResult>) -> Unit = {},
-    ) {
-        viewModelScope.launch {
-            val result = runCatching { repository.createCoursesFromSession(sessionId, hubStopCardIds, courseNames) }
-            logOutcome(result, WorkLogCategory.COURSE, "コース創設") { r ->
-                "セッション#${sessionId}からコース創設（作成${r.createdCourseIds.size}件・停留所${r.totalStopCount}件・" +
-                    "カード吸着${r.cardAttachedStopCount}件・映像のみ${r.frameOnlyStopCount}件）"
             }
             onResult(result)
         }

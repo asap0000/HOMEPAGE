@@ -107,8 +107,8 @@ class CourseRepositoryTest {
     // seedヘルパー
     // ------------------------------------------------------------------
 
-    private suspend fun createCard(name: String, lat: Double, lon: Double, isHub: Boolean = false): Long {
-        val id = repository.createStopCard(
+    private suspend fun createCard(name: String, lat: Double, lon: Double): Long =
+        repository.createStopCard(
             name = name,
             latitude = lat,
             longitude = lon,
@@ -117,9 +117,6 @@ class CourseRepositoryTest {
             riderCount = 0,
             photoTempFile = null,
         )
-        if (isHub) repository.applyHubFlags(listOf(id), hub = true)
-        return id
-    }
 
     private suspend fun insertSession(): Long {
         val now = System.currentTimeMillis()
@@ -245,6 +242,45 @@ class CourseRepositoryTest {
 
         assertThat(repository.previewWash(sessionId).gpsGapPct).isWithin(0.01).of(5_000.0 / 6_000.0 * 100.0)
         assertThat(repository.previewWash(insertSession()).gpsGapPct).isNull()
+    }
+
+    /** is_hub=1 のマークが前後にあっても、route_point の窓はコース停留所クラスタから延伸しない。 */
+    @Test
+    fun confirmCourseRoute_hubMarksOutsideCluster_doesNotExpandWindow() = runTest {
+        val hubCardId = createCard("拠点", lat = 35.000, lon = 139.000)
+        repository.applyHubFlags(listOf(hubCardId), hub = true)
+        val cardA = createCard("A", lat = 35.001, lon = 139.000)
+        val cardB = createCard("B", lat = 35.002, lon = 139.000)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStops(courseId, listOf(cardA, cardB))
+        val sessionId = insertSession()
+        val baseTs = 1_700_000_000_000L
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, capturedAt = baseTs, stopCardId = hubCardId)
+        insertFrame(sessionId, seq = 1, lat = 35.001, lon = 139.000, capturedAt = baseTs + 1_000, stopCardId = cardA)
+        insertFrame(sessionId, seq = 2, lat = 35.002, lon = 139.000, capturedAt = baseTs + 2_000, stopCardId = cardB)
+        insertFrame(sessionId, seq = 3, lat = 35.003, lon = 139.000, capturedAt = baseTs + 3_000, stopCardId = hubCardId)
+        db.gpsPointDao().insertAll(
+            (0..3).map { index ->
+                GpsPointEntity(
+                    sessionId = sessionId,
+                    seq = index,
+                    tsEpochMs = baseTs + index * 1_000L,
+                    elapsedRealtimeNanos = index * 1_000_000_000L,
+                    lat = 35.000 + index * 0.001,
+                    lon = 139.000,
+                    altM = null,
+                    speedMps = null,
+                    bearingDeg = null,
+                    accuracyM = null,
+                )
+            }
+        )
+
+        val count = repository.confirmCourseRouteFromSession(courseId, sessionId)
+
+        assertThat(count).isEqualTo(2)
+        assertThat(db.routePointDao().getOrdered(courseId).map { it.lat })
+            .containsExactly(35.001, 35.002).inOrder()
     }
 
     @Test
@@ -417,37 +453,6 @@ class CourseRepositoryTest {
         assertThat(candidates).isEmpty()
     }
 
-    @Test
-    fun findOrCreate_hubCard_within180m_isNotCandidate() = runTest {
-        // 拠点カードは半径180m。通常カードなら70m超で候補になる100mでも、拠点なら候補にならない。
-        val cardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
-        val sessionId = insertSession()
-        insertFrame(
-            sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000,
-            stopCardId = cardId,
-        )
-
-        val candidates = repository.analyzeFindOrCreateCandidates(sessionId)
-
-        assertThat(candidates).isEmpty()
-    }
-
-    @Test
-    fun findOrCreate_hubCard_beyond180m_isCandidate() = runTest {
-        val cardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
-        val sessionId = insertSession()
-        val frameId = insertFrame(
-            sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(200.0), lon = 139.000,
-            stopCardId = cardId,
-        )
-
-        val candidates = repository.analyzeFindOrCreateCandidates(sessionId)
-
-        assertThat(candidates.map { it.frameId }).contains(frameId)
-    }
-
     // ------------------------------------------------------------------
     // S2: analyzeSessionCoverage（軌跡コリドー内外判定、コース非依存）
     // ------------------------------------------------------------------
@@ -503,7 +508,7 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         val frameId = insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = farCardId)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.createdCourseIds).hasSize(1)
         assertThat(result.totalStopCount).isEqualTo(1)
@@ -537,7 +542,7 @@ class CourseRepositoryTest {
         val eventB = insertManualEvent(sessionId, stopCardId = cardB, lat = 35.010, lon = 139.010, eventTs = 1_700_000_060_000L)
         val eventC = insertManualEvent(sessionId, stopCardId = cardC, lat = 35.020, lon = 139.020, eventTs = 1_700_000_120_000L)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.createdCourseIds).hasSize(1)
         assertThat(result.totalStopCount).isEqualTo(3)
@@ -582,7 +587,7 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(trueLat) // 位置はイベントの真の座標（誤吸着カードの座標=36.000ではない）
         assertThat(stop.longitude).isEqualTo(trueLon)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val stops = db.courseStopDao().getOrderedStops(result.createdCourseIds.single())
         assertThat(stops.single().eventId).isEqualTo(eventId)
         assertThat(stops.single().stopCardId).isNull()
@@ -605,7 +610,7 @@ class CourseRepositoryTest {
             eventTs = 1_700_000_000_000L,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -627,7 +632,7 @@ class CourseRepositoryTest {
         // 実運用では両者の時刻はほぼ同時刻になる
         insertManualEvent(sessionId, stopCardId = cardId, lat = 35.000, lon = 139.000, eventTs = markTs + 500)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.totalStopCount).isEqualTo(1) // 2点にならない
     }
@@ -643,7 +648,7 @@ class CourseRepositoryTest {
             stopCardId = cardId,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -668,7 +673,7 @@ class CourseRepositoryTest {
             stopCardId = farCardId, // onManualStopMarkの「距離不問の最近傍仮吸着」を模す
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.frameOnlyStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -691,7 +696,7 @@ class CourseRepositoryTest {
             stopCardId = nearCardId,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -699,45 +704,23 @@ class CourseRepositoryTest {
         assertThat(stop.stopCardId).isNotEqualTo(farCardId)
     }
 
-    /** パス2: 拠点カードは通常より広い半径（180m）で判定される。 */
+    /** パス2: is_hub=1 のカードも通常半径70mで判定される。 */
     @Test
-    fun pass2_hubCard_isAttachedWithWiderRadius() = runTest {
-        val hubCardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
+    fun pass2_hubCardBeyondNormalRadius_isNotAttached() = runTest {
+        val hubCardId = createCard("拠点カード", lat = 35.000, lon = 139.000)
+        repository.applyHubFlags(listOf(hubCardId), hub = true)
         val sessionId = insertSession()
         insertFrame(
             sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000, // 通常70mは超えるが拠点180m以内
+            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000, // 通常半径70mを超える
             stopCardId = hubCardId, // マーク済みフレームとして拾われるために必要（getMarkedFramesの絞り込み条件）
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
-        assertThat(result.cardAttachedStopCount).isEqualTo(1)
+        assertThat(result.frameOnlyStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
-        assertThat(stop.stopCardId).isEqualTo(hubCardId)
-    }
-
-    /** 拠点分割: 選択拠点を境に断片化され、断片ごとに1コースが作られる（[splitByHubs]と同じ挙動）。 */
-    @Test
-    fun createCoursesFromSession_splitsAtSelectedHub_createsMultipleCourses() = runTest {
-        val hubCardId = createCard("拠点", lat = 35.000, lon = 139.000, isHub = true)
-        val cardA = createCard("A", lat = 35.001, lon = 139.001)
-        val cardB = createCard("B", lat = 35.002, lon = 139.002)
-        val sessionId = insertSession()
-        // 順序: A(往路) -> 拠点 -> B(復路)
-        insertFrame(sessionId, seq = 0, lat = 35.001, lon = 139.001, capturedAt = 1000, stopCardId = cardA)
-        insertFrame(sessionId, seq = 1, lat = 35.000, lon = 139.000, capturedAt = 2000, stopCardId = hubCardId)
-        insertFrame(sessionId, seq = 2, lat = 35.002, lon = 139.002, capturedAt = 3000, stopCardId = cardB)
-
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = setOf(hubCardId))
-
-        assertThat(result.createdCourseIds).hasSize(2) // 拠点前後で2断片
-        assertThat(result.totalStopCount).isEqualTo(2) // 拠点自身の点はどちらの断片にも含まれない
-
-        val allStopCardIds = result.createdCourseIds.flatMap { courseId ->
-            db.courseStopDao().getOrderedStops(courseId).map { it.stopCardId }
-        }
-        assertThat(allStopCardIds).containsExactly(cardA, cardB)
+        assertThat(stop.stopCardId).isNull()
     }
 
     // ------------------------------------------------------------------
@@ -926,7 +909,7 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         val existing = repository.findExistingCoursesFromSession(sessionId)
 
@@ -939,7 +922,7 @@ class CourseRepositoryTest {
         val cardId = createCard("A", lat = 35.000, lon = 139.000)
         val sessionA = insertSession()
         insertFrame(sessionA, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
-        repository.createCoursesFromSession(sessionA, hubStopCardIds = emptySet())
+        repository.createCoursesFromSession(sessionA)
 
         val sessionB = insertSession() // 別セッション、まだ創設していない
 
@@ -959,8 +942,8 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
 
-        val first = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
-        val second = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val first = repository.createCoursesFromSession(sessionId)
+        val second = repository.createCoursesFromSession(sessionId)
 
         val existing = repository.findExistingCoursesFromSession(sessionId)
 
@@ -1047,7 +1030,7 @@ class CourseRepositoryTest {
         val farCardId = createCard("遠いカード", lat = 36.000, lon = 140.000) // コリドー外、吸着させない
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = farCardId)
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
 
         val details = repository.getCourseEditDetails(courseId)
@@ -1075,7 +1058,7 @@ class CourseRepositoryTest {
             sessionId, stopCardId = misattachedFarCardId,
             lat = 35.000, lon = 139.000, eventTs = 1_700_000_000_000L,
         )
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
 
         val details = repository.getCourseEditDetails(courseId)
@@ -1284,7 +1267,7 @@ class CourseRepositoryTest {
         insertFrame(sessionId, seq = 1, lat = 35.0005, lon = 139.000, capturedAt = 1_700_000_005_000L, stopCardId = cardB)
         insertGpsTrack(sessionId, baseLat = 35.000, baseLon = 139.000) // 0〜9秒分の実測軌跡
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
         assertThat(db.routePointDao().getOrdered(courseId)).isNotEmpty() // 創設時点で生成済みという前提の確認
 

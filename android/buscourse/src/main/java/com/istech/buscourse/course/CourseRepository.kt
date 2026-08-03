@@ -148,7 +148,7 @@ data class MarkerDuplicateGroup(
 
 /**
  * find-or-create候補の近接既存カード（候補選択UI用、思いつき2、2026-07-14追加）。
- * [CourseRepository.findOrCreateRadiusFor] の半径以内にある別の既存カードを距離順に列挙したもの。
+ * [CourseRepository.FIND_OR_CREATE_RADIUS_M] の半径以内にある別の既存カードを距離順に列挙したもの。
  */
 data class NearbyCard(val cardId: Long, val name: String, val distanceM: Double)
 
@@ -281,8 +281,6 @@ data class CourseCreationStopPreview(
     val capturedAt: Long,
     val latitude: Double,
     val longitude: Double,
-    /** [cardId] のカードが拠点（[BusStopCardEntity.isHub]）かどうか。拠点分割UIの初期選択に使う。 */
-    val isHubCandidate: Boolean,
     /** v20: この点に畳まれた押下数（1=畳みなし）。「同じ停車の中」の連打・押し直しが1停留所に見えている数。 */
     val foldedPressCount: Int = 1,
     /** v20: 畳まなかった理由（広がり15m超過）。畳んだ点・単独点は null。画面と EX への報告に使う。 */
@@ -291,22 +289,15 @@ data class CourseCreationStopPreview(
     val errorSpaceM: Double? = null,
 )
 
-/** [splitCourseCreationStops] が返す1断片（拠点マーク間の非拠点点列）。 */
-data class CourseCreationFragment(
-    val startAt: Long,
-    val endAt: Long,
-    val stops: List<CourseCreationStopPreview>,
-)
-
 /**
- * 創設結果（[CourseRepository.createCoursesFromSession] の返り値）。createdCourseIds は拠点分割後の
- * 断片と同じ並び。パス1はbus_stop_cardを一切作らない設計（v2の核心、クラスKDoc参照）のため、
+ * 創設結果（[CourseRepository.createCoursesFromSession] の返り値）。パス1はbus_stop_cardを
+ * 一切作らない設計（v2の核心、クラスKDoc参照）のため、
  * 旧 `newCardCount`（新規カード数）は意味を失い廃止した。代わりに生成した点の内訳を返す
  * （UI結果表示・work_log記録用）。
  */
 data class CourseCreationResult(
     val createdCourseIds: List<Long>,
-    /** 生成した停留所点の総数（断片横断の合計。拠点分割の境界点自体はどの断片にも属さないため含まない）。 */
+    /** 生成した停留所点の総数。 */
     val totalStopCount: Int,
     /**
      * うちカードが付いている点数（パス2で軌跡コリドー内のカードを吸着できた点。2026-07-16改：
@@ -335,52 +326,6 @@ data class WashPreview(
 )
 
 data class WashReserveResult(val courseId: Long, val stopCount: Int)
-
-/**
- * [stops] を拠点（[hubStopCardIds]、`cardId` がこの集合に含まれる点）で断片化する（設計ドラフトv2
- * §4「拠点判定と分割」）。[com.istech.buscourse.ui.splitByHubs]（旧「コース編成(抽出)」フェーズA-2、
- * 2026-07-13追加）と**同じアルゴリズム**（連続する拠点点を1つの境界イベントにまとめ、境界間の
- * 非拠点点列を1断片とする。境界となった拠点点自体はどの断片にも含めない＝従来どおりの挙動を踏襲）
- * だが、型として直接は流用できないため独自実装している：`splitByHubs` が受け取る
- * `MarkerTimelineRow` は `frameId`/`stopCardId` がどちらも非null前提（v1のカード起点モデル）のため、
- * パス1が生む「映像のみでカード未吸着の点」（`cardId=null`）を表現できない。[hubStopCardIds] は
- * 実在するカードIDの集合のため、`cardId=null` の点は判定上「拠点ではない」に自然に落ちる
- * （拠点フラグ自体がカードに立つものであり、カードの無い点が拠点になり得ないのは設計上当然）。
- *
- * [hubStopCardIds] が空なら拠点分割を行わず [stops] 全体を1断片として返す（拠点を選ばなくても
- * セッション全体から1コースだけ創れるようにするフォールバック、設計ドラフト§4.2「拠点なしで創設」）。
- * UI（[com.istech.buscourse.ui.CourseCreateScreen]、拠点チップのトグルのたびに呼ぶ）と
- * リポジトリ（[CourseRepository.createCoursesFromSession]、実際の創設直前に呼ぶ）の両方から
- * 同じ関数を呼ぶことで、プレビューと実際の創設が必ず同じ分割結果になるようにしている
- * （internal＝モジュール内公開、[com.istech.buscourse.ui] からもインポートして呼べる）。
- */
-internal fun splitCourseCreationStops(
-    stops: List<CourseCreationStopPreview>,
-    hubStopCardIds: Set<Long>,
-): List<CourseCreationFragment> {
-    if (stops.isEmpty()) return emptyList()
-    if (hubStopCardIds.isEmpty()) {
-        return listOf(CourseCreationFragment(stops.first().capturedAt, stops.last().capturedAt, stops))
-    }
-
-    val fragments = mutableListOf<CourseCreationFragment>()
-    var current = mutableListOf<CourseCreationStopPreview>()
-    for (stop in stops) {
-        val isHub = stop.cardId != null && stop.cardId in hubStopCardIds
-        if (isHub) {
-            if (current.isNotEmpty()) {
-                fragments += CourseCreationFragment(current.first().capturedAt, current.last().capturedAt, current.toList())
-                current = mutableListOf()
-            }
-        } else {
-            current += stop
-        }
-    }
-    if (current.isNotEmpty()) {
-        fragments += CourseCreationFragment(current.first().capturedAt, current.last().capturedAt, current.toList())
-    }
-    return fragments
-}
 
 /**
  * 停車推定の示唆1件（トップダウン創設 S3・パス3、[CourseRepository.analyzeStopEstimates] の要素、
@@ -1031,8 +976,7 @@ class CourseRepository(
      * 必ずこの関数を通すこと。違反時は [IllegalArgumentException] を送出する（既存の
      * `require`/`check` を使ったバリデーション流儀に合わせる）。
      *
-     * テストから直接呼べるよう `internal` にしている（[splitCourseCreationStops] と同じ理由。
-     * DB非依存の純粋なバリデーションであり、公開APIとして外部モジュールに広める意図はない）。
+     * DB非依存の純粋なバリデーションをテストから直接固定できるよう `internal` にしている。
      */
     internal fun requireCoordinateSource(stopCardId: Long?, frameId: Long?, eventId: Long? = null, context: String) {
         require(stopCardId != null || frameId != null || eventId != null) {
@@ -1387,14 +1331,13 @@ class CourseRepository(
     // フェーズB(c)専用の解析・適用ロジックのまま残している（[applyFindOrCreate]参照）。設計ドラフト
     // v2 §11の「analyzeFindOrCreateCandidates撤去」はコース創設フロー（S4）内での話であり、
     // 本セクション自体（フェーズB(c)、[com.istech.buscourse.ui.SessionAnalysisScreen]から実働で
-    // 呼ばれている）を廃止する指示ではないと判断し、[findOrCreateRadiusFor] を含め温存した
-    // （半径選択ロジックは新パス2 [attachPass2Cards]・[findNearbyCardsForCorridor] とも共用する）。
+    // 呼ばれている）を廃止する指示ではないと判断し温存した。拠点半径の使い分けは is_hub 廃止
+    // （2026-08-03裁定）で撤去済みであり、半径は単一とする。
     // ------------------------------------------------------------------
 
     /**
      * find-or-create候補の解析（フェーズB(c)、読み取り専用）。マーク済みフレームのうち、撮影位置と
-     * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M]
-     * （拠点カードは [FIND_OR_CREATE_HUB_RADIUS_M]、[findOrCreateRadiusFor] 参照）を超えるもの
+     * 現在割り当てられている停留所カード座標との距離が [FIND_OR_CREATE_RADIUS_M] を超えるもの
      * （誤吸着の疑い）を候補として列挙する。各候補について、コマ位置の半径内にある別の既存カードを
      * 全件・距離順に集め（[FindOrCreateCandidate.nearbyCards]）、UI側で「付替え／新規作成／
      * 選択しない」の候補選択を提示できるようにする（思いつき2、2026-07-14）。
@@ -1410,13 +1353,12 @@ class CourseRepository(
             val lon = frame.longitude ?: return@mapNotNull null
             val assignedCard = activeCards.find { it.id == stopCardId } ?: busStopCardDao.getById(stopCardId) ?: return@mapNotNull null
             val distanceM = GeoMath.haversineM(lat, lon, assignedCard.latitude, assignedCard.longitude)
-            val assignRadius = findOrCreateRadiusFor(assignedCard)
-            if (distanceM <= assignRadius) return@mapNotNull null
+            if (distanceM <= FIND_OR_CREATE_RADIUS_M) return@mapNotNull null
 
             val nearbyCards = activeCards
                 .filter { it.id != stopCardId }
                 .map { it to GeoMath.haversineM(lat, lon, it.latitude, it.longitude) }
-                .filter { (card, d) -> d <= findOrCreateRadiusFor(card) }
+                .filter { (_, d) -> d <= FIND_OR_CREATE_RADIUS_M }
                 .sortedBy { (_, d) -> d }
                 .map { (card, d) -> NearbyCard(cardId = card.id, name = card.name, distanceM = d) }
 
@@ -1435,14 +1377,7 @@ class CourseRepository(
     }
 
     /**
-     * find-or-create候補判定用の半径選択（[FIND_OR_CREATE_RADIUS_M] / [FIND_OR_CREATE_HUB_RADIUS_M]）。
-     * 拠点（[BusStopCardEntity.isHub]）カードは敷地が広いため、半径を広げて候補から外す。
-     */
-    private fun findOrCreateRadiusFor(card: BusStopCardEntity): Double =
-        if (card.isHub) FIND_OR_CREATE_HUB_RADIUS_M else FIND_OR_CREATE_RADIUS_M
-
-    /**
-     * 指定座標の軌跡コリドー内（[findOrCreateRadiusFor]の半径。拠点は広く判定）にある既存カードを
+     * 指定座標の軌跡コリドー内（[FIND_OR_CREATE_RADIUS_M]の半径）にある既存カードを
      * 距離順に列挙する（コース創設パス2 [attachPass2Cards] の核。2026-07-15追加）。
      *
      * 公開関数にしている理由: パス2は複数候補があっても最も近い1枚だけを吸着し、1:N候補の一覧は
@@ -1464,7 +1399,7 @@ class CourseRepository(
     private fun nearbyCardsWithinCorridor(latitude: Double, longitude: Double, cards: List<BusStopCardEntity>): List<NearbyCard> =
         cards
             .map { it to GeoMath.haversineM(latitude, longitude, it.latitude, it.longitude) }
-            .filter { (card, d) -> d <= findOrCreateRadiusFor(card) }
+            .filter { (_, d) -> d <= FIND_OR_CREATE_RADIUS_M }
             .sortedBy { (_, d) -> d }
             .map { (card, d) -> NearbyCard(cardId = card.id, name = card.name, distanceM = d) }
 
@@ -1663,7 +1598,7 @@ class CourseRepository(
     // コース確定→route_point生成（②「コース編成(抽出)」フェーズC-1、2026-07-14追加）
     //
     // フェーズB（承認キュー）を経て停留所マーカーが整った承認済みセッションから、そのコースの
-    // ナビ用連続トラックを確定し `route_point` へ保存する。範囲はコースの拠点→拠点にクリップする。
+    // ナビ用連続トラックを確定し `route_point` へ保存する。範囲はコース停留所の時間クラスタにクリップする。
     // 描画側（RouteMapScreen）の変更はC-2で行うためここでは扱わない。
     // ------------------------------------------------------------------
 
@@ -1672,35 +1607,20 @@ class CourseRepository(
      * トラックを確定し、既存の `route_point` テーブルへ保存する（`course.source_session_id` にも
      * 出所として記録する）。
      *
-     * **時間窓（クリップ窓）の決め方（2026-07-14見直し）**:
+     * **時間窓（クリップ窓）の決め方（2026-08-03見直し）**:
      * 共有停留所（複数コースに属す停留所）が別コースの走行中にマークされると、旧ロジック
      * （コース停留所マーカーの[最小,最大]captured_at）では窓がその時刻まで伸びてしまい、
      * 隣コースの脚まで route_point に混入する不具合があった（実測: course1が7km→13kmに膨張）。
-     * これを避けるため、次の優先順で窓を決める。
+     * これを避けるため、次の手順で窓を決める（[CLUSTER_GAP_MS]参照）。
      *
-     * 一次: 拠点フラグでフラグメント化（[HUB_FRAGMENT_MIN_COURSE_STOPS]参照）
-     * 1. セッション内の全マーカー（`timelapse_frame.stop_card_id`、コースの停留所に限らない）を
-     *    拠点（`bus_stop_card.is_hub=1`）のマークを境界にフラグメント化する。連続する拠点マークは
-     *    1つの境界イベントにまとめ、境界イベント間の非拠点マーク列を1フラグメントとする
-     *    （セクション4「拠点で分割」＝[com.istech.buscourse.ui.SessionAnalysisScreen]の
-     *    `splitByHubs` と同じ考え方）。セッションに拠点マークが1つも無ければこの経路は試さない。
-     * 2. 各フラグメントについて、含まれるマークの `stop_card_id` と `courseStopIds` の重なり数
-     *    （マーク件数ベース）を数え、最多のフラグメントを選ぶ。
-     * 3. **誤用ガード**: 選んだフラグメントの重なり数が [HUB_FRAGMENT_MIN_COURSE_STOPS] 未満なら、
-     *    この経路は無効とみなしフォールバックへ進む。
-     * 4. 有効なら window = 選んだフラグメントの[最小,最大]captured_at。さらに、その直前の拠点境界
-     *    イベントの最後の拠点マーク／直後の拠点境界イベントの最初の拠点マークがあれば、そこまで
-     *    前後に延伸する（拠点→拠点）。
-     *
-     * フォールバック: 拠点マークが無い、または一次が誤用ガードで無効だった場合（[CLUSTER_GAP_MS]参照）
      * 1. コースの停留所（`course_stop.stop_card_id`）のうち、このセッションでマーク済みのもの
      *    （courseMarks）を時刻順に集める。空ならこの関数は0を返す（現行どおり）。
      * 2. courseMarks を時間ギャップが [CLUSTER_GAP_MS] を超える箇所で連続クラスタに分割する。
      * 3. course停留所の異なり数が最多のクラスタを選ぶ（同数なら継続時間が最長のもの）。これにより
      *    別コース走行中に紛れ込んだ孤立マーカー（例: 08:37の#13）は別クラスタとして除外される。
-     * 4. window = 選んだクラスタの[最小,最大]captured_at。セッションに拠点マークがある場合は、
-     *    この窓の直前直後1件が拠点であれば延伸する（一次と同じ「直前/直後の1件」限定の延伸方式。
-     *    拠点を探して遡り続けることはしない）。
+     * 4. window = 選んだクラスタの[最小,最大]captured_at。
+     *
+     * 拠点フラグメント化と拠点マークへの窓延伸は is_hub 廃止（2026-08-03裁定）で撤去済み。
      *
      * 窓 [windowStart, windowEnd]（captured_at基準）に入る `gps_point`（`ts_epoch_ms` 基準、seq順）
      * だけを連続トラックとして採用する（以降は現行どおり）。
@@ -1727,111 +1647,37 @@ class CourseRepository(
             val courseStopIds = details.stops.mapNotNull { it.card?.id }.toSet()
             if (courseStopIds.isEmpty()) return@withTransaction 0
 
-            // セッション内の全マーカー（seq順＝時系列順）。拠点分割／拠点延伸の探索にはコース外のマーカーも要る。
+            // セッション内の全マーカー（seq順＝時系列順）。
             // getMarkedFramesはSQL側でstop_card_id IS NOT NULLに絞っているが、エンティティの型自体は
             // 引き続きLong?のため、下記のnull安全な参照で扱う。
             val marks = timelapseFrameDao.getMarkedFrames(sessionId)
 
-            val hubCache = mutableMapOf<Long, Boolean>()
-            suspend fun isHub(stopCardId: Long): Boolean =
-                hubCache.getOrPut(stopCardId) { busStopCardDao.getById(stopCardId)?.isHub == true }
+            val courseMarks = marks
+                .filter { it.stopCardId != null && it.stopCardId in courseStopIds }
+                .sortedBy { it.capturedAt }
+            if (courseMarks.isEmpty()) return@withTransaction 0
 
-            // マークごとに拠点マークか否かを判定しておく（以降のフラグメント化・延伸探索の両方で使う）
-            val hubFlagByMark = marks.map { mark ->
-                val stopId = mark.stopCardId
-                stopId != null && isHub(stopId)
-            }
-
-            // marksを拠点マークの境界でフラグメント化した1断片（拠点境界イベント or 非拠点マーク列）。
-            data class MarkSegment(val isHubGroup: Boolean, val marks: List<TimelapseFrameEntity>)
-
-            val segments = mutableListOf<MarkSegment>()
-            run {
-                var i = 0
-                while (i < marks.size) {
-                    val hub = hubFlagByMark[i]
-                    val start = i
-                    while (i < marks.size && hubFlagByMark[i] == hub) i++
-                    segments += MarkSegment(hub, marks.subList(start, i).toList())
+            // 時間ギャップ > CLUSTER_GAP_MS で連続クラスタに分割する
+            val clusters = mutableListOf<MutableList<TimelapseFrameEntity>>()
+            for (mark in courseMarks) {
+                val current = clusters.lastOrNull()
+                if (current != null && mark.capturedAt - current.last().capturedAt <= CLUSTER_GAP_MS) {
+                    current += mark
+                } else {
+                    clusters += mutableListOf(mark)
                 }
             }
 
-            // --- 一次: 拠点フラグでフラグメント化し、コース停留所との重なりが最多のフラグメントを選ぶ ---
-            val hubWindow: Pair<Long, Long>? = run {
-                if (hubFlagByMark.none { it }) return@run null // 拠点マークが1つも無ければこの経路は試さない
+            // course停留所の異なり数が最多のクラスタを選ぶ（同数なら継続時間が最長のもの）
+            val bestCluster = clusters.maxWithOrNull(
+                compareBy(
+                    { cluster: List<TimelapseFrameEntity> -> cluster.mapNotNull { it.stopCardId }.toSet().size },
+                    { cluster: List<TimelapseFrameEntity> -> cluster.last().capturedAt - cluster.first().capturedAt },
+                )
+            ) ?: return@withTransaction 0
 
-                var bestIdx = -1
-                var bestOverlap = -1
-                for ((idx, seg) in segments.withIndex()) {
-                    if (seg.isHubGroup) continue
-                    val overlap = seg.marks.count { it.stopCardId != null && it.stopCardId in courseStopIds }
-                    if (overlap > bestOverlap) {
-                        bestOverlap = overlap
-                        bestIdx = idx
-                    }
-                }
-                if (bestIdx == -1) return@run null
-                if (bestOverlap < HUB_FRAGMENT_MIN_COURSE_STOPS) return@run null // 誤用ガード→フォールバックへ
-
-                val chosen = segments[bestIdx]
-                var start = chosen.marks.minOf { it.capturedAt }
-                var end = chosen.marks.maxOf { it.capturedAt }
-                // 直前/直後の拠点境界イベント（あれば）まで延伸する
-                segments.getOrNull(bestIdx - 1)?.takeIf { it.isHubGroup }?.let { start = it.marks.last().capturedAt }
-                segments.getOrNull(bestIdx + 1)?.takeIf { it.isHubGroup }?.let { end = it.marks.first().capturedAt }
-                start to end
-            }
-
-            var windowStart: Long
-            var windowEnd: Long
-
-            if (hubWindow != null) {
-                windowStart = hubWindow.first
-                windowEnd = hubWindow.second
-            } else {
-                // --- フォールバック: 拠点マーク無し、または一次が誤用ガードで無効だった場合 ---
-                val courseMarks = marks
-                    .filter { it.stopCardId != null && it.stopCardId in courseStopIds }
-                    .sortedBy { it.capturedAt }
-                if (courseMarks.isEmpty()) return@withTransaction 0
-
-                // 時間ギャップ > CLUSTER_GAP_MS で連続クラスタに分割する
-                val clusters = mutableListOf<MutableList<TimelapseFrameEntity>>()
-                for (mark in courseMarks) {
-                    val current = clusters.lastOrNull()
-                    if (current != null && mark.capturedAt - current.last().capturedAt <= CLUSTER_GAP_MS) {
-                        current += mark
-                    } else {
-                        clusters += mutableListOf(mark)
-                    }
-                }
-
-                // course停留所の異なり数が最多のクラスタを選ぶ（同数なら継続時間が最長のもの）
-                val bestCluster = clusters.maxWithOrNull(
-                    compareBy(
-                        { cluster: List<TimelapseFrameEntity> -> cluster.mapNotNull { it.stopCardId }.toSet().size },
-                        { cluster: List<TimelapseFrameEntity> -> cluster.last().capturedAt - cluster.first().capturedAt },
-                    )
-                ) ?: return@withTransaction 0
-
-                windowStart = bestCluster.first().capturedAt
-                windowEnd = bestCluster.last().capturedAt
-
-                // 開始直前の1件のマーカーが拠点なら、そのcaptured_atまで前へ延伸する（該当が無ければ延伸しない）
-                marks.lastOrNull { it.capturedAt < windowStart }?.let { candidate ->
-                    val stopId = candidate.stopCardId
-                    if (stopId != null && isHub(stopId)) {
-                        windowStart = candidate.capturedAt
-                    }
-                }
-                // 終了直後の1件のマーカーが拠点なら、そのcaptured_atまで後ろへ延伸する（該当が無ければ延伸しない）
-                marks.firstOrNull { it.capturedAt > windowEnd }?.let { candidate ->
-                    val stopId = candidate.stopCardId
-                    if (stopId != null && isHub(stopId)) {
-                        windowEnd = candidate.capturedAt
-                    }
-                }
-            }
+            val windowStart = bestCluster.first().capturedAt
+            val windowEnd = bestCluster.last().capturedAt
 
             val windowPoints = gpsPointDao.getBySession(sessionId) // seq順
                 .filter { it.tsEpochMs in windowStart..windowEnd }
@@ -1867,9 +1713,7 @@ class CourseRepository(
     //        非対称な実装を是正）。
     // パス2: パス1の各点の**真の位置**（frame座標優先、無ければevent座標）からコリドー内のハイレゾ
     //        （カード）を吸着（[attachPass2Cards]）。記録時の吸着結果に一切依存しない。
-    // 拠点分割は既存の [com.istech.buscourse.ui.splitByHubs] と同じアルゴリズムを
-    // [splitCourseCreationStops] に流用（型がcard-onlyの点を扱えないため、この関数自体は新規実装。
-    // クラスKDoc参照）。既存コース・既存カードは一切変更しない（新規追加のみ）。
+    // 全点を1本のコースとして創設する。既存コース・既存カードは一切変更しない（新規追加のみ）。
     // ------------------------------------------------------------------
 
     /** パス1〜パス2の中間表現（DBには未書き込みの1点）。[CourseCreationStopPreview]のクラスKDoc参照。 */
@@ -1916,7 +1760,7 @@ class CourseRepository(
      * 内でcard座標へフォールバックすることは実質無い。それでも将来カードのみの点（パス3「＋停留所を
      * 追加」、設計ドラフト§5）を本関数に通す可能性に備え、3段のcoalesceとして実装しておく。
      *
-     * テストから直接呼べるよう `internal` にしている（[splitCourseCreationStops] と同じ理由）。
+     * 純粋関数の境界条件をテストから直接固定できるよう `internal` にしている。
      */
     internal fun resolveStopPosition(
         frameLatitude: Double? = null, frameLongitude: Double? = null,
@@ -2048,7 +1892,8 @@ class CourseRepository(
      * パス2（吸着・昇格、設計ドラフトv2 §3）。パス1の各点について、**その点の真の位置**
      * （[DraftCourseStop.latitude]/[DraftCourseStop.longitude]。frame座標があればそれ、無ければ
      * event座標。[resolveStopPosition]参照）から軌跡コリドー内（[findNearbyCardsForCorridor]、
-     * 半径は通常/拠点で変数。拠点は広く判定）にある既存カードを探して `cardId` を埋める。
+     * 半径は単一の [FIND_OR_CREATE_RADIUS_M]。拠点半径の使い分けは is_hub 廃止・2026-08-03裁定で
+     * 撤去済み）にある既存カードを探して `cardId` を埋める。
      *
      * **2026-07-16改**: パス1が誤吸着（記録時の `stop_card_id`）を一切引き継がなくなったため
      * （[generatePass1RawStops]参照）、パス2に渡る全点は常に `cardId=null` で入ってくる。
@@ -2107,7 +1952,6 @@ class CourseRepository(
                 capturedAt = p.capturedAt,
                 latitude = p.latitude,
                 longitude = p.longitude,
-                isHubCandidate = card?.isHub == true,
                 foldedPressCount = p.foldedPressCount,
                 foldNote = p.foldNote,
                 errorSpaceM = p.errorSpaceM,
@@ -2116,10 +1960,7 @@ class CourseRepository(
     }
 
     /**
-     * コース創設プレビュー（パス1＋パス2、読み取り専用）。UI（[com.istech.buscourse.ui.CourseCreateScreen]）
-     * が拠点選択・断片プレビュー・コース名入力を表示するための、時系列順・拠点分割前の全点。
-     * 拠点分割は [splitCourseCreationStops] にこの返り値と選択拠点集合を渡してUI側（純Kotlin、
-     * DBアクセス無し）で行う想定（拠点選択のたびに読み取り専用の重い解析をやり直さないため）。
+     * コース創設プレビュー（パス1＋パス2、読み取り専用）。時系列順の全点を返す。
      */
     suspend fun previewCourseCreation(
         sessionId: Long,
@@ -2201,11 +2042,10 @@ class CourseRepository(
 
     /**
      * コース創設（トップダウン、パス1＋パス2、2026-07-15全面改訂）。[sessionId] からパス1（悉皆生成）
-     * →パス2（吸着・昇格）で点列を作り、[hubStopCardIds] で拠点分割（[splitCourseCreationStops]）して
-     * 断片ごとに1コースを作る。[courseNames] は断片indexに対応するコース名（[courseNames]が短い・
-     * 空文字の断片は既定名 `"S{sessionId}-{断片番号}"`）。
+     * →パス2（吸着・昇格）で点列を作り、全点を1本のコースにする。[courseNames] の先頭が空文字
+     * または存在しない場合は既定名 `"S{sessionId}-1"` を使う。
      *
-     * 断片ごとに: [createCourse] → [insertCourseStopsFromPreview]（course_stop直挿し）→
+     * [createCourse] → [insertCourseStopsFromPreview]（course_stop直挿し）→
      * [regenerateCourseSegments]（カードを持つ隣接ペアだけ区間を作る。同メソッドのKDoc参照）→
      * [confirmCourseRouteFromSession]（route_point生成。同メソッドのKDoc参照、カード無し点も安全）。
      *
@@ -2218,36 +2058,27 @@ class CourseRepository(
      */
     suspend fun createCoursesFromSession(
         sessionId: Long,
-        hubStopCardIds: Set<Long>,
         courseNames: List<String> = emptyList(),
         kind: CourseKind = CourseKind.STANDARD,
         stayDepartM: Double = PressFolder.DEFAULT_STAY_DEPART_M,
     ): CourseCreationResult = withContext(Dispatchers.IO) {
         val previewStops = resolvePreviewStops(sessionId, buildPass1Pass2Stops(sessionId, stayDepartM).stops)
-        val fragments = splitCourseCreationStops(previewStops, hubStopCardIds)
-
-        val createdCourseIds = mutableListOf<Long>()
-        var totalStopCount = 0
-        var cardAttachedStopCount = 0
-        var frameOnlyStopCount = 0
-        for ((index, fragment) in fragments.withIndex()) {
-            if (fragment.stops.isEmpty()) continue
-            val name = courseNames.getOrNull(index)?.takeIf { it.isNotBlank() } ?: "S$sessionId-${index + 1}"
+        val createdCourseIds = if (previewStops.isEmpty()) {
+            emptyList()
+        } else {
+            val name = courseNames.firstOrNull()?.takeIf { it.isNotBlank() } ?: "S$sessionId-1"
             val courseId = createCourse(name, kind)
-            insertCourseStopsFromPreview(courseId, fragment.stops)
+            insertCourseStopsFromPreview(courseId, previewStops)
             regenerateCourseSegments(courseId)
             confirmCourseRouteFromSession(courseId, sessionId)
-            createdCourseIds += courseId
-            totalStopCount += fragment.stops.size
-            cardAttachedStopCount += fragment.stops.count { it.cardId != null }
-            frameOnlyStopCount += fragment.stops.count { it.cardId == null }
+            listOf(courseId)
         }
 
         CourseCreationResult(
             createdCourseIds = createdCourseIds,
-            totalStopCount = totalStopCount,
-            cardAttachedStopCount = cardAttachedStopCount,
-            frameOnlyStopCount = frameOnlyStopCount,
+            totalStopCount = previewStops.size,
+            cardAttachedStopCount = previewStops.count { it.cardId != null },
+            frameOnlyStopCount = previewStops.count { it.cardId == null },
         )
     }
 
@@ -2263,7 +2094,6 @@ class CourseRepository(
                     .forEach { courseDao.deleteById(it.id) }
                 val created = createCoursesFromSession(
                     sessionId = sessionId,
-                    hubStopCardIds = emptySet(),
                     courseNames = listOf("#${sessionId} の予約"),
                     kind = CourseKind.DRAFT,
                     stayDepartM = stayDepartM,
@@ -2304,8 +2134,7 @@ class CourseRepository(
      *    フレーム／MANUALイベント由来、いずれも実測座標）の近傍 [STOP_ESTIMATE_EXCLUSION_RADIUS_M]
      *    以内にあるクラスタは、既に停留所として確定済みとみなし示唆から除外する（二重提示しない、
      *    設計ドラフト§3パス3）。パス1の点はカード（`card_id`）を一切引き継がない設計
-     *    （[generatePass1RawStops]のKDoc参照）のため、[findOrCreateRadiusFor] のような拠点/通常の
-     *    半径使い分けはできず、単一の通常半径のみを使う。
+     *    （[generatePass1RawStops]のKDoc参照）のため、単一の通常半径のみを使う。
      *
      * 空セッション・低速クラスタなしの場合は空リストを返す（例外を投げない）。
      */
@@ -2717,14 +2546,6 @@ class CourseRepository(
          */
         private const val FIND_OR_CREATE_RADIUS_M = 70.0
 
-        /**
-         * find-or-create候補（フェーズB(c)）: 拠点（[BusStopCardEntity.isHub]）カード用の判定半径。
-         * 拠点（園）は敷地が広く、マーカーが登録カードから[FIND_OR_CREATE_RADIUS_M]を超えても同じ拠点
-         * のことがあるため、拠点カードだけ半径を広げて誤って新規カード化候補に出さないようにする。
-         * **暫定値・後で調整可**。
-         */
-        private const val FIND_OR_CREATE_HUB_RADIUS_M = 180.0
-
         /** find-or-create適用（フェーズB(c)）で作成する新規カード名 "候補NNN" のパース用。 */
         private val CANDIDATE_NAME_REGEX = Regex("^候補(\\d{3})$")
 
@@ -2738,16 +2559,7 @@ class CourseRepository(
         private const val MANUAL_EVENT_FRAME_MATCH_WINDOW_MS = 15_000L
 
         /**
-         * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定の一次経路
-         * （拠点フラグでのフラグメント化）で選んだフラグメントを採用してよいと判定する、コース停留所
-         * との重なり数（マーク件数ベース）の最小しきい値。これ未満なら誤用（拠点分割が実態と噛み合って
-         * いない等）とみなし、フォールバック（クラスタリング）経路へ切り替える。2026-07-14暫定値。
-         */
-        private const val HUB_FRAGMENT_MIN_COURSE_STOPS = 2
-
-        /**
-         * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: クリップ窓決定のフォールバック
-         * 経路（拠点マーク無し／一次が誤用ガードで無効）で、コース停留所マーカー列を連続クラスタに
+         * コース確定（フェーズC-1、[confirmCourseRouteFromSession]）: コース停留所マーカー列を連続クラスタに
          * 分割する際の時間ギャップしきい値。これを超える間隔が空いたら別クラスタとみなす
          * （共有停留所が別コース走行中に単発でマークされた場合の孤立を切り離すため）。2026-07-14暫定値。
          */
@@ -2774,9 +2586,7 @@ class CourseRepository(
         /**
          * パス3（停車推定、[analyzeStopEstimates]）: クラスタの代表座標が、パス1で既に確定済みの点
          * （[generatePass1RawStops]）の近傍にあるとみなす除外半径（m）。「既に停留所」として二重
-         * 提示しないための判定であり、パス1生の点はカード（拠点フラグ）を一切引き継がない設計
-         * （[generatePass1RawStops]参照）のため [findOrCreateRadiusFor] のような拠点/通常の
-         * 半径使い分けはできず、単一の通常半径のみを使う。[FIND_OR_CREATE_RADIUS_M]・
+         * 提示しないための判定であり、単一の通常半径を使う。[FIND_OR_CREATE_RADIUS_M]・
          * [COVERAGE_RADIUS_M] と同じ値（実データ由来の校正済み値）を採用した。**暫定値・後で調整可**。
          */
         private const val STOP_ESTIMATE_EXCLUSION_RADIUS_M = 70.0
