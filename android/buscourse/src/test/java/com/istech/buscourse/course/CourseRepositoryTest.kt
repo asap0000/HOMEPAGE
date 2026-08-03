@@ -1507,4 +1507,46 @@ class CourseRepositoryTest {
         assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNotNull()
     }
 
+    /**
+     * コース削除でも現役ナビ用マップをアーカイブする（[CourseRepository.cutCourseAt] と同じ扱い。
+     * 官房裁定 2026-08-03＋オーナー承認 2026-08-04）。残すと同じ identity で作り直した瞬間に
+     * 「送り済み」に見える（B-1 の状態モデルは navi_map の実在で判定するため）。
+     */
+    @Test
+    fun deleteCourse_archivesActiveMapOfSameIdentity() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "旧地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.deleteCourse(courseId)
+
+        assertThat(db.courseDao().getById(courseId)).isNull()
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNotNull()
+        // 同じ identity で作り直しても「送り済み」に見えない＝現役マップが残っていない
+        assertThat(db.naviMapDao().getActiveMapsByIdentity("B", 1, 2026)).isEmpty()
+    }
+
+    /** identity を持たないコースの削除では何もアーカイブしない（別コースの地図を巻き込まない）。 */
+    @Test
+    fun deleteCourse_withoutIdentity_keepsOtherMapsActive() = runTest {
+        val (courseId, _) = seedCourseForCut(5) // identity 未設定のまま
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "別コースの地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.deleteCourse(courseId)
+
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNull()
+    }
+
 }

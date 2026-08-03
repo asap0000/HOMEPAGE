@@ -1040,9 +1040,21 @@ class CourseRepository(
      * FK ON DELETE CASCADE で連動削除される。停留所カード・記録セッションには触れない（源泉として残す）。
      * base_course_id で本コースを基底参照している他コースがあれば、その参照は SET NULL される。
      * 冪等: 存在しないIDを渡しても何も起きない。
+     *
+     * **identity を持つコースを消すときは、その identity の現役ナビ用マップも一緒にアーカイブする**
+     * （[cutCourseAt] と同じ扱い。官房裁定 2026-08-03＋オーナー承認 2026-08-04）。理由:
+     * `navi_map` は identity（bus_id/course_no/year）で引くので、**コースだけ消すと地図が現役のまま残り**、
+     * 同じ identity でコースを作り直した瞬間に「送り済み」に見える（B-1 の状態モデルは `navi_map` の実在で判定する）。
+     * さらに残った ex_full は [com.istech.buscourse.navimap.NaviMapGenerator] が新しい app_simple を
+     * 生成直後に退避させるため「地図が消えた」に見える。**アーカイブは非破壊で戻せる**（`archived_at` を立てるだけ）。
      */
     suspend fun deleteCourse(courseId: Long) = withContext(Dispatchers.IO) {
         database.withTransaction {
+            val now = System.currentTimeMillis()
+            courseDao.getById(courseId)?.identityOrNull()?.let { identity ->
+                naviMapDao.getActiveMapsByIdentity(identity.busId, identity.courseNo, identity.year)
+                    .forEach { naviMapDao.archiveMap(it.id, now) }
+            }
             courseDao.deleteById(courseId)
         }
     }
