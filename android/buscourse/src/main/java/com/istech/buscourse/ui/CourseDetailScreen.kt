@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -34,6 +33,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -58,13 +58,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
+import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.course.CourseEditDetails
 import com.istech.buscourse.course.CourseStopEdit
@@ -72,6 +77,7 @@ import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.course.resolveUniqueCourseName
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.Locale
 
 /**
  * 編成中の停留所1行（並べ替え用ローカル状態、S6a「コース編集画面の刷新（土台）」で改訂）。
@@ -86,6 +92,11 @@ data class StopRow(
     val cardId: Long?,
     val displayName: String,
     val riderCount: Int,
+    val thumbRelPath: String?,
+    val capturedAt: Long?,
+    val errorSpaceM: Double?,
+    val latitude: Double,
+    val longitude: Double,
 ) {
     /** 状態ドット表示用: 映像（frame_id）を持つか（設計ドラフト§7.1「映像＝青」）。 */
     val hasFrame: Boolean get() = frameId != null
@@ -170,6 +181,10 @@ fun CourseDetailScreen(
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
     var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var unusedOnlyFilter by remember { mutableStateOf(false) }
+    // 詳細を開いた停留所を、閉じた後も行上で見失わないための表示専用state
+    // （design-gate C-2 y×5・2026-08-04）。
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    var detailDialogIndex by remember { mutableStateOf<Int?>(null) }
 
     // 永続化済み順序と未確定編集中の順序の差分（このLaunchedEffectの直前、＝再読込直前の状態で判定する
     // 必要があるため宣言をLaunchedEffectより前に置く）。dirty中はeditedStopsの再構築をスキップする
@@ -191,7 +206,11 @@ fun CourseDetailScreen(
                 // スナップショット保存すると、コース編成中に別画面でカードの乗車人数を変更しても
                 // 定員警告が古い値のまま表示され続けていた）。
                 val sourceSessionId = loaded?.course?.sourceSessionId
+                val loadedByPointers = loaded?.stops?.associateBy {
+                    CourseStopEdit(frameId = it.frameId, eventId = it.eventId, cardId = it.cardId)
+                }.orEmpty()
                 draftOrder.forEachIndexed { index, edit ->
+                    val loadedStop = loadedByPointers[edit]
                     if (edit.cardId != null) {
                         // getActiveStopCards()（未アーカイブのみ）だと、下書きに含まれるカードが後から
                         // 他画面でアーカイブされていた場合に一覧から消えてしまう（実機検証で発覚）ため、
@@ -204,6 +223,12 @@ fun CourseDetailScreen(
                                 cardId = edit.cardId,
                                 displayName = card?.name ?: "停留所#${edit.cardId}",
                                 riderCount = card?.riderCount ?: 0,
+                                thumbRelPath = card?.let { "stopcards/${it.id}/photo_thumb.jpg" }
+                                    ?: loadedStop?.thumbRelPath,
+                                capturedAt = loadedStop?.capturedAt,
+                                errorSpaceM = loadedStop?.errorSpaceM,
+                                latitude = loadedStop?.latitude ?: card?.latitude ?: 0.0,
+                                longitude = loadedStop?.longitude ?: card?.longitude ?: 0.0,
                             )
                         )
                     } else {
@@ -216,6 +241,11 @@ fun CourseDetailScreen(
                                 cardId = null,
                                 displayName = "S${sourceSessionId ?: "?"}-${index + 1}",
                                 riderCount = 0,
+                                thumbRelPath = loadedStop?.thumbRelPath,
+                                capturedAt = loadedStop?.capturedAt,
+                                errorSpaceM = loadedStop?.errorSpaceM,
+                                latitude = loadedStop?.latitude ?: 0.0,
+                                longitude = loadedStop?.longitude ?: 0.0,
                             )
                         )
                     }
@@ -229,6 +259,11 @@ fun CourseDetailScreen(
                             cardId = stop.cardId,
                             displayName = stop.displayName,
                             riderCount = stop.riderCount,
+                            thumbRelPath = stop.thumbRelPath,
+                            capturedAt = stop.capturedAt,
+                            errorSpaceM = stop.errorSpaceM,
+                            latitude = stop.latitude,
+                            longitude = stop.longitude,
                         )
                     )
                 }
@@ -441,13 +476,32 @@ fun CourseDetailScreen(
                     cumulativeRiders >= BUS_CAPACITY_WARNING -> Color(0xFFF9A825) // イエローシグナル
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
+                val selected = selectedIndex == index
+                val accentColor = MaterialTheme.colorScheme.primary
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 3.dp)
                         .zIndex(if (dragging) 1f else 0f)
                         .graphicsLayer { translationY = dragState.offsetYFor(rawIndex) }
-                        .then(if (dragging) Modifier.shadow(6.dp) else Modifier),
+                        .then(if (dragging) Modifier.shadow(6.dp) else Modifier)
+                        .then(
+                            if (selected) Modifier.drawBehind {
+                                drawLine(
+                                    color = accentColor,
+                                    start = androidx.compose.ui.geometry.Offset(1.5.dp.toPx(), 0f),
+                                    end = androidx.compose.ui.geometry.Offset(1.5.dp.toPx(), size.height),
+                                    strokeWidth = 3.dp.toPx(),
+                                )
+                            } else Modifier
+                        ),
+                    colors = if (selected) {
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        )
+                    } else {
+                        CardDefaults.cardColors()
+                    },
                 ) {
                     Row(
                         modifier = Modifier
@@ -464,80 +518,87 @@ fun CourseDetailScreen(
                                 .dragHandleModifier(dragState, rawIndex),
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(
-                            "${index + 1}.",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        StopStatusDots(hasFrame = stop.hasFrame, hasCard = stop.hasCard)
-                        Spacer(Modifier.width(8.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                stop.displayName,
-                                style = MaterialTheme.typography.bodyLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (stop.riderCount > 0) {
-                                Text(
-                                    "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = capacityColor,
-                                )
-                            }
-                            if (index in cutIndexes) {
-                                Text(
-                                    "✂ ここで切る",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        }
-                        TextButton(
-                            onClick = {
-                                if (index in cutIndexes) {
-                                    cutIndexes = cutIndexes - index
-                                } else {
-                                    val invalid = index == 0 || index == editedStops.lastIndex ||
-                                        cutIndexes.any { kotlin.math.abs(it - index) == 1 }
-                                    if (invalid) {
-                                        Toast.makeText(
-                                            context,
-                                            "ここでは切れません（コースが空になります）",
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
-                                    } else {
-                                        cutIndexes = cutIndexes + index
-                                    }
+                        // ハンドルをタップ領域から外し、長押しドラッグとの競合を避ける。
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable(enabled = !busy) {
+                                    selectedIndex = index
+                                    detailDialogIndex = index
                                 }
-                            },
-                            enabled = !busy && !dirty,
-                        ) { Text(if (index in cutIndexes) "解除" else "✂") }
-                        // 繰り上げ・繰り下げ（ループコースの右回り/左回り入替、手動追加分の位置調整用）
-                        Column {
-                            StopMoveButton(
-                                icon = Icons.Filled.KeyboardArrowUp,
-                                contentDescription = "繰り上げ",
-                                enabled = !busy && index > 0,
-                                onClick = { moveStop(index, -1) },
-                            )
-                            StopMoveButton(
-                                icon = Icons.Filled.KeyboardArrowDown,
-                                contentDescription = "繰り下げ",
-                                enabled = !busy && index < editedStops.lastIndex,
-                                onClick = { moveStop(index, 1) },
-                            )
-                        }
-                        IconButton(
-                            onClick = {
-                                cutIndexes = emptySet()
-                                editedStops.removeAt(index)
-                                persistDraft()
-                            },
-                            enabled = !busy,
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(Icons.Filled.Close, contentDescription = "コースから除外")
+                            Text(
+                                "${index + 1}.",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            StopThumbnail(
+                                file = stop.thumbRelPath?.let { BusCourseStorage.resolve(context, it) },
+                                sizeDp = 56,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            StopStatusDots(hasFrame = stop.hasFrame, hasCard = stop.hasCard)
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    stop.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (stop.riderCount > 0) {
+                                    Text(
+                                        "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = capacityColor,
+                                    )
+                                }
+                                if (index in cutIndexes) {
+                                    Text(
+                                        "✂ ここで切る",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (index in cutIndexes) {
+                                        cutIndexes = cutIndexes - index
+                                    } else {
+                                        val invalid = index == 0 || index == editedStops.lastIndex ||
+                                            cutIndexes.any { kotlin.math.abs(it - index) == 1 }
+                                        if (invalid) {
+                                            Toast.makeText(
+                                                context,
+                                                "ここでは切れません（コースが空になります）",
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        } else {
+                                            cutIndexes = cutIndexes + index
+                                        }
+                                    }
+                                },
+                                enabled = !busy && !dirty,
+                            ) { Text(if (index in cutIndexes) "解除" else "✂") }
+                            // 繰り上げ・繰り下げ（ループコースの右回り/左回り入替、手動追加分の位置調整用）
+                            Column {
+                                StopMoveButton(
+                                    icon = Icons.Filled.KeyboardArrowUp,
+                                    contentDescription = "繰り上げ",
+                                    enabled = !busy && index > 0,
+                                    onClick = { moveStop(index, -1) },
+                                )
+                                StopMoveButton(
+                                    icon = Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = "繰り下げ",
+                                    enabled = !busy && index < editedStops.lastIndex,
+                                    onClick = { moveStop(index, 1) },
+                                )
+                            }
                         }
                     }
                 }
@@ -649,6 +710,35 @@ fun CourseDetailScreen(
         }
     }
 
+    detailDialogIndex?.let { index ->
+        val stop = editedStops.getOrNull(index)
+        if (stop != null) {
+            StopDetailDialog(
+                stop = stop,
+                index = index,
+                courseName = details?.course?.name.orEmpty(),
+                sourceSessionId = details?.course?.sourceSessionId,
+                photoFile = stop.thumbRelPath?.let { BusCourseStorage.resolve(context, it) },
+                onDismiss = { detailDialogIndex = null },
+                onRemove = {
+                    detailDialogIndex = null
+                    cutIndexes = emptySet()
+                    editedStops.removeAt(index)
+                    persistDraft()
+                    val next = nextSelectionAfterRemoval(index, editedStops.size)
+                    selectedIndex = next
+                    if (next != null) {
+                        scope.launch {
+                            // index 0 のヘッダが先行するため、停留所indexへ1を足す。
+                            dragState.lazyListState.animateScrollToItem(next + stopRangeStart)
+                        }
+                    }
+                },
+                busy = busy,
+            )
+        }
+    }
+
     if (showCutConfirm) {
         val course = details?.course
         val sortedCuts = cutIndexes.sorted()
@@ -677,7 +767,7 @@ fun CourseDetailScreen(
                     Text(
                         "切った『$cutNames』は両方のコースに入ります（前の終点・後ろの始点）。" +
                             "元の『${course?.name ?: "このコース"}』は無くなります。" +
-                            "やり直したいときは走行の洗浄からもう一度作れます。",
+                            "やり直したいときは運行の洗浄からもう一度作れます。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -732,6 +822,11 @@ fun CourseDetailScreen(
                                                     cardId = card.id,
                                                     displayName = card.name,
                                                     riderCount = card.riderCount,
+                                                    thumbRelPath = "stopcards/${card.id}/photo_thumb.jpg",
+                                                    capturedAt = null,
+                                                    errorSpaceM = null,
+                                                    latitude = card.latitude,
+                                                    longitude = card.longitude,
                                                 )
                                             )
                                             cutIndexes = emptySet()
@@ -982,6 +1077,100 @@ fun CourseDetailScreen(
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("キャンセル") }
             },
+        )
+    }
+}
+
+/** 停留所の由来とカード状態を確認する読み取り専用詳細（design-gate C-2 y×5・2026-08-04）。 */
+@Composable
+private fun StopDetailDialog(
+    stop: StopRow,
+    index: Int,
+    courseName: String,
+    sourceSessionId: Long?,
+    photoFile: File?,
+    onDismiss: () -> Unit,
+    onRemove: () -> Unit,
+    busy: Boolean,
+) {
+    val outlineColor = MaterialTheme.colorScheme.outline
+    val blankCardBorder = if (!stop.hasCard) {
+        Modifier.drawBehind {
+            drawRoundRect(
+                color = outlineColor,
+                style = Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 5.dp.toPx())),
+                ),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
+            )
+        }
+    } else {
+        Modifier
+    }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("停留所の詳細") },
+        text = {
+            Column(
+                modifier = blankCardBorder.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StopThumbnail(file = photoFile, sizeDp = 96, modifier = Modifier.align(Alignment.CenterHorizontally))
+                if (stop.hasCard) {
+                    StopDetailLine("名前", stop.displayName)
+                } else {
+                    StopDetailLine("名前", "（まだ付いていません）", pending = true)
+                }
+                StopDetailLine(
+                    "座標",
+                    String.format(Locale.JAPAN, "%.5f, %.5f", stop.latitude, stop.longitude),
+                )
+                if (stop.hasCard) {
+                    StopDetailLine("乗車人数", "${stop.riderCount} 名")
+                } else {
+                    StopDetailLine("乗車人数", "（未定）", pending = true)
+                }
+                stop.capturedAt?.let {
+                    StopDetailLine("この運行", "#${sourceSessionId ?: "?"} ／ ${formatTimeOfDay(it)}")
+                }
+                if (stop.hasCard) {
+                    StopDetailLine("使用中", "$courseName・${index + 1}番目")
+                }
+                // 畳んだ点だけ error_space_m が入る（畳まなかった点は null＝CourseRepository:1905）。
+                // ⚠ 畳んだ「回数」は course_stop に列が無く保存されていないため出せない（広がりのみ）。
+                stop.errorSpaceM?.let {
+                    StopDetailLine("まとめた点", "広がり ${String.format(Locale.JAPAN, "%.1f", it)} m")
+                }
+                Text(
+                    "外しても、保存するまでは元に戻せます",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onRemove,
+                enabled = !busy,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("この停留所を外す") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("閉じる") }
+        },
+    )
+}
+
+@Composable
+private fun StopDetailLine(label: String, value: String, pending: Boolean = false) {
+    Row {
+        Text("$label: ", style = MaterialTheme.typography.labelMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (pending) MaterialTheme.colorScheme.onSurfaceVariant else Color.Unspecified,
+            fontStyle = if (pending) FontStyle.Italic else FontStyle.Normal,
         )
     }
 }

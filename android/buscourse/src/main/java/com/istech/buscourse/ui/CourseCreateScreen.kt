@@ -77,7 +77,7 @@ fun CourseCreateScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("走行の洗浄") },
+                title = { Text("運行の洗浄") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")

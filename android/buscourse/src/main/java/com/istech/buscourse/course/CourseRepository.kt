@@ -375,6 +375,12 @@ data class CourseStopView(
     val displayName: String,
     /** カードの乗車人数（カードが無い点は0）。 */
     val riderCount: Int,
+    /** 表示用写真の相対パス。カード写真を優先し、無ければ記録フレームを使う。 */
+    val thumbRelPath: String?,
+    /** 記録時刻。フレーム撮影時刻を優先し、無ければ押下イベント時刻を使う。 */
+    val capturedAt: Long?,
+    /** 空間方向の広がり・推定誤差（m）。 */
+    val errorSpaceM: Double?,
     /** 解決済み座標（coalesce(frame座標, event座標, card座標)、[CourseRepository.resolveStopPosition]）。 */
     val latitude: Double,
     val longitude: Double,
@@ -792,6 +798,16 @@ class CourseRepository(
                 cardId = stop.stopCardId,
                 displayName = displayName,
                 riderCount = card?.riderCount ?: 0,
+                // 写真の出所は3段（design-gate C-2 y×5）。★3段目が要——v20 の押下は course_stop に
+                // event_id だけを残し frame_id は null になるため（#37 は全19点がこの形）、event が
+                // 指す HIRES を辿らないと**写真が1枚も出ない**（実機実射で判明・2026-08-04）。
+                thumbRelPath = card?.let { "stopcards/${it.id}/photo_thumb.jpg" }
+                    ?: frame?.fileRelPath
+                    ?: event?.hiresFrameId?.let { timelapseFrameDao.getById(it)?.fileRelPath },
+                capturedAt = frame?.capturedAt ?: event?.eventTs,
+                // ⚠ 畳んだ「回数」は course_stop に列が無い（保存されていない）。畳んだ事実は
+                // error_space_m の非nullで分かる（CourseRepository:1905）。回数が要るなら列の追加が要る。
+                errorSpaceM = stop.errorSpaceM,
                 latitude = lat,
                 longitude = lon,
             )

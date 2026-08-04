@@ -106,19 +106,20 @@ fun HomeScreen(
             )
             HomeMenuCard(
                 icon = Icons.Filled.AddCircle,
-                title = "コース創設",
+                // design-gate C-1 y×5（2026-08-04）: パイプライン上の役割へ題と案内を揃える。
+                title = "運行の洗浄",
                 // 2026-07-27 文言是正: 「2軸評価」は廃案（コース創設は2軸マトリクスから
                 // 3パス成熟モデルへ転換済み。istech `project_buscourse_course_creation_topdown`）。
-                description = "記録した走行から停留所を拾い、コースを新しく創ります",
+                description = "記録した運行から停留所マーカーを拾い、畳んで、コースの予約を作ります",
                 onClick = onOpenCourseCreate,
             )
             HomeMenuCard(
                 icon = Icons.Filled.Route,
-                title = "コース編集",
+                title = "コースの成形",
                 // 2026-08-02 文言是正: 旧文言「区間軌跡を割り当てます（GPX取り込み）」は
                 // **どちらも既に存在しない機能を案内していた**（区間UIとGPX取込は S6a・2026-07-18 で
                 // 撤去済み、GPXエクスポートは 2026-07-26 に撤去）。実際にできることへ書き直す。
-                description = "コースの停留所を並べ替え・追加・削除します（コースの新規作成もここ）",
+                description = "予約や既存のコースを開いて、停留所マーカーの並べ替え・追加・削除・分割をし、ナビ用に送ります",
                 onClick = onOpenCourses,
             )
             HomeMenuCard(

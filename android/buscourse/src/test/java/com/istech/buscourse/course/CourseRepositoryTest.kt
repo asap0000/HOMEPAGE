@@ -1045,6 +1045,7 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
         assertThat(stop.riderCount).isEqualTo(0)
+        assertThat(stop.thumbRelPath).isEqualTo("sessions/$sessionId/frames/f0.jpg")
     }
 
     /**
@@ -1070,6 +1071,7 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(35.000) // イベントの実測座標（誤吸着カードの座標=36.000ではない）
         assertThat(stop.longitude).isEqualTo(139.000)
         assertThat(stop.displayName).isEqualTo("S$sessionId-1")
+        assertThat(stop.thumbRelPath).isNull()
     }
 
     /** カードを持つ点は、従来どおりカード名・乗車人数を表示名/riderCountに使う。 */
@@ -1091,6 +1093,7 @@ class CourseRepositoryTest {
         assertThat(stop.riderCount).isEqualTo(5)
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
+        assertThat(stop.thumbRelPath).isEqualTo("stopcards/$cardId/photo_thumb.jpg")
     }
 
     /** 存在しないcourseIdはnullを返す（例外にしない）。 */

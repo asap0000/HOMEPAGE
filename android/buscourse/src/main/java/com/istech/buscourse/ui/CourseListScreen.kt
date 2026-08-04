@@ -90,7 +90,7 @@ fun CourseListScreen(
     val hidden = CourseShapingState.entries.filter { openStates[it] == false && counts.getValue(it) > 0 }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("コース") }, navigationIcon = {
+        topBar = { TopAppBar(title = { Text("コースの成形") }, navigationIcon = {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "戻る") }
         }) },
         floatingActionButton = { if (includeDrafts) FloatingActionButton(onClick = {
