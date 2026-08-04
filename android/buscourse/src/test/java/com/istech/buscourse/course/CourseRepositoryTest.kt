@@ -118,6 +118,13 @@ class CourseRepositoryTest {
             photoTempFile = null,
         )
 
+    /** 写真の実体を1つ置く（写真は実在するものだけを採る仕様のため・2026-08-04）。 */
+    private fun seedPhoto(relPath: String) {
+        val f = com.istech.buscourse.core.data.BusCourseStorage.resolve(context, relPath)
+        f.parentFile?.mkdirs()
+        f.writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte()))
+    }
+
     private suspend fun insertSession(): Long {
         val now = System.currentTimeMillis()
         return db.recordingSessionDao().insert(
@@ -1045,7 +1052,11 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
         assertThat(stop.riderCount).isEqualTo(0)
-        assertThat(stop.thumbRelPath).isEqualTo("sessions/$sessionId/frames/f0.jpg")
+        // 写真は**実在するものだけ**を採る（2026-08-04）。実体が無い間は null。
+        assertThat(stop.thumbRelPath).isNull()
+        seedPhoto("sessions/$sessionId/frames/f0.jpg")
+        assertThat(repository.getCourseEditDetails(courseId)!!.stops.single().thumbRelPath)
+            .isEqualTo("sessions/$sessionId/frames/f0.jpg")
     }
 
     /**
@@ -1093,7 +1104,33 @@ class CourseRepositoryTest {
         assertThat(stop.riderCount).isEqualTo(5)
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
-        assertThat(stop.thumbRelPath).isEqualTo("stopcards/$cardId/photo_thumb.jpg")
+        // カードは orig を使う（thumb は生成時に EXIF が落ち、横倒しのまま直せないため・2026-08-04）。
+        // かつ**実在するものだけ**を採るので、実体を置くまでは null。
+        assertThat(stop.thumbRelPath).isNull()
+        seedPhoto("stopcards/$cardId/photo_orig.jpg")
+        assertThat(repository.getCourseEditDetails(courseId)!!.stops.single().thumbRelPath)
+            .isEqualTo("stopcards/$cardId/photo_orig.jpg")
+    }
+
+    /**
+     * カード写真の実体が無いときは映像コマへ落ちる（2026-08-04・SHG12 実機で判明）。
+     * 7/26 事故でカード写真だけを失った点が実在し、パスの有無で採ると**写真があるのに出ない**。
+     */
+    @Test
+    fun getCourseEditDetails_cardPhotoMissing_fallsBackToFramePhoto() = runTest {
+        val cardId = createCard("写真なしカード", lat = 35.000, lon = 139.000)
+        val sessionId = insertSession()
+        val frameId = insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
+        val courseId = repository.createCourse("フォールバック", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(CourseStopEdit(frameId = frameId, eventId = null, cardId = cardId)),
+        )
+        seedPhoto("sessions/$sessionId/frames/f0.jpg") // カード写真は置かない
+
+        val stop = repository.getCourseEditDetails(courseId)!!.stops.single()
+
+        assertThat(stop.thumbRelPath).isEqualTo("sessions/$sessionId/frames/f0.jpg")
     }
 
     /** 存在しないcourseIdはnullを返す（例外にしない）。 */

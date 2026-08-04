@@ -798,12 +798,21 @@ class CourseRepository(
                 cardId = stop.stopCardId,
                 displayName = displayName,
                 riderCount = card?.riderCount ?: 0,
-                // 写真の出所は3段（design-gate C-2 y×5）。★3段目が要——v20 の押下は course_stop に
-                // event_id だけを残し frame_id は null になるため（#37 は全19点がこの形）、event が
-                // 指す HIRES を辿らないと**写真が1枚も出ない**（実機実射で判明・2026-08-04）。
-                thumbRelPath = card?.let { "stopcards/${it.id}/photo_thumb.jpg" }
-                    ?: frame?.fileRelPath
-                    ?: event?.hiresFrameId?.let { timelapseFrameDao.getById(it)?.fileRelPath },
+                // 写真の出所は3段（design-gate C-2 y×5）。**実在するものだけを採る**。
+                // ★3段目が要る——v20 の押下は course_stop に event_id だけを残し frame_id は null に
+                //   なるため（#37 は全19点がこの形）、event が指す HIRES を辿らないと写真が1枚も出ない。
+                // ★実在チェックが要る——SHG12 は 7/26 事故でカード写真の実体を失っており（カード82枚に
+                //   対し photo_thumb.jpg は39枚）、パスの有無だけで採るとカードで止まって映像コマへ
+                //   落ちず、**写真があるのに出ない**（いずれも実機実射で判明・2026-08-04）。
+                // ★カードは photo_thumb ではなく photo_orig を使う——**thumb は生成時に EXIF が落ちて
+                //   おり、ピクセルも横倒しのまま**（実測: thumb は Exif 無し／orig は Orientation=6）。
+                //   thumb を出すと向きを直す手がかりが無い。orig は 2〜3MB だが間引いて読むので
+                //   デコード後のメモリは thumb と大差ない（[StopThumbnail]）。
+                thumbRelPath = listOfNotNull(
+                    card?.let { "stopcards/${it.id}/photo_orig.jpg" },
+                    frame?.fileRelPath,
+                    event?.hiresFrameId?.let { timelapseFrameDao.getById(it)?.fileRelPath },
+                ).firstOrNull { BusCourseStorage.resolve(context, it).exists() },
                 capturedAt = frame?.capturedAt ?: event?.eventTs,
                 // ⚠ 畳んだ「回数」は course_stop に列が無い（保存されていない）。畳んだ事実は
                 // error_space_m の非nullで分かる（CourseRepository:1905）。回数が要るなら列の追加が要る。
