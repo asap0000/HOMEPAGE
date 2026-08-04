@@ -21,6 +21,7 @@ import com.istech.buscourse.ui.CourseListScreen
 import com.istech.buscourse.ui.HomeScreen
 import com.istech.buscourse.ui.MapImportScreen
 import com.istech.buscourse.ui.NaviMainScreen
+import com.istech.buscourse.ui.NaviCoursePickScreen
 import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.NaviSettingsScreen
 import com.istech.buscourse.ui.RecordingScreen
@@ -76,8 +77,7 @@ private object Routes {
     // 映像ナビ（2026-07-25追加。オーナー仕様＝メインメニュー「ナビ」専用の本画面と設定画面。
     // 上の COURSE_NAVI「ナビ確認」とは別物＝あちらは設計側の検証用。設計は istech
     // docs/2026-07-25_設計ドラフト_映像ナビ画面と簡易版ナビ用マップ.md §1 の三画面表を参照）。
-    // NAVI_PICK: どのコースをナビするかの選択（既存 CourseListScreen を onOpen 差し替えで再利用。
-    // 選択 UX 自体の作り直しは §7-課題A で別トラック）。
+    // NAVI_PICK: 識別情報を中心に、どのコースをナビするか選ぶ専用一覧。
     const val NAVI_PICK = "navi_pick"
     const val NAVI_MAIN = "navi/{id}"
     const val NAVI_SETTINGS = "navi_settings"
@@ -224,12 +224,10 @@ private fun AppNavHost() {
         // メインメニュー「ナビ」→ コース選択（NAVI_PICK）→ 本画面（NAVI_MAIN）。設定はメニューから直接。
         // 上の COURSE_NAVI「ナビ確認」（設計側の検証用）とは別物（設計 §1 の三画面表）。
         composable(Routes.NAVI_PICK) {
-            // コース選択 UX の作り直しは §7-課題A で別トラック。当面は既存一覧を onOpen 差し替えで再利用する。
-            CourseListScreen(
+            NaviCoursePickScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpen = { id -> navController.navigate("navi/$id") },
-                includeDrafts = false,
             )
         }
         composable(Routes.NAVI_MAIN) { backStackEntry ->

@@ -69,6 +69,7 @@ import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.course.CourseEditDetails
 import com.istech.buscourse.course.CourseStopEdit
 import com.istech.buscourse.course.UpdateIdentityResult
+import com.istech.buscourse.course.resolveUniqueCourseName
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -154,9 +155,12 @@ fun CourseDetailScreen(
     var showLeaveConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showCutConfirm by remember { mutableStateOf(false) }
+    // 切断確認ダイアログの断片名プレビュー用（開く直前にロード。cutCourseAt と同じ重複回避を通すため）。
+    var existingCourseNames by remember { mutableStateOf<List<String>>(emptyList()) }
     var cutIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     // identity（bus_id/course_no/year）設定ダイアログの状態（(e) コース identity設定UI、2026-07-24追加）
     var showIdentityDialog by remember { mutableStateOf(false) }
+    var showIdentityChangeWarning by remember { mutableStateOf(false) }
     var showSendDialog by remember { mutableStateOf(false) }
     var sendBlocked by remember { mutableStateOf(false) }
     var identityBusIdInput by remember { mutableStateOf("") }
@@ -277,6 +281,38 @@ fun CourseDetailScreen(
                 refreshKey++
             }.onFailure { e ->
                 Toast.makeText(context, "保存に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun saveIdentity() {
+        val courseNo = identityCourseNoInput.toIntOrNull()
+        val year = identityYearInput.toIntOrNull()
+        if (courseNo == null || year == null) {
+            identityError = "バス識別子・コース番号・年度を正しく入力してください"
+            return
+        }
+        showIdentityChangeWarning = false
+        showIdentityDialog = true
+        viewModel.updateCourseIdentity(courseId, identityBusIdInput, courseNo, year) { result ->
+            when (result) {
+                UpdateIdentityResult.Success -> {
+                    showIdentityDialog = false
+                    showIdentityChangeWarning = false
+                    refreshKey++
+                    Toast.makeText(context, "識別情報を設定しました", Toast.LENGTH_SHORT).show()
+                }
+                UpdateIdentityResult.DuplicateIdentity -> {
+                    identityError = "同じバス・コース番号・年度の別コースが既にあります"
+                }
+                UpdateIdentityResult.InvalidInput -> {
+                    identityError = "バス識別子・コース番号・年度を正しく入力してください"
+                }
+                UpdateIdentityResult.CourseNotFound -> {
+                    showIdentityDialog = false
+                    showIdentityChangeWarning = false
+                    Toast.makeText(context, "コースが見つかりませんでした", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -535,7 +571,16 @@ fun CourseDetailScreen(
             item {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                     Button(
-                        onClick = { showCutConfirm = true },
+                        onClick = {
+                            scope.launch {
+                                // 確認ダイアログの断片名を実際に作られる名前と一致させる（独立レビュー
+                                // should-2＝プレビューだけ旧規則で組むと衝突時に表示が嘘をつく）。
+                                existingCourseNames = repository.getCourses()
+                                    .filter { it.id != courseId }
+                                    .map { it.name }
+                                showCutConfirm = true
+                            }
+                        },
                         enabled = !busy && !dirty && cutIndexes.isNotEmpty(),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
@@ -553,36 +598,14 @@ fun CourseDetailScreen(
                 }
             }
 
-            // 追加・保存
+            // ナビ送信・保存・追加（design-gate B-3改 y×5・2026-08-04）。
             item {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                activeCards = repository.getActiveStopCards()
-                                usageMap = repository.getStopCardUsage(courseId)
-                                showAddDialog = true
-                            }
-                        },
-                        enabled = !busy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("停留所を追加")
-                    }
-                    Button(
-                        onClick = { saveArrangement() },
-                        enabled = !busy && (dirty || editedStops.isNotEmpty()),
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(if (busy) "処理中…" else if (dirty) "保存 *" else "保存")
-                    }
                     Button(
                         onClick = {
                             val identity = details?.course?.identityOrNull()
@@ -594,8 +617,33 @@ fun CourseDetailScreen(
                             showSendDialog = true
                         },
                         enabled = !busy && !dirty && details != null,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     ) { Text("ナビ用に送る") }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Button(
+                            onClick = { saveArrangement() },
+                            enabled = !busy && (dirty || editedStops.isNotEmpty()),
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (busy) "処理中…" else if (dirty) "保存 *" else "保存") }
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    activeCards = repository.getActiveStopCards()
+                                    usageMap = repository.getStopCardUsage(courseId)
+                                    showAddDialog = true
+                                }
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("停留所を追加")
+                        }
+                    }
                 }
             }
         }
@@ -613,9 +661,12 @@ fun CourseDetailScreen(
                 Column {
                     Text("『${course?.name ?: "このコース"}』（${editedStops.size}停留所）を ${fragments.size} 本にします")
                     Spacer(Modifier.height(10.dp))
+                    // 実装（cutCourseAt）と同じ重複回避を通す＝表示名と実際に作られる名前を一致させる。
+                    val taken = existingCourseNames.toMutableSet()
                     fragments.forEachIndexed { index, fragment ->
-                        val name = course?.sourceSessionId?.let { "S$it-${index + 1}" }
+                        val desired = course?.sourceSessionId?.let { "S$it-${index + 1}" }
                             ?: "${course?.name ?: "コース"}-${index + 1}"
+                        val name = resolveUniqueCourseName(desired, taken).also(taken::add)
                         Text(
                             "$name：${fragment.size}個（${fragment.first().displayName}〜${fragment.last().displayName}）",
                             style = MaterialTheme.typography.bodySmall,
@@ -767,6 +818,12 @@ fun CourseDetailScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    val previewCourseNo = identityCourseNoInput.toIntOrNull()
+                    val previewYear = identityYearInput.toIntOrNull()
+                    if (identityBusIdInput.isNotBlank() && previewCourseNo != null && previewCourseNo > 0 && previewYear in 2000..2100) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("ナビでは「${previewYear}年 ${identityBusIdInput.trim()}${previewCourseNo}コース」として出ます")
+                    }
                     val error = identityError
                     if (error != null) {
                         Spacer(Modifier.height(8.dp))
@@ -782,24 +839,20 @@ fun CourseDetailScreen(
                         identityError = "バス識別子・コース番号・年度を正しく入力してください"
                         return@TextButton
                     }
-                    viewModel.updateCourseIdentity(courseId, identityBusIdInput, courseNo, year) { result ->
-                        when (result) {
-                            UpdateIdentityResult.Success -> {
+                    val current = details?.course?.identityOrNull()
+                    val changed = current == null || current.busId != identityBusIdInput.trim() ||
+                        current.courseNo != courseNo || current.year != year
+                    if (current != null && changed) {
+                        scope.launch {
+                            if (viewModel.naviMapRepository.activeMapFor(current.busId, current.courseNo, current.year) != null) {
                                 showIdentityDialog = false
-                                refreshKey++
-                                Toast.makeText(context, "識別情報を設定しました", Toast.LENGTH_SHORT).show()
-                            }
-                            UpdateIdentityResult.DuplicateIdentity -> {
-                                identityError = "同じバス・コース番号・年度の別コースが既にあります"
-                            }
-                            UpdateIdentityResult.InvalidInput -> {
-                                identityError = "バス識別子・コース番号・年度を正しく入力してください"
-                            }
-                            UpdateIdentityResult.CourseNotFound -> {
-                                showIdentityDialog = false
-                                Toast.makeText(context, "コースが見つかりませんでした", Toast.LENGTH_LONG).show()
+                                showIdentityChangeWarning = true
+                            } else {
+                                saveIdentity()
                             }
                         }
+                    } else {
+                        saveIdentity()
                     }
                 }) { Text("保存") }
             },
@@ -807,6 +860,29 @@ fun CourseDetailScreen(
                 TextButton(onClick = { showIdentityDialog = false }) { Text("キャンセル") }
             },
         )
+    }
+
+    if (showIdentityChangeWarning) {
+        val current = details?.course?.identityOrNull()
+        if (current != null) {
+            AlertDialog(
+                onDismissRequest = {
+                    showIdentityChangeWarning = false
+                    showIdentityDialog = true
+                },
+                title = { Text("識別情報を変えますか？") },
+                text = {
+                    Text("このコースは「${current.year}年 ${current.busId}${current.courseNo}コース」としてナビへ送ってあります。識別情報を変えると、送ったものはナビから見えなくなります（消えはしません）。変えたあと、もう一度ナビへ送ってください。")
+                },
+                confirmButton = { TextButton(onClick = { saveIdentity() }) { Text("変える") } },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showIdentityChangeWarning = false
+                        showIdentityDialog = true
+                    }) { Text("やめる") }
+                },
+            )
+        }
     }
 
     if (showSendDialog) {

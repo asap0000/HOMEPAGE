@@ -193,7 +193,7 @@ fun NaviMainScreen(
                 modifier = Modifier.fillMaxSize(),
             )
             NaviMainReadiness.MapNotGenerated -> NaviMainUnavailable(
-                reason = "このコースのナビ用マップがまだ生成されていません。「ナビ確認」画面で生成してください。",
+                reason = "このコースのナビ用マップがまだ生成されていません。コース編集の「ナビ用に送る」から送ってください。",
                 modifier = Modifier.fillMaxSize(),
             )
             is NaviMainReadiness.Ready -> {

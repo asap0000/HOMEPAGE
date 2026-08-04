@@ -24,6 +24,7 @@ import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseListRow
 import com.istech.buscourse.course.CourseShapingState
+import com.istech.buscourse.course.resolveUniqueCourseName
 import kotlinx.coroutines.launch
 
 internal fun courseStateLabel(state: CourseShapingState): String = when (state) {
@@ -60,6 +61,11 @@ fun CourseListScreen(
     var sessions by remember { mutableStateOf<Map<Long, RecordingSessionEntity>>(emptyMap()) }
     var loaded by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
+    var proposedName by remember { mutableStateOf<String?>(null) }
+    var proposedReason by remember { mutableStateOf("") }
+    var proposedKind by remember { mutableStateOf(CourseKind.STANDARD) }
+    var newName by remember { mutableStateOf("") }
+    var newKind by remember { mutableStateOf(CourseKind.STANDARD) }
     var openStates by remember {
         mutableStateOf(CourseShapingState.entries.associateWith { prefs.getBoolean(it.name, true) })
     }
@@ -67,6 +73,15 @@ fun CourseListScreen(
     suspend fun reload() {
         rows = repository.getCourseListRows().filter { includeDrafts || it.course.kind != CourseKind.DRAFT.name }
         sessions = repository.getRecordingSessions()
+    }
+
+    fun createCourse(name: String, kind: CourseKind) {
+        showCreateDialog = false
+        proposedName = null
+        viewModel.createCourse(name, kind) { result -> result.onSuccess { id ->
+            scope.launch { reload() }
+            onOpen(id)
+        }.onFailure { Toast.makeText(context, "作成に失敗しました: ${it.message}", Toast.LENGTH_LONG).show() } }
     }
     LaunchedEffect(includeDrafts) { reload(); loaded = true }
 
@@ -78,7 +93,12 @@ fun CourseListScreen(
         topBar = { TopAppBar(title = { Text("コース") }, navigationIcon = {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "戻る") }
         }) },
-        floatingActionButton = { if (includeDrafts) FloatingActionButton(onClick = { showCreateDialog = true }) {
+        floatingActionButton = { if (includeDrafts) FloatingActionButton(onClick = {
+            // 開くたびにまっさらへ戻す（前回入力の残留防止。「名前を直す」経由の再表示だけが入力を引き継ぐ）。
+            newName = ""
+            newKind = CourseKind.STANDARD
+            showCreateDialog = true
+        }) {
             Icon(Icons.Filled.Add, "新規コース")
         } },
     ) { padding ->
@@ -138,8 +158,6 @@ fun CourseListScreen(
     }
 
     if (includeDrafts && showCreateDialog) {
-        var newName by remember { mutableStateOf("") }
-        var newKind by remember { mutableStateOf(CourseKind.STANDARD) }
         AlertDialog(
             onDismissRequest = { showCreateDialog = false }, title = { Text("コースを作成") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -153,12 +171,41 @@ fun CourseListScreen(
             } },
             confirmButton = { TextButton(onClick = {
                 if (newName.isBlank()) { Toast.makeText(context, "コース名を入力してください", Toast.LENGTH_SHORT).show(); return@TextButton }
-                showCreateDialog = false
-                viewModel.createCourse(newName.trim(), newKind) { result -> result.onSuccess { id ->
-                    scope.launch { reload() }; onOpen(id)
-                }.onFailure { Toast.makeText(context, "作成に失敗しました: ${it.message}", Toast.LENGTH_LONG).show() } }
+                val desired = newName.trim()
+                val proposal = resolveUniqueCourseName(desired, rows.map { it.course.name })
+                if (proposal != desired) {
+                    showCreateDialog = false
+                    // 提案が出る理由は2通りで文言を分ける（実際は重複していないのに「使われています」と
+                    // 嘘をつかない・独立レビュー should-1）: 末尾 (n) は重複回避の印として仕組みが使う。
+                    proposedReason = if (rows.any { it.course.name == desired }) {
+                        "その名前は使われています。"
+                    } else {
+                        "末尾の（数字）は重複回避の印として仕組みが使うため、この名前では作れません。"
+                    }
+                    proposedName = proposal
+                    proposedKind = newKind
+                } else {
+                    createCourse(desired, newKind)
+                }
             }) { Text("作成") } },
             dismissButton = { TextButton(onClick = { showCreateDialog = false }) { Text("キャンセル") } },
+        )
+    }
+
+    proposedName?.let { proposal ->
+        AlertDialog(
+            onDismissRequest = { proposedName = null },
+            title = { Text("この名前では作れません") },
+            text = { Text("$proposedReason「$proposal」で作りますか？") },
+            confirmButton = {
+                TextButton(onClick = { createCourse(proposal, proposedKind) }) { Text("この名前で作る") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    proposedName = null
+                    showCreateDialog = true
+                }) { Text("名前を直す") }
+            },
         )
     }
 }

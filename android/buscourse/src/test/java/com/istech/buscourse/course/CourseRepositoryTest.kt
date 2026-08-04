@@ -313,9 +313,10 @@ class CourseRepositoryTest {
         val firstCourse = db.courseDao().getById(first.courseId)!!
         db.courseDao().upsert(firstCourse.copy(shapingStartedAt = t))
 
-        repository.washAndReserve(sessionId, 20.0)
+        val second = repository.washAndReserve(sessionId, 20.0)
 
         assertThat(db.courseDao().getById(first.courseId)).isNotNull()
+        assertThat(db.courseDao().getById(second.courseId)?.name).isEqualTo("#${sessionId} の予約(1)")
         assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(2)
     }
 
@@ -1461,6 +1462,17 @@ class CourseRepositoryTest {
             assertThat(course?.sourceSessionId).isEqualTo(sessionId)
         }
         assertThat(result.names).containsExactly("S$sessionId-1", "S$sessionId-2").inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_avoidsExistingFragmentName() = runTest {
+        val sessionId = insertSession()
+        val (courseId, _) = seedCourseForCut(5, sourceSessionId = sessionId)
+        repository.createCourse("S$sessionId-2", CourseKind.STANDARD)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(result.names).containsExactly("S$sessionId-1", "S$sessionId-2(1)").inOrder()
     }
 
     @Test

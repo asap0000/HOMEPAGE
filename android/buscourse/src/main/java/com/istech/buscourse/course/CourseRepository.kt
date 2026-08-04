@@ -1082,9 +1082,13 @@ class CourseRepository(
                     stops.subList(start, end + 1)
                 }
                 val now = System.currentTimeMillis()
+                val existingNames = courseDao.getAll().asSequence()
+                    .filter { it.id != original.id }
+                    .mapTo(mutableSetOf()) { it.name }
                 val names = fragments.indices.map { index ->
-                    original.sourceSessionId?.let { "S$it-${index + 1}" }
+                    val desired = original.sourceSessionId?.let { "S$it-${index + 1}" }
                         ?: "${original.name}-${index + 1}"
+                    resolveUniqueCourseName(desired, existingNames).also(existingNames::add)
                 }
                 val createdIds = fragments.mapIndexed { fragmentIndex, fragment ->
                     val newCourseId = courseDao.insert(
@@ -2104,9 +2108,13 @@ class CourseRepository(
                 courseDao.getBySourceSession(sessionId)
                     .filter { it.kind == CourseKind.DRAFT.name && it.shapingStartedAt == null }
                     .forEach { courseDao.deleteById(it.id) }
+                val reservedName = resolveUniqueCourseName(
+                    desired = "#${sessionId} の予約",
+                    existingNames = courseDao.getAll().map { it.name },
+                )
                 val created = createCoursesFromSession(
                     sessionId = sessionId,
-                    courseNames = listOf("#${sessionId} の予約"),
+                    courseNames = listOf(reservedName),
                     kind = CourseKind.DRAFT,
                     stayDepartM = stayDepartM,
                 )

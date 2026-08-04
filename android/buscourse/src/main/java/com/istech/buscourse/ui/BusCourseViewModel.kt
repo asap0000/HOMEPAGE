@@ -23,6 +23,7 @@ import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
 import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
+import com.istech.buscourse.navimap.NaviMapRepository
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -66,6 +67,9 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** 取り込み済み地図パッケージの一覧・選択状態（読み取りは画面から直接呼んでよい、既存方針どおり）。 */
     val mapRepository: MapDataPackageRepository by lazy { MapDataPackageRepository(database) }
+
+    /** ナビ選択・識別情報警告の読み取り窓口（design-gate B-3改 y×5・2026-08-04）。 */
+    val naviMapRepository: NaviMapRepository by lazy { NaviMapRepository(database) }
 
     private val mapPackageImporter: MapPackageImporter by lazy {
         MapPackageImporter(getApplication<BusCourseApplication>(), mapRepository)
