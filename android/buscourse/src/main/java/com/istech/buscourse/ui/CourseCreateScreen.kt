@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -44,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -51,6 +53,7 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.PressFolder
 import com.istech.buscourse.course.WashPreview
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -187,10 +190,19 @@ private fun CourseCreateDialog(
     LaunchedEffect(sessionId, stayDepartM) {
         loading = preview == null
         delay(300)
+        // ★キャンセルを失敗として扱わない（2026-08-04）。距離を変えるたびに本 LaunchedEffect は
+        // 作り直され、前回の previewWash は**キャンセル**される。`runCatching` は Throwable を
+        // すべて捕まえるため CancellationException まで拾い、**ただの中断が「失敗しました」の
+        // 通知になっていた**（連打すると通知が続けて出る）。キャンセルは素通しし、本当の失敗だけ知らせる。
         runCatching { repository.previewWash(sessionId, stayDepartM.toDouble()) }
             .onSuccess { preview = it }
-            .onFailure { Toast.makeText(context, "洗浄プレビューに失敗しました: ${it.message}", Toast.LENGTH_LONG).show() }
-        existingCourses = runCatching { repository.findExistingCoursesFromSession(sessionId) }.getOrDefault(emptyList())
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                Toast.makeText(context, "洗浄プレビューに失敗しました: ${error.message}", Toast.LENGTH_LONG).show()
+            }
+        existingCourses = runCatching { repository.findExistingCoursesFromSession(sessionId) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(emptyList())
         loading = false
     }
 
@@ -246,7 +258,15 @@ private fun CourseCreateDialog(
                                     modifier = Modifier.padding(top = 8.dp),
                                 ) {
                                     RepeatButton("−", enabled = stayDepartM > 5) { stayDepartM = (stayDepartM - 5).coerceAtLeast(5) }
-                                    Text("$stayDepartM m${if (stayDepartM == 20) "（仮）" else ""}")
+                                    // ★中央の幅を固定する（2026-08-04・実機で座標を実測して判明）。
+                                    // 値の桁数や注記の有無で幅が変わると、**左右のボタンが横へジャンプし、
+                                    // 連打中に指の下からボタンが逃げる**（実測: − が x=220→304、＋ が x=810→726）。
+                                    // 「（仮）」も実走4回目で 20m が確定したので落とす（STATE 2026-08-04）。
+                                    Text(
+                                        "$stayDepartM m",
+                                        modifier = Modifier.width(96.dp),
+                                        textAlign = TextAlign.Center,
+                                    )
                                     RepeatButton("＋", enabled = stayDepartM < 60) { stayDepartM = (stayDepartM + 5).coerceAtMost(60) }
                                 }
                             }
