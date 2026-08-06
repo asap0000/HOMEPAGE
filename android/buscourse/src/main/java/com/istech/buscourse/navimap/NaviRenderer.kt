@@ -790,12 +790,47 @@ private fun NaviRendererMapStage(
             }
         }
     }
-    // 自車も同じブレンド＝90°では設定どおりのアンカー位置（＝地平線上）に立つ。
+    // 自車も同じブレンド＝T°以降は設定どおりのアンカー位置（90°では地平線上）に立つ。
     val selfCarFoldedPx = foldedPointOf(selfCarAnchorPx)
     val selfCarDisplayPx = Offset(
         selfCarFoldedPx.x + (selfCarAnchorPx.x - selfCarFoldedPx.x) * blendW,
         selfCarFoldedPx.y + (selfCarAnchorPx.y - selfCarFoldedPx.y) * blendW,
     )
+    // ★増分F: グリッド帯用の軌跡（自車からの奥行き・左右 px ＋ chainage）。地図の絵とは独立に、
+    // ピンと同じ測地→投影の経路で描くための下ごしらえ。間引き＋距離クリップで点数を絞る
+    // （SHG12 の ANR 履歴に配慮＝上限を固定する）。
+    val gridRoutePoints: List<Triple<Float, Float, Double>> =
+        if (blendW > 0f && cameraState != null && metersPerPixel != null) {
+            remember(routeData, cameraState, metersPerPixel) {
+                val track = routeData.segments.sortedBy { it.seq }
+                    .filter { it.kind == TRACK_KIND }
+                    .flatMap { routeData.trackPointsBySegmentId[it.id].orEmpty() }
+                val step = maxOf(1, track.size / 240)
+                buildList {
+                    for (i in track.indices step step) {
+                        val point = track[i]
+                        val distanceM =
+                            GeoMath.haversineM(cameraState.lat, cameraState.lon, point.lat, point.lon)
+                        if (distanceM > 4000.0) continue
+                        val relativeRad = Math.toRadians(
+                            GeoMath.bearingDeg(cameraState.lat, cameraState.lon, point.lat, point.lon) -
+                                cameraState.bearingDeg,
+                        )
+                        add(
+                            Triple(
+                                (distanceM * kotlin.math.sin(relativeRad) / metersPerPixel).toFloat(),
+                                (distanceM * kotlin.math.cos(relativeRad) / metersPerPixel).toFloat(),
+                                point.chainageM,
+                            ),
+                        )
+                    }
+                }
+            }
+        } else {
+            emptyList()
+        }
+    val mapPictureAlpha = NaviRenderMath.mapPictureAlpha(settings.tiltDeg.toFloat())
+    val gridCellPx = metersPerPixel?.let { (100.0 / it).toFloat() } ?: 0f
     val nextStop = NaviRenderMath.nextStopIndex(chainageM.toDouble(), routeData.stopPoints.map { it.chainageM })
         ?.let(routeData.stopPoints::get)
     val nextStopIndicator = if (
@@ -825,9 +860,26 @@ private fun NaviRendererMapStage(
         null
     }
     Box(modifier) {
+        // ★増分F: グリッド帯（地面＋実縮尺グリッド＋GPS軌跡＋地平線）。地図（絵）の下に常に描き、
+        // 地図が T°でフェードアウトすると露出する＝クロスフェードで段差を作らない。
+        if (blendW > 0f) {
+            Canvas(Modifier.fillMaxSize()) {
+                drawNaviGridBand(
+                    tiltDeg = settings.tiltDeg.toFloat(),
+                    anchorPx = selfCarAnchorPx,
+                    cameraDistancePx = previewCameraPx,
+                    cellPx = gridCellPx,
+                    routePoints = gridRoutePoints,
+                    guidanceRange = routeData.guidanceChainageRange,
+                    theme = settings.theme,
+                )
+            }
+        }
         Box(
             Modifier
                 .fillMaxSize()
+                // ★増分F: T−2°から透け始め、T°（作画崩壊のぎりぎり・仮り80）で地図（絵）は消える。
+                .graphicsLayer { alpha = mapPictureAlpha }
                 // ★★折り曲げは `graphicsLayer.rotationX` をやめ、**自前のホモグラフィ**で掛ける
                 // （2026-08-07・実測10フレームで確定）。graphicsLayer のブロック形式の行列は
                 // `LayoutCoordinates.localPositionOf` から**構造的に読めない**（常に変形前の値を返す）
@@ -1961,6 +2013,124 @@ private fun NaviAnchoredInwardOfEdge(
             .coerceIn(boundsTop, (boundsBottom - placeable.height).coerceAtLeast(boundsTop))
         layout(placeable.width, placeable.height) {
             placeable.place(x.roundToInt(), y.roundToInt())
+        }
+    }
+}
+
+/** グリッド帯の配色（増分F）。地面は地図の基調に合わせ、線は控えめに。 */
+private val GRID_GROUND_DAY = Color(0xFFEFECE5)
+private val GRID_GROUND_NIGHT = Color(0xFF141A26)
+private val GRID_LINE_DAY = Color(0xFFD9D3C6)
+private val GRID_LINE_NIGHT = Color(0xFF243044)
+private val GRID_ROUTE_GUIDANCE = Color(0xFF3366FF)
+private val GRID_ROUTE_APPROACH = Color(0xFF9DB4EE)
+
+/** グリッド帯の線数の上限（SHG12 の ANR 教訓＝投影ループ自体を固定上限で縛る）。 */
+private const val GRID_MAX_LINES = 36
+
+/**
+ * 増分F（オーナー承認 y×4）: 高傾斜帯の「グリッド＋実データ」。
+ * 地図（絵）が判読困難になる T°以降の主役。**プレビューと同じ投影**（[NaviRenderMath.previewGroundProject]・
+ * 0-90°全域）で、地面・実縮尺グリッド・GPS 軌跡（助走=薄/案内=濃）・地平線を描く。
+ * 90°では投影の性質（cos90°=0）どおり、すべてが地平線の1本線へ潰れる＝真横の物理。
+ */
+private fun DrawScope.drawNaviGridBand(
+    tiltDeg: Float,
+    anchorPx: Offset,
+    cameraDistancePx: Float,
+    cellPx: Float,
+    routePoints: List<Triple<Float, Float, Double>>,
+    guidanceRange: ClosedFloatingPointRange<Double>?,
+    theme: NaviTheme,
+) {
+    val horizonOffset = NaviRenderMath.previewGroundHorizonOffsetY(tiltDeg, cameraDistancePx) ?: return
+    val horizonY = (anchorPx.y + horizonOffset).coerceIn(0f, size.height)
+    val ground = if (theme == NaviTheme.DAY) GRID_GROUND_DAY else GRID_GROUND_NIGHT
+    val line = if (theme == NaviTheme.DAY) GRID_LINE_DAY else GRID_LINE_NIGHT
+
+    drawRect(ground, topLeft = Offset(0f, horizonY), size = Size(size.width, size.height - horizonY))
+    drawLine(line.copy(alpha = 0.95f), Offset(0f, horizonY), Offset(size.width, horizonY), strokeWidth = 2f)
+
+    val nearDepth = NaviRenderMath.previewGroundNearDepthPx(tiltDeg, cameraDistancePx)
+    fun project(lateralPx: Float, depthPx: Float) =
+        NaviRenderMath.previewGroundProject(lateralPx, depthPx, tiltDeg, cameraDistancePx)
+
+    if (cellPx > 4f) {
+        // 奥行き方向の横線（自車の後ろ数本も含む）。
+        var k = 1
+        while (k <= GRID_MAX_LINES) {
+            val p = project(0f, k * cellPx)
+            if (p.scale < 0.06f) break
+            val y = anchorPx.y + p.y
+            if (y <= horizonY + 1f) break
+            drawLine(line, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.5f)
+            k++
+        }
+        k = 1
+        while (k <= 6) {
+            val depth = -k * cellPx
+            if (nearDepth != null && depth <= nearDepth) break
+            val y = anchorPx.y + project(0f, depth).y
+            if (y > size.height) break
+            drawLine(line, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.5f)
+            k++
+        }
+        // 左右方向の縦線＝1点透視の直線（近端と遠端の2点で引ける）。
+        val farDepth = run {
+            var kk = 1
+            while (kk < 60 && project(0f, kk * cellPx).scale >= 0.06f) kk++
+            ((kk - 1).coerceAtLeast(1)) * cellPx
+        }
+        val nearDepthForLines = if (nearDepth != null) {
+            maxOf(-3f * cellPx, nearDepth + 1f)
+        } else {
+            -3f * cellPx
+        }
+        var m = 0
+        while (m <= GRID_MAX_LINES) {
+            var visibleAny = false
+            for (sign in floatArrayOf(1f, -1f)) {
+                if (m == 0 && sign < 0f) continue
+                val lateral = m * cellPx * sign
+                val near = project(lateral, nearDepthForLines)
+                val far = project(lateral, farDepth)
+                val ax = anchorPx.x + near.x
+                val bx = anchorPx.x + far.x
+                if (maxOf(ax, bx) < 0f || minOf(ax, bx) > size.width) continue
+                visibleAny = true
+                drawLine(
+                    line,
+                    Offset(ax, anchorPx.y + near.y),
+                    Offset(bx, anchorPx.y + far.y),
+                    strokeWidth = 1.5f,
+                )
+            }
+            if (m > 0 && !visibleAny) break
+            m++
+        }
+    }
+
+    // GPS 軌跡（助走=薄・案内=濃）。カメラ面より手前の点は描かない。
+    if (routePoints.size >= 2) {
+        for (i in 1 until routePoints.size) {
+            val (l0, d0, c0) = routePoints[i - 1]
+            val (l1, d1, c1) = routePoints[i]
+            if (nearDepth != null && (d0 <= nearDepth || d1 <= nearDepth)) continue
+            val p0 = project(l0, d0)
+            val p1 = project(l1, d1)
+            val midChainage = (c0 + c1) / 2.0
+            val color = if (guidanceRange != null && midChainage in guidanceRange) {
+                GRID_ROUTE_GUIDANCE
+            } else {
+                GRID_ROUTE_APPROACH
+            }
+            drawLine(
+                color,
+                Offset(anchorPx.x + p0.x, anchorPx.y + p0.y),
+                Offset(anchorPx.x + p1.x, anchorPx.y + p1.y),
+                strokeWidth = 6f,
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

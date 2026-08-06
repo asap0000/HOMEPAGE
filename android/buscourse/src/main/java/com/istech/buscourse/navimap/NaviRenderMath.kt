@@ -197,9 +197,10 @@ object NaviRenderMath {
     fun targetFoldHorizonFraction(tiltDeg: Float, selfCarAnchorYFraction: Float): Float {
         val tilt = tiltDeg.orZeroIfNonFinite()
         if (tilt <= NATIVE_TILT_MAX_DEG) return 0f
-        val weight = ((tilt - NATIVE_TILT_MAX_DEG) / (90f - NATIVE_TILT_MAX_DEG)).coerceIn(0f, 1f)
+        // ★重みは tiltBlendWeight と同一＝T で1に到達（増分F）。T時点で台形の上端＝真の地平線となり、
+        // 地図のフェードアウトとグリッド帯（真の投影）が段差なく繋がる。
         val previewHorizon = (previewHorizonFraction(tilt, selfCarAnchorYFraction) ?: 0f).coerceIn(0f, 1f)
-        return weight * previewHorizon
+        return tiltBlendWeight(tilt) * previewHorizon
     }
 
     /**
@@ -222,16 +223,33 @@ object NaviRenderMath {
     const val FOLD_CAMERA_RATIO_DEFAULT = 3.97f
 
     /**
-     * 60→90°で「地図の投影」から「プレビューの投影」へ乗り換える重み（0..1）。
+     * 地図（絵）を消してグリッド＋実データへ乗り換える閾値（増分F・オーナー承認 y×4）。
+     * 「作画崩壊までのぎりぎりを台形投射でしのぎ、その先は地図だけ非表示にし、グリッドの上で
+     * GPS 軌跡と停留所表示にする」（オーナー裁定 2026-08-07）。仮り80°＝実機で目視して確定する。
+     */
+    const val FOLD_GRID_THRESHOLD_DEG = 80f
+
+    /** 地図（絵）のフェード幅（[FOLD_GRID_THRESHOLD_DEG]の手前この度数から透け始め、閾値で0になる）。 */
+    const val FOLD_GRID_FADE_DEG = 2f
+
+    /**
+     * 60→T°で「地図の投影」から「プレビューの投影」へ乗り換える重み（0..1）。
      *
      * ★正しい検証ゴール（オーナー是正 2026-08-07）＝**ピンはプレビューの投影に合同**であること。
-     * 90°ならプレビューは全停留所を**地平線上に一列**へ投影する（`previewGroundProject` の
-     * cos90°=0）。折り曲げた絵の上の位置に合わせるのは誤り（絵の折り曲げはピクチャの回転で
-     * あって地面の再投影ではないため、90°でも停留所が帯の中に散らばってしまう）。
+     * 90°ならプレビューは全停留所を**地平線上に一列**へ投影する（`previewGroundProject` の cos90°=0）。
+     * ★到達点は 90° ではなく **T＝[FOLD_GRID_THRESHOLD_DEG]**（増分F）。T の時点で台形の上端・
+     * ピン・地平線がすべて真の投影値に一致し、地図のフェードアウトとグリッド帯が段差なく繋がる。
      * 60°以下は native の地図が真＝`toScreenLocation` のまま。間は連続にブレンドする。
      */
     fun tiltBlendWeight(tiltDeg: Float): Float =
-        ((tiltDeg.orZeroIfNonFinite() - NATIVE_TILT_MAX_DEG) / (90f - NATIVE_TILT_MAX_DEG))
+        ((tiltDeg.orZeroIfNonFinite() - NATIVE_TILT_MAX_DEG) /
+            (FOLD_GRID_THRESHOLD_DEG - NATIVE_TILT_MAX_DEG))
+            .coerceIn(0f, 1f)
+
+    /** 地図（絵）の不透明度＝T−[FOLD_GRID_FADE_DEG]°から透け始め、T で0（増分F）。 */
+    fun mapPictureAlpha(tiltDeg: Float): Float =
+        (1f - (tiltDeg.orZeroIfNonFinite() - (FOLD_GRID_THRESHOLD_DEG - FOLD_GRID_FADE_DEG)) /
+            FOLD_GRID_FADE_DEG)
             .coerceIn(0f, 1f)
 
     /**

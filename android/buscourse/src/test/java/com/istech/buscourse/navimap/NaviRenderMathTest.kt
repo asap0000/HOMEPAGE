@@ -70,6 +70,14 @@ class NaviRenderMathTest {
         val at80 = NaviRenderMath.targetFoldHorizonFraction(80f, 0.7f)
         assertThat(at70).isGreaterThan(0f)
         assertThat(at80).isGreaterThan(at70)
+        // ★増分F: T（=80仮り）で台形の上端＝真の地平線（プレビューの式そのもの）に到達する。
+        // T の瞬間に地図が消えてグリッド帯（真の投影）が始まっても段差が出ない根拠。
+        val trueHorizonAtT = NaviRenderMath.previewHorizonFraction(
+            NaviRenderMath.FOLD_GRID_THRESHOLD_DEG, 0.7f,
+        )!!
+        assertThat(
+            NaviRenderMath.targetFoldHorizonFraction(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG, 0.7f),
+        ).isWithin(0.001f).of(trueHorizonAtT)
     }
 
     @Test fun foldRotationXDeg_solvesTargetAndStaysZeroInNativeRange() {
@@ -94,11 +102,23 @@ class NaviRenderMathTest {
         assertThat(kotlin.math.abs(far.x)).isLessThan(kotlin.math.abs(near.x))
     }
 
-    @Test fun tiltBlendWeight_isZeroInNativeRangeAndOneAt90() {
+    /** 増分F: ブレンドの到達点は 90° ではなく T（=80仮り）。T で台形・ピン・地平線が真値に一致する。 */
+    @Test fun tiltBlendWeight_isZeroInNativeRangeAndReachesOneAtThreshold() {
         assertThat(NaviRenderMath.tiltBlendWeight(45f)).isEqualTo(0f)
         assertThat(NaviRenderMath.tiltBlendWeight(60f)).isEqualTo(0f)
-        assertThat(NaviRenderMath.tiltBlendWeight(75f)).isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.tiltBlendWeight(70f)).isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.tiltBlendWeight(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG)).isEqualTo(1f)
         assertThat(NaviRenderMath.tiltBlendWeight(90f)).isEqualTo(1f)
+    }
+
+    /** 増分F: 地図（絵）は T−2°から透け始め T で消える。60°台の通常域は不透明のまま。 */
+    @Test fun mapPictureAlpha_fadesOutOnlyNearThreshold() {
+        assertThat(NaviRenderMath.mapPictureAlpha(60f)).isEqualTo(1f)
+        assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG - 2f)).isEqualTo(1f)
+        assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG - 1f))
+            .isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG)).isEqualTo(0f)
+        assertThat(NaviRenderMath.mapPictureAlpha(90f)).isEqualTo(0f)
     }
 
     /** 一般点の写像は上端で [foldTopFraction] と一致する（同じ幾何の別入口であることの固定）。 */
