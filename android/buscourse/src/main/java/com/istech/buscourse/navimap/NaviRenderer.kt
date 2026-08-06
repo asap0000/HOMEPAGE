@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -674,11 +675,21 @@ private fun NaviRendererMapStage(
 
     // native camera（pan/zoom/tilt/bearing/padding）が落ち着くたびにスクリーン座標を引き直す
     // （設計§2-1「カメラidleでスクリーン座標を再計算」）。
+    // ★2026-08-06 オーナー報告「ピンがコースからずれて表示される」の是正＝move でも引き直す。
+    // カメラ設定直後の `toScreenLocation` は描画スレッドがまだ前のカメラのままのことがあり、
+    // GPS 追従中（毎秒カメラが動く）は idle が来るまで**恒常的に1歩遅れた位置**にピンが出ていた
+    // （傾き3°の実写で1本だけ経路線から外れていたのがこれ。静止時は idle で直るので気づきにくい）。
+    // OnCameraMoveListener は描画スレッドがカメラを適用するたびに発火するので、遅れが1フレームに縮む。
     DisposableEffect(map) {
         if (map == null) return@DisposableEffect onDispose {}
-        val listener = MapLibreMap.OnCameraIdleListener { recomputePinScreenPositions() }
-        map.addOnCameraIdleListener(listener)
-        onDispose { map.removeOnCameraIdleListener(listener) }
+        val idleListener = MapLibreMap.OnCameraIdleListener { recomputePinScreenPositions() }
+        val moveListener = MapLibreMap.OnCameraMoveListener { recomputePinScreenPositions() }
+        map.addOnCameraIdleListener(idleListener)
+        map.addOnCameraMoveListener(moveListener)
+        onDispose {
+            map.removeOnCameraIdleListener(idleListener)
+            map.removeOnCameraMoveListener(moveListener)
+        }
     }
     LaunchedEffect(map, routeData.stopPoints) { recomputePinScreenPositions() }
 
@@ -690,8 +701,25 @@ private fun NaviRendererMapStage(
     // **実際の地図上端 y≒700 に対して y≒2234 を返し**、三角が画面最下部へ沈んだ。
     // 変形後の実位置を親座標系で引けば、端末の密度にも cameraDistance の内部仕様にも依存しない。
     var groundTopY by remember { mutableStateOf(0f) }
+    // ★可視判定と三角の幾何は**折り曲げ後の実座標**で行う（2026-08-06 是正）。
+    // `toScreenLocation` の座標は折り曲げ**前**、groundTopY は折り曲げ**後**の実測値で、
+    // 前の実装は両者を直接比べていた＝90°では最大500px級の食い違いになり、
+    // **地平線の近くに見えているはずの遠い停留所が誤って消されていた**。
+    // ピンの描画自体は折り曲げ層の内側（アンカーが地図と共連れ）なので従来どおり折り曲げ前の座標を使う。
+    var foldCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    fun foldedPointOf(point: Offset): Offset {
+        val coords = foldCoords?.takeIf { it.isAttached } ?: return point
+        val parent = coords.parentLayoutCoordinates ?: return point
+        return parent.localPositionOf(coords, point)
+    }
     val visiblePinScreenPositions = pinScreenPositions.filterValues { point ->
-        point.x in 0f..stageWidthPx && point.y in groundTopY..stageHeightPx
+        // ★折り曲げ前の座標もステージ内であること（2026-08-06 実機で発見）: 折り曲げ軸（下端）より
+        // 下にある点＝自車より後ろの停留所は、透視変換の特異点（カメラ面）を跨いで座標が反転し、
+        // 折り曲げ後の判定だけだとすり抜けて**ステージの外（スライダーの下）に描かれる**ことがある。
+        // 絵（地図）は下端で終わるので、絵の外の点は折り曲げ後にどこへ写ろうと存在しない。
+        val inUnfoldedStage = point.x in 0f..stageWidthPx && point.y in 0f..stageHeightPx
+        val folded = foldedPointOf(point)
+        inUnfoldedStage && folded.x in 0f..stageWidthPx && folded.y in groundTopY..stageHeightPx
     }
     val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
     val selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
@@ -710,9 +738,12 @@ private fun NaviRendererMapStage(
         // だけなので交点が無く、「次の1つは必ず縁に出す」を満たせなかった。
         // 始点を地面領域へ寄せる＝自車が地平線より上にいるときは地平線上から見る。真正面なら
         // 交点は始点自身（地平線上のその位置）になり、オーナー指定「地平線の付近で」と一致する。
+        // ★始点も折り曲げ後の実座標（自車マーカーは折り曲げ層の内側に描かれるため、
+        // 画面上の見た目の位置は foldedPointOf(anchor)。三角はこの層の外に描くので座標系を揃える）。
+        val selfCarFoldedPx = foldedPointOf(selfCarAnchorPx)
         NaviRenderMath.rayRectEdgeIntersection(
-            selfCarAnchorPx.x.coerceIn(0f, stageWidthPx),
-            selfCarAnchorPx.y.coerceIn(groundTopY, stageHeightPx),
+            selfCarFoldedPx.x.coerceIn(0f, stageWidthPx),
+            selfCarFoldedPx.y.coerceIn(groundTopY, stageHeightPx),
             relativeBearing,
             0f,
             groundTopY,
@@ -729,6 +760,7 @@ private fun NaviRendererMapStage(
                 // ★変形後の上辺が親座標系のどこに来るかを Compose に計算させる（＝地平線）。
                 // 上辺は台形の短辺なので、左右の角のうち上にある方を採る。
                 .onGloballyPositioned { coords ->
+                    foldCoords = coords
                     val parent = coords.parentLayoutCoordinates
                     if (parent != null) {
                         val left = parent.localPositionOf(coords, Offset.Zero)
