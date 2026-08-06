@@ -5,6 +5,56 @@ import org.junit.Test
 
 class NaviRenderMathTest {
 
+    /**
+     * 増分D must3 の受け皿＝三角は縁に置くので、ラベルは辺に応じて内側へ逃がす。
+     * どの辺にも接していないとき（始点が縁へクランプされ交点＝始点になる真正面のケース）は下向き。
+     */
+    @Test fun inwardFromEdge_pointsIntoScreenForEachEdge() {
+        assertThat(NaviRenderMath.inwardFromEdge(0f, 50f, 0f, 0f, 100f, 100f))
+            .isEqualTo(NaviRenderMath.InwardDirection(1f, 0f))
+        assertThat(NaviRenderMath.inwardFromEdge(100f, 50f, 0f, 0f, 100f, 100f))
+            .isEqualTo(NaviRenderMath.InwardDirection(-1f, 0f))
+        assertThat(NaviRenderMath.inwardFromEdge(50f, 0f, 0f, 0f, 100f, 100f))
+            .isEqualTo(NaviRenderMath.InwardDirection(0f, 1f))
+        assertThat(NaviRenderMath.inwardFromEdge(50f, 100f, 0f, 0f, 100f, 100f))
+            .isEqualTo(NaviRenderMath.InwardDirection(0f, -1f))
+        assertThat(NaviRenderMath.inwardFromEdge(50f, 50f, 0f, 0f, 100f, 100f))
+            .isEqualTo(NaviRenderMath.InwardDirection(0f, 1f))
+    }
+
+    /**
+     * 増分D must1: 高傾斜では地平線が自車より下に来るため、呼び出し側は始点を地面領域へ
+     * クランプする。その結果「始点が上辺の上」で前方（上向き）を見る形になり、交点は始点自身
+     * ＝地平線上のその位置になること（null にならないこと）を固定する。
+     */
+    @Test fun rayRectEdgeIntersection_returnsOriginWhenStartingOnEdgeFacingOutward() {
+        val hit = NaviRenderMath.rayRectEdgeIntersection(50f, 800f, 0f, 0f, 800f, 100f, 1000f)
+        assertThat(hit).isNotNull()
+        assertThat(hit!!.y).isWithin(0.001f).of(800f)
+        assertThat(hit.x).isWithin(0.001f).of(50f)
+    }
+
+    @Test fun rayRectEdgeIntersection_hitsExpectedEdgeForCardinalBearings() {
+        val front = NaviRenderMath.rayRectEdgeIntersection(50f, 50f, 0f, 0f, 0f, 100f, 100f)!!
+        val right = NaviRenderMath.rayRectEdgeIntersection(50f, 50f, 90f, 0f, 0f, 100f, 100f)!!
+        val back = NaviRenderMath.rayRectEdgeIntersection(50f, 50f, 180f, 0f, 0f, 100f, 100f)!!
+        assertThat(front.y).isWithin(0.001f).of(0f)
+        assertThat(right.x).isWithin(0.001f).of(100f)
+        assertThat(back.y).isWithin(0.001f).of(100f)
+    }
+
+    @Test fun nextStopIndex_selectsSmallestAheadAndReturnsNullAfterAllStops() {
+        val stops = listOf(300.0, 100.0, 200.0)
+        assertThat(NaviRenderMath.nextStopIndex(120.0, stops)).isEqualTo(2)
+        assertThat(NaviRenderMath.nextStopIndex(300.0, stops)).isNull()
+    }
+
+    @Test fun guidanceChainageRange_usesEventMinimumAndMaximum() {
+        val range = NaviRenderMath.guidanceChainageRange(listOf(null, 320.0, 80.0, 210.0))!!
+        assertThat(range.start).isEqualTo(80.0)
+        assertThat(range.endInclusive).isEqualTo(320.0)
+    }
+
     // --- tilt distribution (native vs graphicsLayer extra rotation) ---
 
     @Test fun nativeTiltDeg_passesThroughBelow60() {

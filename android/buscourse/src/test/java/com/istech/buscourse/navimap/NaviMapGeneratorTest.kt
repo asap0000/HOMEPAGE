@@ -133,20 +133,20 @@ class NaviMapGeneratorTest {
         assertThat(database.naviMapDao().findMapsByIdentity("青", 1, 2026)).isEmpty()
     }
 
-    /** ★B-1: セッション全体でなく、コースの時間区間（停留所 frame/event 時刻）に絞った GPS だけを使う。 */
+    /** 記録の始端・終端を含むセッションGPS全点を使う。 */
     @Test
-    fun generatorSlicesGpsToCourseTimeRangeExcludingGarage() = runTest {
+    fun generatorUsesAllSessionGpsIncludingBeforeAndAfterStops() = runTest {
         val (courseId, sessionId) = insertGpsCourseWithFramedStops("青", 1)
         val mapId = NaviMapGenerator(database).generateFromCourse(courseId, now = 100)
         val dao = database.naviMapDao()
         val segment = dao.getSegments(mapId).single()
         val points = dao.getTrackPoints(segment.id)
 
-        // 窓 [3000,7000] 内の3点のみ。車庫（ts=1000/9000・lat=35.90）は除外される。
-        assertThat(points).hasSize(3)
-        assertThat(points.first().lat).isEqualTo(35.00)
-        assertThat(points.last().lat).isEqualTo(35.02)
-        assertThat(points.map { it.lat }).doesNotContain(35.90)
+        assertThat(points).hasSize(5)
+        assertThat(points.first().lat).isEqualTo(35.90)
+        assertThat(points.last().lat).isEqualTo(35.90)
+        assertThat(points.first().tRelS).isEqualTo(0.0)
+        assertThat(points.last().tRelS).isEqualTo(8.0)
 
         val map = dao.getMapById(mapId)!!
         assertThat(map.mediaMode).isEqualTo("referenced")
@@ -155,23 +155,22 @@ class NaviMapGeneratorTest {
         assertThat(map.title).isEqualTo("2026年 青1コース")
         // GPS 由来なので segment に session と時間軸が残る。
         assertThat(segment.sessionId).isEqualTo(sessionId)
-        assertThat(segment.baseEpochMs).isEqualTo(3_000)
+        assertThat(segment.baseEpochMs).isEqualTo(1_000)
     }
 
-    /** m-2: 停留所から時間窓を導けないコースは route_point へ退避し、segment に session を残さない。 */
+    /** 停留所に時刻が無くても、セッションGPSが2点あればそれを使う。 */
     @Test
-    fun generatorFallsBackToRoutePointWhenStopsHaveNoTimestamps() = runTest {
+    fun generatorUsesSessionGpsWhenStopsHaveNoTimestamps() = runTest {
         val courseId = insertCardOnlyCourseWithGpsAndRoute("緑", 3)
         val mapId = NaviMapGenerator(database).generateFromCourse(courseId, now = 100)
         val dao = database.naviMapDao()
         val segment = dao.getSegments(mapId).single()
         val points = dao.getTrackPoints(segment.id)
 
-        // route_point（別座標 36.0 系）の2点を使う。GPS（35.0 系）は窓が無いので不使用。
         assertThat(points).hasSize(2)
-        assertThat(points.first().lat).isEqualTo(36.0)
-        assertThat(segment.sessionId).isNull()
-        assertThat(segment.baseEpochMs).isNull()
+        assertThat(points.first().lat).isEqualTo(35.0)
+        assertThat(segment.sessionId).isNotNull()
+        assertThat(segment.baseEpochMs).isEqualTo(1_000)
         assertThat(dao.getMapById(mapId)?.mediaMode).isEqualTo("none")
     }
 
@@ -189,7 +188,7 @@ class NaviMapGeneratorTest {
         assertThat(dao.getActiveMapsByIdentity("青", 1, 2026).map { it.id }).containsExactly(secondId)
         assertThat(dao.getMapById(otherId)?.archivedAt).isNull()
         val segment = dao.getSegments(secondId).single()
-        assertThat(dao.getTrackPoints(segment.id)).hasSize(3)
+        assertThat(dao.getTrackPoints(segment.id)).hasSize(5)
         val events = dao.getEvents(secondId)
         assertThat(events).hasSize(2)
         assertThat(dao.getOutputs(events.first().id).single().outputKind).isEqualTo("MARKER")

@@ -174,13 +174,10 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
             )
         }
 
-        // 停留所の「位置」と「時刻」を同じ走査で解決する。位置は frame→event→card の優先
-        // （`CourseRepository.resolveStopPosition` と同順）。時刻は RouteMapScreen/deriveCourseTimeRange
-        // と同じ規則（frame_id があれば captured_at、無ければ event_id の event_ts）で採り、
-        // GPS をコースの時間区間へ絞る基準にする（B-1）。位置を解決できない停留所はイベントを作らない。
+        // 停留所の位置を frame→event→card の優先順
+        // （`CourseRepository.resolveStopPosition` と同順）で解決する。
         val orderedStops = database.courseStopDao().getOrderedStops(courseId)
         val stopInputs = mutableListOf<StopInput>()
-        val stopTimestamps = mutableListOf<Long>()
         for (stop in orderedStops) {
             val frame = stop.frameId?.let { database.timelapseFrameDao().getById(it) }
             val event = stop.eventId?.let { database.stopVisitEventDao().getById(it) }
@@ -194,21 +191,12 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
             if (position != null) {
                 stopInputs += StopInput(stop.stopCardId, stop.sequenceIndex, position.first, position.second)
             }
-            val timestamp = when {
-                stop.frameId != null -> frame?.capturedAt
-                stop.eventId != null -> event?.eventTs
-                else -> null
-            }
-            if (timestamp != null) stopTimestamps += timestamp
         }
 
-        // ★B-1: GPS をコースの時間区間に絞る（車庫回送等のコース外走行を除外）。
-        // 既存の RouteMapScreen と同じく、停留所の frame/event 時刻の最小〜最大を窓とする。
-        // 窓を導けない（カードのみのコース）ときは GPS を使わず route_point へ退避する
-        // （route_point は confirmCourseRouteFromSession が既に窓で絞り chainage も同式で計算済み）。
-        val timeRange = stopTimestamps.minOrNull()?.let { start -> start to (stopTimestamps.maxOrNull() ?: start) }
-        val gpsSamples = if (course.sourceSessionId != null && timeRange != null) {
-            database.gpsPointDao().getBySessionInRange(course.sourceSessionId, timeRange.first, timeRange.second)
+        // ナビ用軌跡は記録の始端・終端も含む。GPSが2点未満のときだけ
+        // 従来どおり route_point へ退避する。
+        val gpsSamples = if (course.sourceSessionId != null) {
+            database.gpsPointDao().getBySession(course.sourceSessionId)
                 .map { TrackSample(it.tsEpochMs, it.lat, it.lon) }
         } else {
             emptyList()

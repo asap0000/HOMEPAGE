@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -72,6 +73,7 @@ import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.MapDataPackageEntity
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
+import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.RouteTrackOverlay
 import java.io.File
@@ -167,6 +169,7 @@ private data class NaviRouteData(
     /** 停留所名表示ON時にローカル解決した名前（設計§6-5）。Previewは常に空（stopCardIdが無いため）。 */
     val nameByStopCardId: Map<Long, String>,
     val maxChainageM: Float,
+    val guidanceChainageRange: ClosedFloatingPointRange<Double>?,
     /** [NaviRenderSource.Preview]由来か（映像オーバーレイのダミー表示切り替えに使う）。 */
     val isPreview: Boolean,
 )
@@ -177,6 +180,7 @@ private data class ResolvedStopPoint(
     val sequenceIndex: Int,
     val lat: Double,
     val lon: Double,
+    val chainageM: Double,
 )
 
 /**
@@ -197,7 +201,13 @@ private suspend fun loadRealRouteData(database: BusCourseDatabase, naviMapId: Lo
         val chainage = event.chainageStartM ?: return@mapIndexedNotNull null
         val (lat, lon) = NaviCamera.positionAtChainageM(segments, trackPointsBySegmentId, chainage)
             ?: return@mapIndexedNotNull null
-        ResolvedStopPoint(stopCardId = event.stopCardId, sequenceIndex = index + 1, lat = lat, lon = lon)
+        ResolvedStopPoint(
+            stopCardId = event.stopCardId,
+            sequenceIndex = index + 1,
+            lat = lat,
+            lon = lon,
+            chainageM = chainage,
+        )
     }
 
     // 停留所名のローカル解決（設計§6-5：navi_mapには名前を焼かないため、表示のたびにローカルDBを引く）。
@@ -211,7 +221,17 @@ private suspend fun loadRealRouteData(database: BusCourseDatabase, naviMapId: Lo
         .maxOfOrNull { it.chainageEndM }
         ?.toFloat() ?: 0f
 
-    return NaviRouteData(segments, trackPointsBySegmentId, stopPoints, nameByStopCardId, maxChainageM, isPreview = false)
+    return NaviRouteData(
+        segments,
+        trackPointsBySegmentId,
+        stopPoints,
+        nameByStopCardId,
+        maxChainageM,
+        // ★must2: 案内区間は「停留所」の範囲。events には ex_full の maneuver 等が
+        // 混じりうるので、実際に描く停留所（stopPoints）の chainage で決める。
+        NaviRenderMath.guidanceChainageRange(stopPoints.map { it.chainageM }),
+        isPreview = false,
+    )
 }
 
 /** プレビュー用の合成本線の総延長（設計§3-0「数点の停留所」）。 */
@@ -260,7 +280,13 @@ private fun buildPreviewRouteData(): NaviRouteData {
     // 停留所名表示ON時に「ダミー名」を出すため、実カードIDではない合成ID(1..N)をローカルに振り、
     // nameByStopCardIdへは固定文字列のみを詰める（DBを一切引かない＝PII非搭載）。
     val stopPoints = PREVIEW_STOP_DUMMY_NAMES.indices.map { index ->
-        ResolvedStopPoint(stopCardId = (index + 1).toLong(), sequenceIndex = index + 1, lat = 0.0, lon = 0.0)
+        ResolvedStopPoint(
+            stopCardId = (index + 1).toLong(),
+            sequenceIndex = index + 1,
+            lat = 0.0,
+            lon = 0.0,
+            chainageM = (index + 1) * PREVIEW_ROUTE_LENGTH_M / (PREVIEW_STOP_DUMMY_NAMES.size + 1),
+        )
     }
     val nameByStopCardId = PREVIEW_STOP_DUMMY_NAMES.mapIndexed { index, name -> (index + 1).toLong() to name }.toMap()
 
@@ -270,6 +296,7 @@ private fun buildPreviewRouteData(): NaviRouteData {
         stopPoints = stopPoints,
         nameByStopCardId = nameByStopCardId,
         maxChainageM = PREVIEW_ROUTE_LENGTH_M.toFloat(),
+        guidanceChainageRange = null,
         isPreview = true,
     )
 }
@@ -280,6 +307,9 @@ private fun buildPreviewRouteData(): NaviRouteData {
 
 /** 経路線の色（[com.istech.buscourse.ui.NaviScreen]と同じブランド青）。 */
 private const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
+private const val NAVI_APPROACH_LINE_COLOR_HEX = "#9DB4EE"
+private const val NAVI_APPROACH_SOURCE_ID = "navi-approach-line-source"
+private const val NAVI_APPROACH_LAYER_ID = "navi-approach-line-layer"
 
 /**
  * 映像オーバーレイと「実機ナビ画面枠」の角丸フレームが干渉しないための、四辺共通のわずかな余白
@@ -434,6 +464,66 @@ private fun naviSkyBrush(skyAlpha: Float, theme: NaviTheme): Brush {
     )
 }
 
+private data class RouteLineGroups(
+    val approach: List<List<Pair<Double, Double>>>,
+    val guidance: List<List<Pair<Double, Double>>>,
+)
+
+/** GAPを保ったまま、停留所範囲の境界点を線形補間して両側の線に共有させる。 */
+private fun splitRouteLines(
+    routeData: NaviRouteData,
+): RouteLineGroups {
+    val range = routeData.guidanceChainageRange
+    // ★連続する TRACK は1本に連結し、GAP でだけ切る（増分D 以前の挙動を保つ）。
+    // TRACK ごとに分けると、GAP を挟まず隣接する TRACK の間に線が引かれず ex_full で途切れる。
+    val tracks = buildList<List<NaviTrackPointEntity>> {
+        var current = mutableListOf<NaviTrackPointEntity>()
+        for (segment in routeData.segments.sortedBy { it.seq }) {
+            if (segment.kind == TRACK_KIND) {
+                current += routeData.trackPointsBySegmentId[segment.id].orEmpty()
+                    .sortedBy { point -> point.chainageM }
+            } else if (current.isNotEmpty()) {
+                add(current.toList())
+                current = mutableListOf()
+            }
+        }
+        if (current.isNotEmpty()) add(current.toList())
+    }
+    if (range == null) {
+        return RouteLineGroups(emptyList(), tracks.map { line -> line.map { it.lat to it.lon } })
+    }
+
+    fun clipped(
+        points: List<NaviTrackPointEntity>,
+        lower: Double,
+        upper: Double,
+    ): List<Pair<Double, Double>> {
+        if (points.size < 2 || lower > upper) return emptyList()
+        val result = mutableListOf<Pair<Double, Double>>()
+        for ((first, second) in points.zipWithNext()) {
+            val start = maxOf(first.chainageM, lower)
+            val end = minOf(second.chainageM, upper)
+            if (start > end || second.chainageM < lower || first.chainageM > upper) continue
+            fun at(chainage: Double): Pair<Double, Double> {
+                val span = second.chainageM - first.chainageM
+                val fraction = if (span == 0.0) 0.0 else ((chainage - first.chainageM) / span).coerceIn(0.0, 1.0)
+                return (first.lat + (second.lat - first.lat) * fraction) to
+                    (first.lon + (second.lon - first.lon) * fraction)
+            }
+            val startPoint = at(start)
+            if (result.lastOrNull() != startPoint) result += startPoint
+            val endPoint = at(end)
+            if (result.lastOrNull() != endPoint) result += endPoint
+        }
+        return result
+    }
+
+    val before = tracks.map { clipped(it, Double.NEGATIVE_INFINITY, range.start) }.filter { it.size >= 2 }
+    val guidance = tracks.map { clipped(it, range.start, range.endInclusive) }.filter { it.size >= 2 }
+    val after = tracks.map { clipped(it, range.endInclusive, Double.POSITIVE_INFINITY) }.filter { it.size >= 2 }
+    return RouteLineGroups(before + after, guidance)
+}
+
 /**
  * 実`.iscmap`パッケージが選択されているときの本体ステージ。MapViewホスティングは
  * [com.istech.buscourse.ui.NaviScreen]の流儀（`remember`＋`AndroidView`＋`DisposableEffect`ライフサイクル
@@ -507,22 +597,20 @@ private fun NaviRendererMapStage(
             map.setLatLngBoundsForCameraTarget(bounds)
             map.setMaxZoomPreference(maxOf(pkg.maxzoom.toDouble(), NAVI_RENDERER_OVERZOOM_CEILING))
 
-            val trackLines = buildList<List<Pair<Double, Double>>> {
-                var current = mutableListOf<Pair<Double, Double>>()
-                for (segment in routeData.segments.sortedBy { it.seq }) {
-                    if (segment.kind == TRACK_KIND) {
-                        current += routeData.trackPointsBySegmentId[segment.id].orEmpty().map { it.lat to it.lon }
-                    } else if (current.isNotEmpty()) {
-                        add(current.toList())
-                        current = mutableListOf()
-                    }
-                }
-                if (current.isNotEmpty()) add(current.toList())
-            }
+            val trackLines = splitRouteLines(routeData)
             val overlay = RouteTrackOverlay(context, database, style)
             // Style.OnStyleLoadedコールバックはsuspendでないため、別途起動したscopeでDB非依存の
             // suspend関数を呼ぶ（[com.istech.buscourse.ui.NaviScreen]と同じ流儀）。
-            scope.launch { overlay.showRouteMultiLine(trackLines, NAVI_ROUTE_LINE_COLOR_HEX) }
+            scope.launch {
+                // MapLibreは追加順で上に重なるため、助走を先に登録する。
+                overlay.showRouteMultiLine(
+                    trackLines.approach,
+                    NAVI_APPROACH_LINE_COLOR_HEX,
+                    NAVI_APPROACH_SOURCE_ID,
+                    NAVI_APPROACH_LAYER_ID,
+                )
+                overlay.showRouteMultiLine(trackLines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
+            }
 
             // ★バグ1修正（増分P4b-3）: 下のカメラ適用LaunchedEffectは`map`が出来た直後、
             // つまりこのスタイル読み込み（非同期コールバック）が完了する**前**に一度走る
@@ -595,10 +683,59 @@ private fun NaviRendererMapStage(
     LaunchedEffect(map, routeData.stopPoints) { recomputePinScreenPositions() }
 
     val extraRotationXDeg = NaviRenderMath.extraRotationXDeg(settings.tiltDeg.toFloat())
+    // ★地面領域の上端（＝地平線）は理論式で当てにいかず、Compose に実測させる（2026-08-06 実機で判明）。
+    // `graphicsLayer`の rotationX＋cameraDistance による透視変形は、cameraDistance に渡した値が
+    // そのままピクセル距離にならない（内部で密度換算される）。消失点を
+    // `stageHeight - cameraDistance / tan(θ)` で求める式は、傾き90°の実機で
+    // **実際の地図上端 y≒700 に対して y≒2234 を返し**、三角が画面最下部へ沈んだ。
+    // 変形後の実位置を親座標系で引けば、端末の密度にも cameraDistance の内部仕様にも依存しない。
+    var groundTopY by remember { mutableStateOf(0f) }
+    val visiblePinScreenPositions = pinScreenPositions.filterValues { point ->
+        point.x in 0f..stageWidthPx && point.y in groundTopY..stageHeightPx
+    }
+    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
+    val selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
+    val nextStop = NaviRenderMath.nextStopIndex(chainageM.toDouble(), routeData.stopPoints.map { it.chainageM })
+        ?.let(routeData.stopPoints::get)
+    val nextStopIndicator = if (
+        cameraState != null &&
+        nextStop != null &&
+        visiblePinScreenPositions[nextStop.sequenceIndex] == null
+    ) {
+        val relativeBearing = (
+            GeoMath.bearingDeg(cameraState.lat, cameraState.lon, nextStop.lat, nextStop.lon) - cameraState.bearingDeg
+        ).toFloat()
+        // ★must1: 高傾斜では地平線（groundTopY）が自車アンカーより下に来ることがあり、
+        // そのままだと始点が地面領域の外（上）になる。前方＝上向きのレイは領域から離れる
+        // だけなので交点が無く、「次の1つは必ず縁に出す」を満たせなかった。
+        // 始点を地面領域へ寄せる＝自車が地平線より上にいるときは地平線上から見る。真正面なら
+        // 交点は始点自身（地平線上のその位置）になり、オーナー指定「地平線の付近で」と一致する。
+        NaviRenderMath.rayRectEdgeIntersection(
+            selfCarAnchorPx.x.coerceIn(0f, stageWidthPx),
+            selfCarAnchorPx.y.coerceIn(groundTopY, stageHeightPx),
+            relativeBearing,
+            0f,
+            groundTopY,
+            stageWidthPx,
+            stageHeightPx,
+        )?.let { Triple(nextStop, it, relativeBearing) }
+    } else {
+        null
+    }
     Box(modifier) {
         Box(
             Modifier
                 .fillMaxSize()
+                // ★変形後の上辺が親座標系のどこに来るかを Compose に計算させる（＝地平線）。
+                // 上辺は台形の短辺なので、左右の角のうち上にある方を採る。
+                .onGloballyPositioned { coords ->
+                    val parent = coords.parentLayoutCoordinates
+                    if (parent != null) {
+                        val left = parent.localPositionOf(coords, Offset.Zero)
+                        val right = parent.localPositionOf(coords, Offset(coords.size.width.toFloat(), 0f))
+                        groundTopY = minOf(left.y, right.y).coerceIn(0f, stageHeightPx)
+                    }
+                }
                 .graphicsLayer {
                     rotationX = extraRotationXDeg
                     transformOrigin = TransformOrigin(0.5f, 1f)
@@ -621,20 +758,52 @@ private fun NaviRendererMapStage(
                 NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
             } ?: 0.0
             val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
-            val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
-
             NaviPinAndSelfCarOverlay(
                 stops = routeData.stopPoints,
-                pinScreenPositions = pinScreenPositions,
+                pinScreenPositions = visiblePinScreenPositions,
                 nameByStopCardId = routeData.nameByStopCardId,
                 stopNameVisible = settings.stopNameVisible,
-                selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
+                selfCarAnchorPx = selfCarAnchorPx,
                 selfCarRotationDeg = selfCarRotationDeg,
                 theme = settings.theme,
                 counterRotationXDeg = extraRotationXDeg,
                 stageWidthPx = stageWidthPx,
                 modifier = Modifier.fillMaxSize(),
             )
+        }
+        nextStopIndicator?.let { (stop, point, bearing) ->
+            val label = if (settings.stopNameVisible) {
+                stop.stopCardId?.let { routeData.nameByStopCardId[it] } ?: stop.sequenceIndex.toString()
+            } else {
+                stop.sequenceIndex.toString()
+            }
+            // ★must3: 三角そのものを交点（＝地面領域の縁）へ置く。三角とラベルを1つの横並びに
+            // まとめて「全体の中心」を交点に合わせると、三角がラベル幅の分だけ縁から離れてしまう。
+            // ラベルは三角に重ならないよう内側へ逃がす。
+            // ★上端に groundTopY（地平線）を渡す＝どちらも地面が描かれている範囲から出ない。
+            val inward = NaviRenderMath.inwardFromEdge(
+                point.x, point.y, 0f, groundTopY, stageWidthPx, stageHeightPx,
+            )
+            NaviAnchoredCenterInBounds(
+                anchorPx = Offset(point.x, point.y),
+                boundsLeft = 0f,
+                boundsTop = groundTopY,
+                boundsRight = stageWidthPx,
+                boundsBottom = stageHeightPx,
+            ) {
+                NaviEdgeStopArrow(bearingDeg = bearing, theme = settings.theme)
+            }
+            NaviAnchoredInwardOfEdge(
+                anchorPx = Offset(point.x, point.y),
+                inward = inward,
+                gapPx = with(LocalDensity.current) { (EDGE_INDICATOR_ARROW_SIZE_DP / 2 + 3.dp).toPx() },
+                boundsLeft = 0f,
+                boundsTop = groundTopY,
+                boundsRight = stageWidthPx,
+                boundsBottom = stageHeightPx,
+            ) {
+                NaviEdgeStopLabel(label = label, theme = settings.theme)
+            }
         }
     }
 }
@@ -1576,6 +1745,124 @@ private fun NaviBillboardPin(label: String, theme: NaviTheme, modifier: Modifier
             maxLines = 1,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         )
+    }
+}
+
+/**
+ * 画面外にある「次の停留所」だけを地面領域の縁で案内する（増分D・オーナー承認 y×5 の復唱5）。
+ *
+ * **通常の停留所ピン（[NaviBillboardPin]）と形を変えること自体が仕様**＝丸いピルのままだと
+ * 「地図上のその場所にある」と読めてしまい、増分Dで直した貼りつき不具合と同じ誤読が残る。
+ * 三角が方位（[bearingDeg]＝画面上向き0°・時計回り正）を指し、ラベルは角丸の小さい板に載せる。
+ *
+ * 配置は呼び出し側の[NaviAnchoredCenterInBounds]が担う（**上限＝地平線**。オーナー指定の内部仕様）。
+ */
+@Composable
+private fun NaviEdgeStopArrow(bearingDeg: Float, theme: NaviTheme) {
+    // ★実機で判明（2026-08-06）: 前景色（DAYでは白）で塗ると、淡色の地図の上でほとんど見えない。
+    // ラベル（[NaviEdgeStopLabel]）と同じ「地の色で塗り、前景色で縁取る」に揃える。
+    val (bg, fg) = pinColors(theme)
+    Canvas(
+        modifier = Modifier
+            .size(EDGE_INDICATOR_ARROW_SIZE_DP)
+            .rotate(bearingDeg),
+    ) {
+        val path = Path().apply {
+            moveTo(size.width / 2f, 0f)
+            lineTo(size.width, size.height)
+            lineTo(0f, size.height)
+            close()
+        }
+        drawPath(path, bg)
+        drawPath(path, fg, style = Stroke(width = 1.5.dp.toPx()))
+    }
+}
+
+/** [NaviEdgeStopArrow]に添える名前/番号。角丸を浅くして丸ピン（[NaviBillboardPin]）と形を分ける。 */
+@Composable
+private fun NaviEdgeStopLabel(label: String, theme: NaviTheme) {
+    val (bg, fg) = pinColors(theme)
+    Box(
+        modifier = Modifier
+            .height(EDGE_INDICATOR_LABEL_HEIGHT_DP)
+            .clip(RoundedCornerShape(4.dp))
+            .background(bg)
+            .border(1.5.dp, fg, RoundedCornerShape(4.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = fg,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 6.dp),
+        )
+    }
+}
+
+/**
+ * 縁に置いた三角の**内側**へ、中身を実測して並べる（重ならないよう[gapPx]だけ離す）。
+ * [NaviAnchoredCenterInBounds]と同じく矩形内へクランプするので、地平線より上へは出ない。
+ */
+@Composable
+private fun NaviAnchoredInwardOfEdge(
+    anchorPx: Offset,
+    inward: NaviRenderMath.InwardDirection,
+    gapPx: Float,
+    boundsLeft: Float,
+    boundsTop: Float,
+    boundsRight: Float,
+    boundsBottom: Float,
+    content: @Composable () -> Unit,
+) {
+    Layout(content = content) { measurables, constraints ->
+        val placeable = measurables.first().measure(constraints)
+        val centerX = anchorPx.x + inward.x * (gapPx + placeable.width / 2f)
+        val centerY = anchorPx.y + inward.y * (gapPx + placeable.height / 2f)
+        val x = (centerX - placeable.width / 2f)
+            .coerceIn(boundsLeft, (boundsRight - placeable.width).coerceAtLeast(boundsLeft))
+        val y = (centerY - placeable.height / 2f)
+            .coerceIn(boundsTop, (boundsBottom - placeable.height).coerceAtLeast(boundsTop))
+        layout(placeable.width, placeable.height) {
+            placeable.place(x.roundToInt(), y.roundToInt())
+        }
+    }
+}
+
+/** 縁の三角の一辺。丸ピン（[PIN_SIZE_DP]）より小さくして、形の違いを距離でも紛れさせない。 */
+private val EDGE_INDICATOR_ARROW_SIZE_DP = 16.dp
+
+/** 縁のラベル板の高さ。 */
+private val EDGE_INDICATOR_LABEL_HEIGHT_DP = 22.dp
+
+/**
+ * 中身を実測して中心を[anchorPx]へ合わせ、指定矩形の内側へクランプする。
+ *
+ * **[boundsTop]に地平線を渡すのがこの関数の存在理由**（オーナー指定 2026-08-06「90度の場合、地平線の付近で」）。
+ * 地面の上にあるものは、どれだけ遠くても地平線より上には見えない——傾きを倒すほど地平線は
+ * 降りてくるので、三角の出る位置も一緒に下がる。90°の特別扱いではなく、どの傾きでも同じ規則。
+ * [NaviAnchoredBottomCenter]と同じく、実測した幅・高さを使う（固定サイズを仮定すると縁からずれる）。
+ */
+@Composable
+private fun NaviAnchoredCenterInBounds(
+    anchorPx: Offset,
+    boundsLeft: Float,
+    boundsTop: Float,
+    boundsRight: Float,
+    boundsBottom: Float,
+    content: @Composable () -> Unit,
+) {
+    Layout(content = content) { measurables, constraints ->
+        val placeable = measurables.first().measure(constraints)
+        val x = (anchorPx.x - placeable.width / 2f)
+            .coerceIn(boundsLeft, (boundsRight - placeable.width).coerceAtLeast(boundsLeft))
+        val y = (anchorPx.y - placeable.height / 2f)
+            .coerceIn(boundsTop, (boundsBottom - placeable.height).coerceAtLeast(boundsTop))
+        layout(placeable.width, placeable.height) {
+            placeable.place(x.roundToInt(), y.roundToInt())
+        }
     }
 }
 

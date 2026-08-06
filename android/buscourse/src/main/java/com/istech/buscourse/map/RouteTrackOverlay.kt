@@ -93,7 +93,12 @@ class RouteTrackOverlay(
      * 埋まってしまう。呼び出し側で GAP ごとに区切った点列リストを渡し、本メソッドで各区間を独立した
      * ラインとして描く（区間間には線を引かない）。2点未満の区間は無視する。全区間が空なら何もしない。
      */
-    suspend fun showRouteMultiLine(lines: List<List<Pair<Double, Double>>>, colorHex: String) {
+    suspend fun showRouteMultiLine(
+        lines: List<List<Pair<Double, Double>>>,
+        colorHex: String,
+        sourceId: String = ROUTE_LINE_SOURCE_ID,
+        layerId: String = ROUTE_LINE_LAYER_ID,
+    ) {
         val usableLines = lines.filter { it.size >= 2 }
         if (usableLines.isEmpty()) return
         val lineStrings = usableLines.map { line ->
@@ -101,12 +106,12 @@ class RouteTrackOverlay(
         }
         val feature = Feature.fromGeometry(MultiLineString.fromLngLats(lineStrings))
         withContext(Dispatchers.Main) {
-            (style.getSourceAs<GeoJsonSource>(ROUTE_LINE_SOURCE_ID)
-                ?: GeoJsonSource(ROUTE_LINE_SOURCE_ID).also { style.addSource(it) })
+            (style.getSourceAs<GeoJsonSource>(sourceId)
+                ?: GeoJsonSource(sourceId).also { style.addSource(it) })
                 .setGeoJson(feature)
-            if (style.getLayer(ROUTE_LINE_LAYER_ID) == null) {
+            if (style.getLayer(layerId) == null) {
                 style.addLayer(
-                    LineLayer(ROUTE_LINE_LAYER_ID, ROUTE_LINE_SOURCE_ID).withProperties(
+                    LineLayer(layerId, sourceId).withProperties(
                         PropertyFactory.lineColor(Color.parseColor(colorHex)),
                         PropertyFactory.lineWidth(4f),
                         PropertyFactory.lineCap(Property.LINE_CAP_ROUND),

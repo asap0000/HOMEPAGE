@@ -11,6 +11,104 @@ import kotlin.math.sin
  */
 object NaviRenderMath {
 
+    data class ScreenPointPx(val x: Float, val y: Float)
+
+    // ★`groundTopYPx`（消失点 = stageHeight - cameraDistance/tan θ）は削除した（2026-08-06）。
+    // 傾き90°の実機で、実際の地図上端 y≒700 に対して y≒2234 を返し、三角が画面最下部へ沈んだ。
+    // `graphicsLayer.cameraDistance` は渡した値がそのままピクセル距離にならない（内部で密度換算される）ため、
+    // この形の理論式は実描画と合わせられない。地平線は [NaviRenderer] 側で
+    // `onGloballyPositioned`＋`localPositionOf` により**変形後の実位置**として引く。
+    // 使わない式を残すと、次に触る人が同じ罠に落ちるので消す。
+
+    /**
+     * 画面上方を0°、時計回りを正とするレイと矩形の最初の交点。
+     * 始点が矩形内なら出口、外なら入口を返す。
+     */
+    fun rayRectEdgeIntersection(
+        originX: Float,
+        originY: Float,
+        bearingDeg: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+    ): ScreenPointPx? {
+        val values = listOf(originX, originY, bearingDeg, left, top, right, bottom)
+        if (values.any { !it.isFinite() } || right < left || bottom < top) return null
+        val radians = Math.toRadians(bearingDeg.toDouble())
+        val dx = sin(radians).toFloat()
+        val dy = -cos(radians).toFloat()
+        val candidates = mutableListOf<Pair<Float, ScreenPointPx>>()
+        fun add(t: Float, x: Float, y: Float) {
+            if (t >= 0f && x in (left - 0.01f)..(right + 0.01f) && y in (top - 0.01f)..(bottom + 0.01f)) {
+                candidates += t to ScreenPointPx(x.coerceIn(left, right), y.coerceIn(top, bottom))
+            }
+        }
+        if (kotlin.math.abs(dx) > 1e-6f) {
+            val leftT = (left - originX) / dx
+            add(leftT, left, originY + leftT * dy)
+            val rightT = (right - originX) / dx
+            add(rightT, right, originY + rightT * dy)
+        }
+        if (kotlin.math.abs(dy) > 1e-6f) {
+            val topT = (top - originY) / dy
+            add(topT, originX + topT * dx, top)
+            val bottomT = (bottom - originY) / dy
+            add(bottomT, originX + bottomT * dx, bottom)
+        }
+        return candidates.minByOrNull { it.first }?.second
+    }
+
+    /** 現在地点より先にある最小chainageの要素index。 */
+    fun nextStopIndex(currentChainageM: Double, stopChainagesM: List<Double>): Int? =
+        stopChainagesM.indices
+            .filter { stopChainagesM[it].isFinite() && stopChainagesM[it] > currentChainageM }
+            .minByOrNull { stopChainagesM[it] }
+
+    /** 縁に置いたものから見て、画面の内側がどちらかを表す向き（各成分 -1f/0f/+1f）。 */
+    data class InwardDirection(val x: Float, val y: Float)
+
+    /**
+     * 縁の交点がどの辺に乗っているかから、ラベルを寄せる内向きを決める。
+     *
+     * 三角は交点そのもの（＝縁）へ置くので、ラベルは内側へ逃がさないと画面の外へ出る。
+     * どの辺にも接していないとき（レイの始点が地面領域の縁へクランプされ、交点が始点自身に
+     * なる＝真正面のケース）は下向きへ置く。
+     */
+    fun inwardFromEdge(
+        x: Float,
+        y: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        epsilonPx: Float = 0.5f,
+    ): InwardDirection {
+        val ix = when {
+            x <= left + epsilonPx -> 1f
+            x >= right - epsilonPx -> -1f
+            else -> 0f
+        }
+        val iy = when {
+            y <= top + epsilonPx -> 1f
+            y >= bottom - epsilonPx -> -1f
+            else -> 0f
+        }
+        return if (ix == 0f && iy == 0f) InwardDirection(0f, 1f) else InwardDirection(ix, iy)
+    }
+
+    /**
+     * 停留所が定義する案内区間。
+     *
+     * ★渡すのは「停留所」の chainage だけにすること（レビュー must2）。`navi_event` には
+     * ex_full の maneuver 等が混じりうるため、全イベントの min/max を採ると停留所より
+     * 外側まで案内区間になってしまう。
+     */
+    fun guidanceChainageRange(chainagesM: List<Double?>): ClosedFloatingPointRange<Double>? {
+        val finite = chainagesM.filterNotNull().filter { it.isFinite() }
+        return finite.minOrNull()?.let { it..finite.maxOrNull()!! }
+    }
+
     /** MapLibre native tilt の上限（SDK上限。設計 §2）。 */
     const val NATIVE_TILT_MAX_DEG = 60f
 
