@@ -34,6 +34,83 @@ class NaviRenderMathTest {
         assertThat(hit.x).isWithin(0.001f).of(50f)
     }
 
+    // --- 増分E: 折り曲げ角をプレビューの地平線に合わせる（y×4・2026-08-06） ---
+
+    @Test fun foldTopFraction_isZeroAtZeroAndMonotone() {
+        assertThat(NaviRenderMath.foldTopFraction(0f, 4f)).isEqualTo(0f)
+        val at30 = NaviRenderMath.foldTopFraction(30f, 4f)
+        val at55 = NaviRenderMath.foldTopFraction(55f, 4f)
+        val at75 = NaviRenderMath.foldTopFraction(75f, 4f)
+        assertThat(at30).isLessThan(at55)
+        assertThat(at55).isLessThan(at75)
+    }
+
+    /** 実機実測（2026-08-06 OPPO・k≈3.97）に対する順モデルの整合＝残差1%以内。 */
+    @Test fun foldTopFraction_matchesDeviceMeasurements() {
+        val k = 3.97f
+        assertThat(NaviRenderMath.foldTopFraction(30f, k)).isWithin(0.01f).of(0.231f)
+        assertThat(NaviRenderMath.foldTopFraction(55f, k)).isWithin(0.01f).of(0.525f)
+        assertThat(NaviRenderMath.foldTopFraction(75f, k)).isWithin(0.01f).of(0.792f)
+    }
+
+    @Test fun foldCameraRatioFromMeasurement_invertsForwardModel() {
+        val t = NaviRenderMath.foldTopFraction(30f, 4f)
+        assertThat(NaviRenderMath.foldCameraRatioFromMeasurement(30f, t)!!).isWithin(0.01f).of(4f)
+        // 折り曲げがほぼ無い（<1°）ときは逆算できない
+        assertThat(NaviRenderMath.foldCameraRatioFromMeasurement(0.5f, 0.1f)).isNull()
+    }
+
+    @Test fun targetFoldHorizonFraction_isContinuousAt60AndMatchesPreviewAt90() {
+        // 60°で0（native との境界で段差を作らない＝復唱2）
+        assertThat(NaviRenderMath.targetFoldHorizonFraction(60f, 0.7f)).isEqualTo(0f)
+        // 90°でプレビューの地平線（=自車アンカー高。tan90→∞ で D/tanθ→0）と一致＝復唱1
+        assertThat(NaviRenderMath.targetFoldHorizonFraction(90f, 0.7f)).isWithin(0.001f).of(0.7f)
+        // 中間は単調
+        val at70 = NaviRenderMath.targetFoldHorizonFraction(70f, 0.7f)
+        val at80 = NaviRenderMath.targetFoldHorizonFraction(80f, 0.7f)
+        assertThat(at70).isGreaterThan(0f)
+        assertThat(at80).isGreaterThan(at70)
+    }
+
+    @Test fun foldRotationXDeg_solvesTargetAndStaysZeroInNativeRange() {
+        assertThat(NaviRenderMath.foldRotationXDeg(45f, 0.7f, 4f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.foldRotationXDeg(60f, 0.7f, 4f)).isEqualTo(0f)
+        // 90°設定・アンカー0.7・k=4 ⇒ 4cosφ − 0.3sinφ = 1.2 の解 ≈ 68°
+        val phi = NaviRenderMath.foldRotationXDeg(90f, 0.7f, 4f)
+        assertThat(phi).isWithin(2f).of(68f)
+        // 解いた φ を順モデルへ戻すと目標に一致する
+        assertThat(NaviRenderMath.foldTopFraction(phi, 4f)).isWithin(0.005f).of(0.7f)
+    }
+
+    /** 一般点の写像は上端で [foldTopFraction] と一致する（同じ幾何の別入口であることの固定）。 */
+    @Test fun foldPoint_agreesWithFoldTopFractionAtTopEdge() {
+        val w = 1080f
+        val h = 2400f
+        val k = 3.97f
+        val phi = 68f
+        val top = NaviRenderMath.foldPoint(w / 2f, 0f, w, h, phi, k)!!
+        assertThat(top.y / h).isWithin(0.002f).of(NaviRenderMath.foldTopFraction(phi, k))
+        // 下端（回転軸）は動かない
+        val bottom = NaviRenderMath.foldPoint(w / 2f, h, w, h, phi, k)!!
+        assertThat(bottom.y).isWithin(0.5f).of(h)
+        assertThat(bottom.x).isWithin(0.5f).of(w / 2f)
+        // 折り曲げ0なら恒等
+        val identity = NaviRenderMath.foldPoint(123f, 456f, w, h, 0f, k)!!
+        assertThat(identity.x).isEqualTo(123f)
+        assertThat(identity.y).isEqualTo(456f)
+    }
+
+    /** 折り曲げると、上にある点ほど下（地平線側）へ強く寄る＝順序は保たれる。 */
+    @Test fun foldPoint_compressesUpperPointsTowardHorizonMonotonically() {
+        val w = 1080f
+        val h = 2400f
+        val a = NaviRenderMath.foldPoint(w / 2f, 200f, w, h, 68f, 3.97f)!!
+        val b = NaviRenderMath.foldPoint(w / 2f, 1200f, w, h, 68f, 3.97f)!!
+        assertThat(a.y).isLessThan(b.y)
+        assertThat(a.y).isGreaterThan(NaviRenderMath.foldTopFraction(68f, 3.97f) * h - 1f)
+        assertThat(b.y).isLessThan(h)
+    }
+
     @Test fun rayRectEdgeIntersection_hitsExpectedEdgeForCardinalBearings() {
         val front = NaviRenderMath.rayRectEdgeIntersection(50f, 50f, 0f, 0f, 0f, 100f, 100f)!!
         val right = NaviRenderMath.rayRectEdgeIntersection(50f, 50f, 90f, 0f, 0f, 100f, 100f)!!

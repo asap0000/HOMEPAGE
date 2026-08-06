@@ -50,7 +50,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -588,6 +587,10 @@ private fun NaviRendererMapStage(
         map.uiSettings.isTiltGesturesEnabled = false
         map.uiSettings.isScrollGesturesEnabled = false
         map.uiSettings.isRotateGesturesEnabled = false
+        // ★コンパスは地図に焼き込まない（オーナー指示 2026-08-07）。MapLibre の native コンパスは
+        // GL サーフェス内に描かれるため、折り曲げで地図と一緒に倒れて読めなくなる。
+        // 現在地ボタンと同じく**画面に固定された UI** として Compose 側で描く（[NaviCompassBadge]）。
+        map.uiSettings.isCompassEnabled = false
         // ズームは自車を中心とした拡大縮小で「自車＝原点」と両立するため残す（設定項目は現状なし）。
         val styleFile = BusCourseStorage.resolve(context, pkg.styleRelPath)
         map.setStyle(Style.Builder().fromUri("file://${styleFile.absolutePath}")) { style ->
@@ -693,7 +696,15 @@ private fun NaviRendererMapStage(
     }
     LaunchedEffect(map, routeData.stopPoints) { recomputePinScreenPositions() }
 
-    val extraRotationXDeg = NaviRenderMath.extraRotationXDeg(settings.tiltDeg.toFloat())
+    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
+    val selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
+    // ★増分E（オーナー承認 y×4・2026-08-06）: 60°超の折り曲げ角は「設定値−60」ではなく、
+    // **プレビューの地平線の高さに実機の地図上端が一致する角**を解いて使う（90°＝プレビューと合同）。
+    // k（実効カメラ距離比）は下の onGloballyPositioned が実測から逆算して自己較正する＝端末非依存。
+    var foldCameraRatio by remember { mutableStateOf(NaviRenderMath.FOLD_CAMERA_RATIO_DEFAULT) }
+    val extraRotationXDeg = NaviRenderMath.foldRotationXDeg(
+        settings.tiltDeg.toFloat(), selfCarAnchor.yFraction, foldCameraRatio,
+    )
     // ★地面領域の上端（＝地平線）は理論式で当てにいかず、Compose に実測させる（2026-08-06 実機で判明）。
     // `graphicsLayer`の rotationX＋cameraDistance による透視変形は、cameraDistance に渡した値が
     // そのままピクセル距離にならない（内部で密度換算される）。消失点を
@@ -706,23 +717,26 @@ private fun NaviRendererMapStage(
     // 前の実装は両者を直接比べていた＝90°では最大500px級の食い違いになり、
     // **地平線の近くに見えているはずの遠い停留所が誤って消されていた**。
     // ピンの描画自体は折り曲げ層の内側（アンカーが地図と共連れ）なので従来どおり折り曲げ前の座標を使う。
-    var foldCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    fun foldedPointOf(point: Offset): Offset {
-        val coords = foldCoords?.takeIf { it.isAttached } ?: return point
-        val parent = coords.parentLayoutCoordinates ?: return point
-        return parent.localPositionOf(coords, point)
-    }
+    // ★写像は純関数（[NaviRenderMath.foldPoint]）で持つ。LayoutCoordinates を保持して後から
+    // 使う方式は、同一インスタンスの再利用で再コンポーズが起きず変換が反映されなかった
+    // （2026-08-07 実機でピンが空中に浮いた）。実測は k の自己較正にだけ使う。
+    fun foldedPointOrNull(point: Offset): Offset? =
+        NaviRenderMath.foldPoint(
+            point.x, point.y, stageWidthPx, stageHeightPx, extraRotationXDeg, foldCameraRatio,
+        )?.let { Offset(it.x, it.y) }
+
+    fun foldedPointOf(point: Offset): Offset = foldedPointOrNull(point) ?: point
     val visiblePinScreenPositions = pinScreenPositions.filterValues { point ->
         // ★折り曲げ前の座標もステージ内であること（2026-08-06 実機で発見）: 折り曲げ軸（下端）より
         // 下にある点＝自車より後ろの停留所は、透視変換の特異点（カメラ面）を跨いで座標が反転し、
         // 折り曲げ後の判定だけだとすり抜けて**ステージの外（スライダーの下）に描かれる**ことがある。
         // 絵（地図）は下端で終わるので、絵の外の点は折り曲げ後にどこへ写ろうと存在しない。
         val inUnfoldedStage = point.x in 0f..stageWidthPx && point.y in 0f..stageHeightPx
-        val folded = foldedPointOf(point)
-        inUnfoldedStage && folded.x in 0f..stageWidthPx && folded.y in groundTopY..stageHeightPx
+        // 写らない点（カメラ面より奥）は null＝描かない。
+        val folded = foldedPointOrNull(point)
+        inUnfoldedStage && folded != null &&
+            folded.x in 0f..stageWidthPx && folded.y in groundTopY..stageHeightPx
     }
-    val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
-    val selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
     val nextStop = NaviRenderMath.nextStopIndex(chainageM.toDouble(), routeData.stopPoints.map { it.chainageM })
         ?.let(routeData.stopPoints::get)
     val nextStopIndicator = if (
@@ -760,12 +774,23 @@ private fun NaviRendererMapStage(
                 // ★変形後の上辺が親座標系のどこに来るかを Compose に計算させる（＝地平線）。
                 // 上辺は台形の短辺なので、左右の角のうち上にある方を採る。
                 .onGloballyPositioned { coords ->
-                    foldCoords = coords
                     val parent = coords.parentLayoutCoordinates
                     if (parent != null) {
                         val left = parent.localPositionOf(coords, Offset.Zero)
                         val right = parent.localPositionOf(coords, Offset(coords.size.width.toFloat(), 0f))
                         groundTopY = minOf(left.y, right.y).coerceIn(0f, stageHeightPx)
+                        // ★増分E: 実測から k（実効カメラ距離比）を逆算して自己較正する。
+                        // k は折り曲げ角に依らない定数なので、1回の補正でほぼ収束する
+                        // （閾値 0.02 未満の揺れは無視＝再コンポーズの往復を打ち切る）。
+                        if (extraRotationXDeg > 1f && stageHeightPx > 0f) {
+                            NaviRenderMath.foldCameraRatioFromMeasurement(
+                                extraRotationXDeg, groundTopY / stageHeightPx,
+                            )?.let { measured ->
+                                if (kotlin.math.abs(measured - foldCameraRatio) > 0.02f) {
+                                    foldCameraRatio = measured
+                                }
+                            }
+                        }
                     }
                 }
                 .graphicsLayer {
@@ -777,32 +802,44 @@ private fun NaviRendererMapStage(
                 },
         ) {
             AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView })
-
-            // ★billboardピン＋自車は台形変形の**内側**に置く（F② M1 の修正・2026-07-25）。
-            // 外側に置くと `toScreenLocation` の素のスクリーン座標のままになり、60-90°で
-            // 台形変形された地図と**アンカーがズレる**（ピボットから遠い停留所ほど乖離が拡大し、
-            // 「ピンが地図上の正しい場所を指さない」）。設計§2-1が求めるのは「未変形座標に同じ変換を
-            // 適用したアンカー位置」＝それを射影計算で再現する代わりに、**同じ graphicsLayer の内側に
-            // 入れて親の変換をそのまま受けさせ**、ピン自身に**逆回転**を掛けて絵だけ立てる
-            // （P1 POCのHTMLモック `.stop { rotateX(calc(-1 * --rot)) }` と同一原理。
-            // Compose/RenderNode が透視投影を正確に行うので自前の射影計算が不要になる）。
-            val trueHeadingDeg = remember(routeData, chainageM) {
-                NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
-            } ?: 0.0
-            val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
-            NaviPinAndSelfCarOverlay(
-                stops = routeData.stopPoints,
-                pinScreenPositions = visiblePinScreenPositions,
-                nameByStopCardId = routeData.nameByStopCardId,
-                stopNameVisible = settings.stopNameVisible,
-                selfCarAnchorPx = selfCarAnchorPx,
-                selfCarRotationDeg = selfCarRotationDeg,
-                theme = settings.theme,
-                counterRotationXDeg = extraRotationXDeg,
-                stageWidthPx = stageWidthPx,
-                modifier = Modifier.fillMaxSize(),
-            )
         }
+
+        // ★★ピン・自車は「地図と座標1点だけで繋がったフロート」にする（オーナー指示 2026-08-07）。
+        //
+        // 旧: 台形変形の**内側**へ置き、ピン自身に逆回転を掛けて絵を立てていた（2026-07-25 の方式）。
+        // これは折り曲げが浅いうちは成立するが、**透視投影が非線形**なため、親が掛けた「奥ほど縮む」
+        // スケールは子の逆回転では打ち消せない。増分E で折り曲げが 30°→68° になった実機で
+        // **ピンが横長に潰れて丸でなくなった**＝設計 §2-1 の確定仕様「ピンは billboard で常に垂直・
+        // 90°でも消えない」に反する状態になった。
+        //
+        // 新: 層の**外**へ出し、接地点（座標1点）だけを [foldedPointOf] で折り曲げ後の実位置へ写す。
+        // 絵は一切変形を受けないので、どの傾きでも丸のまま・名前も歪まない。位置は地図と一致する
+        // （旧コメントが危惧した「アンカーがズレる」は、素のスクリーン座標をそのまま使う場合の話で、
+        // 折り曲げ後の実位置を引ける今は起きない＝増分D の追補で得た道具がそのまま効く）。
+        // ⚠ 引き換えに、遠くのピンが小さく描かれる遠近は消える（全部同じ大きさ）。
+        // 密集して読みにくくなったら導線（リーダー線）で接地点との対応を示す＝オーナー案・バックログ。
+        val trueHeadingDeg = remember(routeData, chainageM) {
+            NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
+        } ?: 0.0
+        val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
+        NaviPinAndSelfCarOverlay(
+            stops = routeData.stopPoints,
+            pinScreenPositions = visiblePinScreenPositions.mapValues { (_, point) -> foldedPointOf(point) },
+            nameByStopCardId = routeData.nameByStopCardId,
+            stopNameVisible = settings.stopNameVisible,
+            selfCarAnchorPx = foldedPointOf(selfCarAnchorPx),
+            selfCarRotationDeg = selfCarRotationDeg,
+            theme = settings.theme,
+            // 変形の外に居るので逆回転は不要（掛けると二重に傾く）。
+            counterRotationXDeg = 0f,
+            stageWidthPx = stageWidthPx,
+            modifier = Modifier.fillMaxSize(),
+        )
+        // ★コンパス（画面固定・地図と一緒に倒れない）。native コンパスの代替。
+        NaviCompassBadge(
+            bearingDeg = (cameraState?.bearingDeg ?: 0.0).toFloat(),
+            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+        )
         nextStopIndicator?.let { (stop, point, bearing) ->
             val label = if (settings.stopNameVisible) {
                 stop.stopCardId?.let { routeData.nameByStopCardId[it] } ?: stop.sequenceIndex.toString()
@@ -1862,6 +1899,49 @@ private fun NaviAnchoredInwardOfEdge(
         }
     }
 }
+
+/**
+ * コンパス（画面に固定・地図の折り曲げを受けない）。MapLibre の native コンパスは GL サーフェス内に
+ * 描かれるため高傾斜で一緒に倒れて読めなくなる。現在地ボタンと同じ「画面の UI」として扱う
+ * （オーナー指示 2026-08-07）。針は北の向き＝カメラ方位の逆に回す。
+ */
+@Composable
+private fun NaviCompassBadge(bearingDeg: Float, modifier: Modifier = Modifier) {
+    // ★意匠は「赤白の針」＝コンパスの慣用（オーナー指摘 2026-08-07）。
+    // 当初は青地に白い矢印にしていたが、**自車マーカー（[NaviSelfCarMarker]）と同じ見た目**になり
+    // 取り違える。針の色は昼夜で変えない＝方位は常に同じ絵で読ませる。
+    Box(
+        modifier = modifier
+            .size(COMPASS_SIZE_DP)
+            .clip(CircleShape)
+            .background(COMPASS_DIAL_COLOR)
+            .border(1.dp, Color.White.copy(alpha = 0.55f), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(COMPASS_SIZE_DP * 0.66f).rotate(-bearingDeg)) {
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val halfWidth = size.width * 0.17f
+            // 中心でくびれる菱形の針。上（北）＝赤、下（南）＝白。
+            val north = Path().apply {
+                moveTo(cx, 0f); lineTo(cx + halfWidth, cy); lineTo(cx - halfWidth, cy); close()
+            }
+            val south = Path().apply {
+                moveTo(cx, size.height); lineTo(cx + halfWidth, cy); lineTo(cx - halfWidth, cy); close()
+            }
+            drawPath(north, COMPASS_NORTH_COLOR)
+            drawPath(south, COMPASS_SOUTH_COLOR)
+        }
+    }
+}
+
+/** コンパスの文字盤・針の色（昼夜で変えない＝方位は常に同じ絵で読ませる）。 */
+private val COMPASS_DIAL_COLOR = Color(0xFF1F2430).copy(alpha = 0.82f)
+private val COMPASS_NORTH_COLOR = Color(0xFFE5484D)
+private val COMPASS_SOUTH_COLOR = Color.White
+
+/** コンパスの直径（現在地ボタンより控えめ）。 */
+private val COMPASS_SIZE_DP = 40.dp
 
 /** 縁の三角の一辺。丸ピン（[PIN_SIZE_DP]）より小さくして、形の違いを距離でも紛れさせない。 */
 private val EDGE_INDICATOR_ARROW_SIZE_DP = 16.dp

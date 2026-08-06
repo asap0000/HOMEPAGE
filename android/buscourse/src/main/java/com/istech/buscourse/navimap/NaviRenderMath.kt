@@ -125,9 +125,140 @@ object NaviRenderMath {
     /**
      * 60°を超えた分だけを`graphicsLayer.rotationX`への追加回転として切り出す（下限0、設計 §2
      * 「60-90°: graphicsLayer.rotationXで地図を倒す」）。
+     *
+     * ⚠ 実地図ステージはこの線形写像を**使わなくなった**（増分E・2026-08-06 オーナー承認 y×4）。
+     * 90°設定でも折り曲げ30°にしかならず「まだ見下ろしている」絵になっていたため、
+     * [foldRotationXDeg]（プレビューの地平線の高さに一致する φ を解く）へ置き換えた。
+     * 本関数はプレビュー系の互換とテストのために残す。
      */
     fun extraRotationXDeg(tiltDeg: Float): Float =
         (tiltDeg.orZeroIfNonFinite() - NATIVE_TILT_MAX_DEG).coerceAtLeast(0f)
+
+    // -----------------------------------------------------------------------------------------
+    // 増分E: 実地図の折り曲げ角をプレビューの地平線に合わせる（オーナー承認 y×4・2026-08-06。
+    // 根拠＝プレビュー作り直し 2026-07-26「実機の画面そのものを、机の上で縮めて見る」＝
+    // プレビューと実機は同じものの縮小であり、二つの見え方が存在してはならない）
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * 折り曲げ（`graphicsLayer.rotationX`・軸＝下端・透視あり）後に、**有限の絵の上端**が
+     * ステージのどの高さへ写るか（ステージ高に対する割合 0..1）。
+     *
+     * 式: `t = 1 − cosφ·k/(k + sinφ)`（k＝実効カメラ距離／ステージ高）。
+     * ★削除済みの旧 `groundTopYPx`（無限遠平面の消失点の式）とは別物＝こちらは
+     * 「絵の上端の行き先」で、**実機実測3点（φ=30/55/75）に対し残差12px以下**を確認済み
+     * （2026-08-06 OPPO・k≈3.97）。k は [foldCameraRatioFromMeasurement] で実測から逆算できるため
+     * 端末ごとの較正定数を焼く必要がない（自己較正）。
+     */
+    fun foldTopFraction(foldDeg: Float, cameraRatio: Float): Float {
+        val phi = Math.toRadians(foldDeg.orZeroIfNonFinite().coerceIn(0f, 89.9f).toDouble())
+        val k = cameraRatio.orZeroIfNonFinite().coerceIn(0.5f, 50f)
+        val t = 1.0 - cos(phi) * k / (k + sin(phi))
+        return t.toFloat().coerceIn(0f, 1f)
+    }
+
+    /**
+     * 実測（適用中の折り曲げ角[foldDeg]と、実測した上端の割合[measuredTopFraction]）から
+     * k＝実効カメラ距離比を逆算する（[foldTopFraction]の逆・自己較正の入口）。
+     * 解が定義域外（分母≦0＝測定が式と矛盾）のときは null。
+     */
+    fun foldCameraRatioFromMeasurement(foldDeg: Float, measuredTopFraction: Float): Float? {
+        if (!foldDeg.isFinite() || !measuredTopFraction.isFinite()) return null
+        if (foldDeg < 1f) return null
+        val phi = Math.toRadians(foldDeg.coerceIn(1f, 89.9f).toDouble())
+        val remaining = (1.0 - measuredTopFraction.coerceIn(0f, 1f))
+        val denominator = cos(phi) - remaining
+        if (denominator <= 1e-4) return null
+        val k = remaining * sin(phi) / denominator
+        return k.toFloat().takeIf { it.isFinite() && it in 0.5f..50f }
+    }
+
+    /**
+     * 設定[tiltDeg]でプレビューが描く地平線の高さ（ステージ高比）。式＝[previewGroundHorizonOffsetY]
+     * と同じ幾何（`地平線 = 自車アンカー − D/tanθ`・D＝[PREVIEW_CAMERA_DISTANCE_FRACTION]×ステージ高）。
+     */
+    fun previewHorizonFraction(tiltDeg: Float, selfCarAnchorYFraction: Float): Float? {
+        val theta = Math.toRadians(tiltDeg.orZeroIfNonFinite().coerceIn(0f, 90f).toDouble())
+        val sinTheta = sin(theta)
+        if (sinTheta <= NEAR_PLANE_SIN_EPSILON) return null
+        val tanTheta = sinTheta / cos(theta)
+        if (!tanTheta.isFinite() || tanTheta == 0.0) return selfCarAnchorYFraction.coerceIn(0f, 1f)
+        return (selfCarAnchorYFraction - PREVIEW_CAMERA_DISTANCE_FRACTION / tanTheta).toFloat()
+    }
+
+    /**
+     * 実地図の折り曲げが目指す地平線の高さ（ステージ高比）。
+     *
+     * - **90°でプレビューの地平線と一致**（合同の履行）。
+     * - **60°で0**（native tilt との境界で不連続な段差を作らない＝復唱2）。60°時点のプレビューは
+     *   構造上すでに画面内へ地平線を描いており（無限平面）、絵が下端で終わる実地図はそこへ
+     *   一致させられないため、60→90°で一致率を0→1へ滑らかに上げる。
+     */
+    fun targetFoldHorizonFraction(tiltDeg: Float, selfCarAnchorYFraction: Float): Float {
+        val tilt = tiltDeg.orZeroIfNonFinite()
+        if (tilt <= NATIVE_TILT_MAX_DEG) return 0f
+        val weight = ((tilt - NATIVE_TILT_MAX_DEG) / (90f - NATIVE_TILT_MAX_DEG)).coerceIn(0f, 1f)
+        val previewHorizon = (previewHorizonFraction(tilt, selfCarAnchorYFraction) ?: 0f).coerceIn(0f, 1f)
+        return weight * previewHorizon
+    }
+
+    /**
+     * 実地図ステージの折り曲げ角（`graphicsLayer.rotationX`）。[foldTopFraction]が
+     * [targetFoldHorizonFraction]に一致する φ を二分法で解く（t は φ について単調増加）。
+     */
+    fun foldRotationXDeg(tiltDeg: Float, selfCarAnchorYFraction: Float, cameraRatio: Float): Float {
+        val target = targetFoldHorizonFraction(tiltDeg, selfCarAnchorYFraction)
+        if (target <= 0f) return 0f
+        var low = 0f
+        var high = 89f
+        repeat(32) {
+            val mid = (low + high) / 2f
+            if (foldTopFraction(mid, cameraRatio) < target) low = mid else high = mid
+        }
+        return (low + high) / 2f
+    }
+
+    /** 自己較正の初期値（2026-08-06 OPPO 実測フィット k≈3.97。1フレーム目だけ使われ、以後は実測で更新）。 */
+    const val FOLD_CAMERA_RATIO_DEFAULT = 3.97f
+
+    /**
+     * 折り曲げ前のステージ座標[x],[y]が、折り曲げ後に画面のどこへ写るか（[foldTopFraction]の一般点版）。
+     *
+     * 軸＝ステージ下端・中央、透視あり。上端 `y=0` を入れると [foldTopFraction] と一致する（同じ幾何）。
+     * **カメラ面より奥（`d+z<=0`）に落ちる点は写像が定義できないので null**（＝画面に存在しない）。
+     *
+     * ★`LayoutCoordinates.localPositionOf` を使わない理由（2026-08-07 実機で判明）:
+     * コールバック内で即座に読む分には正しいが、`LayoutCoordinates` を state に保持して後から
+     * 本体で使うと**同一インスタンスが再利用されるため再コンポーズが起きず**、変換が反映されない
+     * （ピンが変換前の座標のまま空中に浮いた）。写像は純関数で持つ＝テストもできる。
+     */
+    fun foldPoint(
+        x: Float,
+        y: Float,
+        stageWidthPx: Float,
+        stageHeightPx: Float,
+        foldDeg: Float,
+        cameraRatio: Float,
+    ): ScreenPointPx? {
+        if (!x.isFinite() || !y.isFinite() || stageHeightPx <= 0f) return null
+        val phi = foldDeg.orZeroIfNonFinite()
+        if (phi <= 0f) return ScreenPointPx(x, y)
+        val rad = Math.toRadians(phi.coerceIn(0f, 89.9f).toDouble())
+        val d = cameraRatio.orZeroIfNonFinite().coerceIn(0.5f, 50f) * stageHeightPx
+        val dx = x - stageWidthPx / 2f
+        val dy = y - stageHeightPx                    // 上端が負
+        val z = (-dy * sin(rad)).toFloat()            // 上（奥）ほど正
+        val denominator = d + z
+        if (denominator <= 1f) return null            // カメラ面より奥＝写らない
+        val scale = d / denominator
+        val projectedX = stageWidthPx / 2f + dx * scale
+        val projectedY = stageHeightPx + (dy * cos(rad)).toFloat() * scale
+        return if (projectedX.isFinite() && projectedY.isFinite()) {
+            ScreenPointPx(projectedX, projectedY)
+        } else {
+            null
+        }
+    }
 
     /**
      * 75→90°で0→1に立ち上がる空の不透明度（設計 §2「75°超で空」・§3の空グラデーション用）。
