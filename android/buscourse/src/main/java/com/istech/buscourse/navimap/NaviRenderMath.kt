@@ -222,6 +222,19 @@ object NaviRenderMath {
     const val FOLD_CAMERA_RATIO_DEFAULT = 3.97f
 
     /**
+     * 60→90°で「地図の投影」から「プレビューの投影」へ乗り換える重み（0..1）。
+     *
+     * ★正しい検証ゴール（オーナー是正 2026-08-07）＝**ピンはプレビューの投影に合同**であること。
+     * 90°ならプレビューは全停留所を**地平線上に一列**へ投影する（`previewGroundProject` の
+     * cos90°=0）。折り曲げた絵の上の位置に合わせるのは誤り（絵の折り曲げはピクチャの回転で
+     * あって地面の再投影ではないため、90°でも停留所が帯の中に散らばってしまう）。
+     * 60°以下は native の地図が真＝`toScreenLocation` のまま。間は連続にブレンドする。
+     */
+    fun tiltBlendWeight(tiltDeg: Float): Float =
+        ((tiltDeg.orZeroIfNonFinite() - NATIVE_TILT_MAX_DEG) / (90f - NATIVE_TILT_MAX_DEG))
+            .coerceIn(0f, 1f)
+
+    /**
      * 折り曲げ前のステージ座標[x],[y]が、折り曲げ後に画面のどこへ写るか（[foldTopFraction]の一般点版）。
      *
      * 軸＝ステージ下端・中央、透視あり。上端 `y=0` を入れると [foldTopFraction] と一致する（同じ幾何）。

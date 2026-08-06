@@ -50,7 +50,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -700,18 +701,20 @@ private fun NaviRendererMapStage(
     val selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction)
     // ★増分E（オーナー承認 y×4・2026-08-06）: 60°超の折り曲げ角は「設定値−60」ではなく、
     // **プレビューの地平線の高さに実機の地図上端が一致する角**を解いて使う（90°＝プレビューと合同）。
-    // k（実効カメラ距離比）は下の onGloballyPositioned が実測から逆算して自己較正する＝端末非依存。
-    var foldCameraRatio by remember { mutableStateOf(NaviRenderMath.FOLD_CAMERA_RATIO_DEFAULT) }
+    // k（実効カメラ距離比）は設計定数＝描画も同じ k のホモグラフィで掛けるため常に一致する。
+    // ★折り曲げの k は**設計定数**（較正ではない）。描画は同じ k の foldPoint から作る
+    // ホモグラフィで掛けるため、モデルと実描画は構成上一致する＝実測も較正も不要。
+    val foldCameraRatio = NaviRenderMath.FOLD_CAMERA_RATIO_DEFAULT
     val extraRotationXDeg = NaviRenderMath.foldRotationXDeg(
         settings.tiltDeg.toFloat(), selfCarAnchor.yFraction, foldCameraRatio,
     )
-    // ★地面領域の上端（＝地平線）は理論式で当てにいかず、Compose に実測させる（2026-08-06 実機で判明）。
-    // `graphicsLayer`の rotationX＋cameraDistance による透視変形は、cameraDistance に渡した値が
-    // そのままピクセル距離にならない（内部で密度換算される）。消失点を
-    // `stageHeight - cameraDistance / tan(θ)` で求める式は、傾き90°の実機で
-    // **実際の地図上端 y≒700 に対して y≒2234 を返し**、三角が画面最下部へ沈んだ。
-    // 変形後の実位置を親座標系で引けば、端末の密度にも cameraDistance の内部仕様にも依存しない。
-    var groundTopY by remember { mutableStateOf(0f) }
+    // ★地面領域の上端（＝地平線）＝モデル値（[NaviRenderMath.foldTopFraction]×ステージ高）。
+    // 描画も同じモデルのホモグラフィで掛けるため、地平線・ピン・可視判定・実描画は常に一致する。
+    val groundTopY = if (extraRotationXDeg > 0f) {
+        NaviRenderMath.foldTopFraction(extraRotationXDeg, foldCameraRatio) * stageHeightPx
+    } else {
+        0f
+    }
     // ★可視判定と三角の幾何は**折り曲げ後の実座標**で行う（2026-08-06 是正）。
     // `toScreenLocation` の座標は折り曲げ**前**、groundTopY は折り曲げ**後**の実測値で、
     // 前の実装は両者を直接比べていた＝90°では最大500px級の食い違いになり、
@@ -726,23 +729,79 @@ private fun NaviRendererMapStage(
         )?.let { Offset(it.x, it.y) }
 
     fun foldedPointOf(point: Offset): Offset = foldedPointOrNull(point) ?: point
-    val visiblePinScreenPositions = pinScreenPositions.filterValues { point ->
-        // ★折り曲げ前の座標もステージ内であること（2026-08-06 実機で発見）: 折り曲げ軸（下端）より
-        // 下にある点＝自車より後ろの停留所は、透視変換の特異点（カメラ面）を跨いで座標が反転し、
-        // 折り曲げ後の判定だけだとすり抜けて**ステージの外（スライダーの下）に描かれる**ことがある。
-        // 絵（地図）は下端で終わるので、絵の外の点は折り曲げ後にどこへ写ろうと存在しない。
-        val inUnfoldedStage = point.x in 0f..stageWidthPx && point.y in 0f..stageHeightPx
-        // 写らない点（カメラ面より奥）は null＝描かない。
-        val folded = foldedPointOrNull(point)
-        inUnfoldedStage && folded != null &&
-            folded.x in 0f..stageWidthPx && folded.y in groundTopY..stageHeightPx
+    // ★★ピンの表示位置＝「60°以下は地図の投影／90°はプレビューの投影／間は連続ブレンド」
+    // （オーナー是正 2026-08-07「検証ゴールがずれている」）。
+    // 正はプレビューの投影＝**90°では全停留所が地平線上に一列に並ぶ**（`previewGroundProject` の
+    // cos90°=0）。折り曲げた絵の上の位置（foldPoint）は絵＝ピクチャの回転にすぎず、地面の
+    // 再投影ではないため 90° でも停留所が帯の中に散らばる＝ゴールとして誤り。
+    // プレビュー側の入力（自車からの奥行き・左右 px）は、停留所と自車の測地距離・方位と
+    // 地図の縮尺（metersPerPixel）から作る＝地図の絵とは独立（フロートの利点）。
+    val blendW = NaviRenderMath.tiltBlendWeight(settings.tiltDeg.toFloat())
+    val previewCameraPx = NaviRenderMath.previewGroundCameraDistancePx(stageHeightPx)
+    val metersPerPixel = if (blendW > 0f && cameraState != null) {
+        map?.projection?.getMetersPerPixelAtLatitude(cameraState.lat)?.takeIf { it > 0.0 }
+    } else {
+        null
     }
+    val displayPinPositions: Map<Int, Offset> = buildMap {
+        for (stop in routeData.stopPoints) {
+            val raw = pinScreenPositions[stop.sequenceIndex] ?: continue
+            // 折り曲げ前の座標がステージ内＝絵の中に存在する点（2026-08-06 の後方ピン対策）。
+            val inUnfoldedStage = raw.x in 0f..stageWidthPx && raw.y in 0f..stageHeightPx
+            val foldPos = foldedPointOrNull(raw)
+            val previewPos = if (blendW > 0f && cameraState != null && metersPerPixel != null) {
+                val distanceM = GeoMath.haversineM(cameraState.lat, cameraState.lon, stop.lat, stop.lon)
+                val relativeRad = Math.toRadians(
+                    GeoMath.bearingDeg(cameraState.lat, cameraState.lon, stop.lat, stop.lon) -
+                        cameraState.bearingDeg,
+                )
+                val depthPx = (distanceM * kotlin.math.cos(relativeRad) / metersPerPixel).toFloat()
+                val lateralPx = (distanceM * kotlin.math.sin(relativeRad) / metersPerPixel).toFloat()
+                val nearDepthPx = NaviRenderMath.previewGroundNearDepthPx(
+                    settings.tiltDeg.toFloat(), previewCameraPx,
+                )
+                // 自車より後ろ（depth<=0）はプレビューの投影に存在しない＝出さない。
+                if (depthPx <= 0f || (nearDepthPx != null && depthPx <= nearDepthPx)) {
+                    null
+                } else {
+                    val projected = NaviRenderMath.previewGroundProject(
+                        lateralPx, depthPx, settings.tiltDeg.toFloat(), previewCameraPx,
+                    )
+                    Offset(selfCarAnchorPx.x + projected.x, selfCarAnchorPx.y + projected.y)
+                }
+            } else {
+                null
+            }
+            val position = when {
+                blendW <= 0f -> foldPos
+                blendW >= 1f -> previewPos
+                foldPos != null && previewPos != null -> Offset(
+                    foldPos.x + (previewPos.x - foldPos.x) * blendW,
+                    foldPos.y + (previewPos.y - foldPos.y) * blendW,
+                )
+                else -> null
+            }
+            if (position != null &&
+                position.x in 0f..stageWidthPx &&
+                position.y in (groundTopY - 2f)..stageHeightPx &&
+                (blendW >= 1f || inUnfoldedStage)
+            ) {
+                put(stop.sequenceIndex, position)
+            }
+        }
+    }
+    // 自車も同じブレンド＝90°では設定どおりのアンカー位置（＝地平線上）に立つ。
+    val selfCarFoldedPx = foldedPointOf(selfCarAnchorPx)
+    val selfCarDisplayPx = Offset(
+        selfCarFoldedPx.x + (selfCarAnchorPx.x - selfCarFoldedPx.x) * blendW,
+        selfCarFoldedPx.y + (selfCarAnchorPx.y - selfCarFoldedPx.y) * blendW,
+    )
     val nextStop = NaviRenderMath.nextStopIndex(chainageM.toDouble(), routeData.stopPoints.map { it.chainageM })
         ?.let(routeData.stopPoints::get)
     val nextStopIndicator = if (
         cameraState != null &&
         nextStop != null &&
-        visiblePinScreenPositions[nextStop.sequenceIndex] == null
+        displayPinPositions[nextStop.sequenceIndex] == null
     ) {
         val relativeBearing = (
             GeoMath.bearingDeg(cameraState.lat, cameraState.lon, nextStop.lat, nextStop.lon) - cameraState.bearingDeg
@@ -752,12 +811,10 @@ private fun NaviRendererMapStage(
         // だけなので交点が無く、「次の1つは必ず縁に出す」を満たせなかった。
         // 始点を地面領域へ寄せる＝自車が地平線より上にいるときは地平線上から見る。真正面なら
         // 交点は始点自身（地平線上のその位置）になり、オーナー指定「地平線の付近で」と一致する。
-        // ★始点も折り曲げ後の実座標（自車マーカーは折り曲げ層の内側に描かれるため、
-        // 画面上の見た目の位置は foldedPointOf(anchor)。三角はこの層の外に描くので座標系を揃える）。
-        val selfCarFoldedPx = foldedPointOf(selfCarAnchorPx)
+        // 始点＝自車マーカーの表示位置（ブレンド後）と揃える。
         NaviRenderMath.rayRectEdgeIntersection(
-            selfCarFoldedPx.x.coerceIn(0f, stageWidthPx),
-            selfCarFoldedPx.y.coerceIn(groundTopY, stageHeightPx),
+            selfCarDisplayPx.x.coerceIn(0f, stageWidthPx),
+            selfCarDisplayPx.y.coerceIn(groundTopY, stageHeightPx),
             relativeBearing,
             0f,
             groundTopY,
@@ -771,34 +828,42 @@ private fun NaviRendererMapStage(
         Box(
             Modifier
                 .fillMaxSize()
-                // ★変形後の上辺が親座標系のどこに来るかを Compose に計算させる（＝地平線）。
-                // 上辺は台形の短辺なので、左右の角のうち上にある方を採る。
-                .onGloballyPositioned { coords ->
-                    val parent = coords.parentLayoutCoordinates
-                    if (parent != null) {
-                        val left = parent.localPositionOf(coords, Offset.Zero)
-                        val right = parent.localPositionOf(coords, Offset(coords.size.width.toFloat(), 0f))
-                        groundTopY = minOf(left.y, right.y).coerceIn(0f, stageHeightPx)
-                        // ★増分E: 実測から k（実効カメラ距離比）を逆算して自己較正する。
-                        // k は折り曲げ角に依らない定数なので、1回の補正でほぼ収束する
-                        // （閾値 0.02 未満の揺れは無視＝再コンポーズの往復を打ち切る）。
-                        if (extraRotationXDeg > 1f && stageHeightPx > 0f) {
-                            NaviRenderMath.foldCameraRatioFromMeasurement(
-                                extraRotationXDeg, groundTopY / stageHeightPx,
-                            )?.let { measured ->
-                                if (kotlin.math.abs(measured - foldCameraRatio) > 0.02f) {
-                                    foldCameraRatio = measured
-                                }
-                            }
-                        }
+                // ★★折り曲げは `graphicsLayer.rotationX` をやめ、**自前のホモグラフィ**で掛ける
+                // （2026-08-07・実測10フレームで確定）。graphicsLayer のブロック形式の行列は
+                // `LayoutCoordinates.localPositionOf` から**構造的に読めない**（常に変形前の値を返す）
+                // ため、モデルと実描画の一致を測る手段が無く、k の較正が原理的に成立しなかった。
+                // 平面の透視折り曲げは射影変換＝**3×3 ホモグラフィで正確に表現できる**ので、
+                // [NaviRenderMath.foldPoint] で四隅の行き先を計算し `setPolyToPoly` で同じ行列を
+                // canvas に掛ける。**描画とモデル（ピンの fold 成分・地平線・可視判定）が構成上一致**し、
+                // 較正も実測も不要になる。
+                .drawWithContent {
+                    if (extraRotationXDeg <= 0f) {
+                        drawContent()
+                        return@drawWithContent
                     }
-                }
-                .graphicsLayer {
-                    rotationX = extraRotationXDeg
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    // 既定値のままだと90°付近で極端に潰れる／クリップするため大きめにする（P1 POC実測値）。
-                    // `density`はこの`graphicsLayer{}`ブロックの暗黙レシーバ（GraphicsLayerScope自身のdensity）。
-                    cameraDistance = 32f * density
+                    val w = size.width
+                    val h = size.height
+                    val topLeft = NaviRenderMath.foldPoint(
+                        0f, 0f, w, h, extraRotationXDeg, NaviRenderMath.FOLD_CAMERA_RATIO_DEFAULT,
+                    )
+                    val topRight = NaviRenderMath.foldPoint(
+                        w, 0f, w, h, extraRotationXDeg, NaviRenderMath.FOLD_CAMERA_RATIO_DEFAULT,
+                    )
+                    if (topLeft == null || topRight == null) {
+                        drawContent()
+                        return@drawWithContent
+                    }
+                    val matrix = android.graphics.Matrix()
+                    val src = floatArrayOf(0f, 0f, w, 0f, w, h, 0f, h)
+                    val dst = floatArrayOf(topLeft.x, topLeft.y, topRight.x, topRight.y, w, h, 0f, h)
+                    if (matrix.setPolyToPoly(src, 0, dst, 0, 4)) {
+                        drawContext.canvas.save()
+                        drawContext.canvas.nativeCanvas.concat(matrix)
+                        drawContent()
+                        drawContext.canvas.restore()
+                    } else {
+                        drawContent()
+                    }
                 },
         ) {
             AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView })
@@ -824,10 +889,10 @@ private fun NaviRendererMapStage(
         val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
         NaviPinAndSelfCarOverlay(
             stops = routeData.stopPoints,
-            pinScreenPositions = visiblePinScreenPositions.mapValues { (_, point) -> foldedPointOf(point) },
+            pinScreenPositions = displayPinPositions,
             nameByStopCardId = routeData.nameByStopCardId,
             stopNameVisible = settings.stopNameVisible,
-            selfCarAnchorPx = foldedPointOf(selfCarAnchorPx),
+            selfCarAnchorPx = selfCarDisplayPx,
             selfCarRotationDeg = selfCarRotationDeg,
             theme = settings.theme,
             // 変形の外に居るので逆回転は不要（掛けると二重に傾く）。

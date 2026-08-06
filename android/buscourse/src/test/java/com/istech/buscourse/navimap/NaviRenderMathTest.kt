@@ -82,6 +82,25 @@ class NaviRenderMathTest {
         assertThat(NaviRenderMath.foldTopFraction(phi, 4f)).isWithin(0.005f).of(0.7f)
     }
 
+    /** ★是正後の検証ゴール（2026-08-07）＝90°でプレビューの投影は全奥行きを地平線（y=0）へ写す。 */
+    @Test fun previewGroundProject_putsEveryDepthOnHorizonAt90() {
+        for (depth in listOf(50f, 500f, 5000f)) {
+            val p = NaviRenderMath.previewGroundProject(120f, depth, 90f, 1000f)
+            assertThat(p.y).isWithin(0.01f).of(0f)
+        }
+        // 横方向は奥行きに応じて縮む（遠いほど中央へ寄る）
+        val near = NaviRenderMath.previewGroundProject(120f, 100f, 90f, 1000f)
+        val far = NaviRenderMath.previewGroundProject(120f, 3000f, 90f, 1000f)
+        assertThat(kotlin.math.abs(far.x)).isLessThan(kotlin.math.abs(near.x))
+    }
+
+    @Test fun tiltBlendWeight_isZeroInNativeRangeAndOneAt90() {
+        assertThat(NaviRenderMath.tiltBlendWeight(45f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.tiltBlendWeight(60f)).isEqualTo(0f)
+        assertThat(NaviRenderMath.tiltBlendWeight(75f)).isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.tiltBlendWeight(90f)).isEqualTo(1f)
+    }
+
     /** 一般点の写像は上端で [foldTopFraction] と一致する（同じ幾何の別入口であることの固定）。 */
     @Test fun foldPoint_agreesWithFoldTopFractionAtTopEdge() {
         val w = 1080f
