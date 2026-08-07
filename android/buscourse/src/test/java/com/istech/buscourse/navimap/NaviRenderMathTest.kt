@@ -102,21 +102,21 @@ class NaviRenderMathTest {
         assertThat(kotlin.math.abs(far.x)).isLessThan(kotlin.math.abs(near.x))
     }
 
-    /** 増分F: ブレンドの到達点は 90° ではなく T（=80仮り）。T で台形・ピン・地平線が真値に一致する。 */
+    /** 増分F改（T=61確定・オーナー裁定 2026-08-07）: 構造的壁の60°直上でプレビュー投影へ到達する。 */
     @Test fun tiltBlendWeight_isZeroInNativeRangeAndReachesOneAtThreshold() {
         assertThat(NaviRenderMath.tiltBlendWeight(45f)).isEqualTo(0f)
         assertThat(NaviRenderMath.tiltBlendWeight(60f)).isEqualTo(0f)
-        assertThat(NaviRenderMath.tiltBlendWeight(70f)).isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.tiltBlendWeight(60.5f)).isWithin(0.001f).of(0.5f)
         assertThat(NaviRenderMath.tiltBlendWeight(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG)).isEqualTo(1f)
+        assertThat(NaviRenderMath.tiltBlendWeight(75f)).isEqualTo(1f)
         assertThat(NaviRenderMath.tiltBlendWeight(90f)).isEqualTo(1f)
     }
 
-    /** 増分F: 地図（絵）は T−2°から透け始め T で消える。60°台の通常域は不透明のまま。 */
-    @Test fun mapPictureAlpha_fadesOutOnlyNearThreshold() {
+    /** 増分F改: 地図（絵）は 60°を超えた1°でフェードアウト。native 帯（≤60°）は必ず不透明。 */
+    @Test fun mapPictureAlpha_fadesOutOnlyAboveNativeRange() {
+        assertThat(NaviRenderMath.mapPictureAlpha(45f)).isEqualTo(1f)
         assertThat(NaviRenderMath.mapPictureAlpha(60f)).isEqualTo(1f)
-        assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG - 2f)).isEqualTo(1f)
-        assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG - 1f))
-            .isWithin(0.001f).of(0.5f)
+        assertThat(NaviRenderMath.mapPictureAlpha(60.5f)).isWithin(0.001f).of(0.5f)
         assertThat(NaviRenderMath.mapPictureAlpha(NaviRenderMath.FOLD_GRID_THRESHOLD_DEG)).isEqualTo(0f)
         assertThat(NaviRenderMath.mapPictureAlpha(90f)).isEqualTo(0f)
     }

@@ -66,6 +66,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.navimap.NaviDisplayResolver
 import com.istech.buscourse.navimap.NaviMapOrientation
+import com.istech.buscourse.navimap.NaviRenderMath
 import com.istech.buscourse.navimap.NaviRenderSource
 import com.istech.buscourse.navimap.NaviRenderer
 import com.istech.buscourse.navimap.NaviSettingsDefaults
@@ -483,6 +484,9 @@ private val EDGE_LABEL_WIDTH = 38.dp
 /** 中央の目盛りの濃さ。 */
 private const val SLIDER_CENTER_TICK_ALPHA = 0.55f
 
+/** 「地図が出ない領域」（傾き61°以降）の色帯。グリッド帯の地面色に合わせ、半透明で active の上にも見える。 */
+private val SLIDER_ZONE_BAND_COLOR = Color(0xCCC9C0AC)
+
 /**
  * 映像の大きさの最大値（％）。**スライダーの向きを反転させるための鏡**として使う。
  * UI 上は「大 ── 小」＝左いっぱいが映像最大なので、表示値は `MAX - videoAmountPct` になる。
@@ -548,6 +552,14 @@ private fun NaviLayoutCard(
             valueLabel = NaviSettingsLabels.tiltLabel(tiltDeg),
             onValueChange = { onTiltDegChange(it.toDouble()) },
             onValueChangeFinished = onTiltDegChangeFinished,
+            // ★増分F（オーナー指示 2026-08-07）: 61°以降は地図が出ない領域（グリッド表示）。
+            // 踏み込んだことがスライダー上で分かるよう、その区間に色帯を敷く。
+            zoneFromFraction = NaviRenderMath.FOLD_GRID_THRESHOLD_DEG / 90f,
+        )
+        Text(
+            "${NaviRenderMath.FOLD_GRID_THRESHOLD_DEG.toInt()}°から先は地図が消え、グリッド表示になります",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         // 映像の3本は「映像」のグループ見出しでまとめ、各行は両端1文字にする（"映像の"を3回書かない）。
         Text(
@@ -751,10 +763,18 @@ private fun NaviLabeledSlider(
     valueLabel: String,
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
+    /**
+     * この割合（0..1）から右端までを「別領域」の色帯にする（null=帯なし）。
+     * 傾きスライダーの「61°以降＝地図が出ない領域」の可視化に使う（オーナー指示 2026-08-07）。
+     * 帯は進捗（active）の上にも半透明で重なり、つまみがどちらの領域にいても見える。
+     */
+    zoneFromFraction: Float? = null,
 ) {
     val activeColor = MaterialTheme.colorScheme.primary
     val inactiveColor = activeColor.copy(alpha = SLIDER_INACTIVE_TRACK_ALPHA)
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = SLIDER_CENTER_TICK_ALPHA)
+    val zoneColor = SLIDER_ZONE_BAND_COLOR
+    val zoneEdgeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             startLabel,
@@ -796,6 +816,25 @@ private fun NaviLabeledSlider(
                             end = Offset(size.width * fraction, y),
                             strokeWidth = size.height,
                             cap = StrokeCap.Round,
+                        )
+                    }
+                    // ★「地図が出ない領域」の色帯（増分F・オーナー指示 2026-08-07）。
+                    // active の後に半透明で重ねる＝つまみが領域内でも帯が見え続ける。
+                    // 境界には縦の目盛りを立て、踏み込んだ地点を示す。
+                    if (zoneFromFraction != null && zoneFromFraction < 1f) {
+                        val zoneX = size.width * zoneFromFraction.coerceIn(0f, 1f)
+                        drawLine(
+                            color = zoneColor,
+                            start = Offset(zoneX, y),
+                            end = Offset(size.width, y),
+                            strokeWidth = size.height,
+                            cap = StrokeCap.Round,
+                        )
+                        drawLine(
+                            color = zoneEdgeColor,
+                            start = Offset(zoneX, -size.height * 0.9f),
+                            end = Offset(zoneX, size.height * 1.9f),
+                            strokeWidth = size.height * 0.34f,
                         )
                     }
                     // ★中央の目盛り（2026-07-29 オーナー指示）。**4本すべてに入れる**——

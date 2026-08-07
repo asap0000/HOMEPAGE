@@ -227,10 +227,16 @@ object NaviRenderMath {
      * 「作画崩壊までのぎりぎりを台形投射でしのぎ、その先は地図だけ非表示にし、グリッドの上で
      * GPS 軌跡と停留所表示にする」（オーナー裁定 2026-08-07）。仮り80°＝実機で目視して確定する。
      */
-    const val FOLD_GRID_THRESHOLD_DEG = 80f
+    // ★T=61 確定（オーナー裁定 2026-08-07）: 実験（63/75/84/90°の実写）で「軌跡と停留所が
+    // 地面を走行しているように見える」を確認し、**構造的壁の60°直上から全部グリッド**へ。
+    // 台形帯は事実上廃止（60→61の1°クロスフェードのみ）。
+    // 併せて裁定: ①グリッド帯にリーダー線（導線）は入れない——地図が無い画面で停留所が動くと
+    // 目標を失う（重なりは許容）②設定の傾きスライダーに61°以降の色帯を付け、
+    // 「地図が出ない領域」に踏み込んだことを見えるようにする。
+    const val FOLD_GRID_THRESHOLD_DEG = 61f
 
     /** 地図（絵）のフェード幅（[FOLD_GRID_THRESHOLD_DEG]の手前この度数から透け始め、閾値で0になる）。 */
-    const val FOLD_GRID_FADE_DEG = 2f
+    const val FOLD_GRID_FADE_DEG = 1f
 
     /**
      * 60→T°で「地図の投影」から「プレビューの投影」へ乗り換える重み（0..1）。
@@ -246,11 +252,14 @@ object NaviRenderMath {
             (FOLD_GRID_THRESHOLD_DEG - NATIVE_TILT_MAX_DEG))
             .coerceIn(0f, 1f)
 
-    /** 地図（絵）の不透明度＝T−[FOLD_GRID_FADE_DEG]°から透け始め、T で0（増分F）。 */
-    fun mapPictureAlpha(tiltDeg: Float): Float =
-        (1f - (tiltDeg.orZeroIfNonFinite() - (FOLD_GRID_THRESHOLD_DEG - FOLD_GRID_FADE_DEG)) /
-            FOLD_GRID_FADE_DEG)
+    /** 地図（絵）の不透明度＝T−[FOLD_GRID_FADE_DEG]°から透け始め、T で0（増分F）。
+     * native 帯（60°以下）は必ず不透明＝実地図を絶対に透けさせない。 */
+    fun mapPictureAlpha(tiltDeg: Float): Float {
+        val tilt = tiltDeg.orZeroIfNonFinite()
+        if (tilt <= NATIVE_TILT_MAX_DEG) return 1f
+        return (1f - (tilt - (FOLD_GRID_THRESHOLD_DEG - FOLD_GRID_FADE_DEG)) / FOLD_GRID_FADE_DEG)
             .coerceIn(0f, 1f)
+    }
 
     /**
      * 折り曲げ前のステージ座標[x],[y]が、折り曲げ後に画面のどこへ写るか（[foldTopFraction]の一般点版）。
