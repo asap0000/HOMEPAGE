@@ -1,5 +1,7 @@
 package com.istech.buscourse.navimap
 
+import kotlin.math.roundToInt
+
 /** 運転者設定として保存する地図の向き。 */
 enum class NaviMapOrientation {
     HEADING_UP,
@@ -63,8 +65,20 @@ object NaviSettingsDefaults {
     val THEME = NaviTheme.NIGHT
     const val STOP_NAME_VISIBLE = true
 
+    /**
+     * 傾きを 0..90° に収め、**1°きざみへ丸める**（増分G・オーナー承認 y×4・2026-08-07）。
+     *
+     * ★丸めがここに在る理由＝**読み書きの全経路がこの1関数を通る**（読み込み＝`NaviDisplayResolver`／
+     * 書き込み＝`NaviSettingsRepository.setTiltDeg`／製品既定／ナビ用マップのヒント `pitchDeg`）。
+     * 画面側だけで丸めると**すでに保存済みの小数が触るまで残る**——実機に `60.303` が入っており、
+     * それが増分Gの発端そのものだった（表示は `toInt()` で「60°」だが中身は 60.303＝グリッドへの
+     * 移行が3割進み、地図が薄れ、停留所が地図とグリッドの中間に浮いていた）。
+     *
+     * **丸めは切り捨てでなく最寄り**（`roundToInt`）。ラベルは `toInt()`＝切り捨てだが、
+     * 値がここで整数化された後に表示されるので両者は一致する（60.6 → 61 → 「61°」）。
+     */
     fun clampTiltDeg(value: Double): Double =
-        if (value.isFinite()) value.coerceIn(0.0, 90.0) else TILT_DEG
+        if (value.isFinite()) value.coerceIn(0.0, 90.0).roundToInt().toDouble() else TILT_DEG
 
     fun clampVideoAmountPct(value: Int): Int = value.coerceIn(0, 100)
 

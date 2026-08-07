@@ -484,8 +484,32 @@ private val EDGE_LABEL_WIDTH = 38.dp
 /** 中央の目盛りの濃さ。 */
 private const val SLIDER_CENTER_TICK_ALPHA = 0.55f
 
-/** 「地図が出ない領域」（傾き61°以降）の色帯。グリッド帯の地面色に合わせ、半透明で active の上にも見える。 */
+/**
+ * 「地図が出ない領域」（傾き61°以降）の色帯。グリッド帯の地面色に合わせる。
+ * ★増分G（2026-08-07）で**トラックの下の別レーンへ移した**ので、進捗（青）の上には重ならない。
+ */
 private val SLIDER_ZONE_BAND_COLOR = Color(0xCCC9C0AC)
+
+/** 色帯をトラック中心から下へずらす量（トラック太さに対する比）。トラックと重ならない位置。 */
+internal const val ZONE_BAND_OFFSET_RATIO = 1.9f
+
+/** 色帯の太さ（トラック太さに対する比）。トラックより細くして主従を付ける。 */
+internal const val ZONE_BAND_HEIGHT_RATIO = 0.5f
+
+/**
+ * 色帯の中心 y（トラック中心 [trackCenterY] からの位置）。
+ *
+ * ★純関数に出してある理由（増分G・独立レビュー should②の回収）＝**「帯がトラックに重ならない」を
+ * テストで固定するため**。帯を再び進捗（active）の線の上へ戻す変更が入ると
+ * [com.istech.buscourse.ui.NaviSliderZoneBandTest] が落ちる。
+ * 重ねた実装が、まさに「壁で止まったのに、なお右へ動く」に見える不具合の本体だった（2026-08-07）。
+ */
+internal fun sliderZoneBandY(trackCenterY: Float, trackHeightPx: Float): Float =
+    trackCenterY + trackHeightPx * ZONE_BAND_OFFSET_RATIO
+
+/** 色帯の太さ（px）。 */
+internal fun sliderZoneBandStrokeWidth(trackHeightPx: Float): Float =
+    trackHeightPx * ZONE_BAND_HEIGHT_RATIO
 
 /**
  * 映像の大きさの最大値（％）。**スライダーの向きを反転させるための鏡**として使う。
@@ -550,7 +574,11 @@ private fun NaviLayoutCard(
             value = tiltDeg.toFloat(),
             valueRange = 0f..90f,
             valueLabel = NaviSettingsLabels.tiltLabel(tiltDeg),
-            onValueChange = { onTiltDegChange(it.toDouble()) },
+            // ★増分G: **指を動かしている間も1°きざみ**（他の4本は Int なので元からそう動く。
+            // 傾きだけ生の連続値をそのまま state へ入れていた）。ここで丸めないと、ドラッグ中だけ
+            // ラベル「60°」のまま中間値でプレビューが描かれ、**今回報告された見え方が一瞬再現する**。
+            // 保存時（`setTiltDeg`）と同じ関数を通す＝丸めの規則が1つしかない状態を保つ。
+            onValueChange = { onTiltDegChange(NaviSettingsDefaults.clampTiltDeg(it.toDouble())) },
             onValueChangeFinished = onTiltDegChangeFinished,
             // ★増分F（オーナー指示 2026-08-07）: 61°以降は地図が出ない領域（グリッド表示）。
             // 踏み込んだことがスライダー上で分かるよう、その区間に色帯を敷く。
@@ -766,7 +794,9 @@ private fun NaviLabeledSlider(
     /**
      * この割合（0..1）から右端までを「別領域」の色帯にする（null=帯なし）。
      * 傾きスライダーの「61°以降＝地図が出ない領域」の可視化に使う（オーナー指示 2026-08-07）。
-     * 帯は進捗（active）の上にも半透明で重なり、つまみがどちらの領域にいても見える。
+     *
+     * ★帯は**トラックの下の別レーン**へ描く（増分G・2026-08-07）。進捗（active）の上には重ねない
+     * ——重ねると青が消え、つまみが「壁で止まったのに、なお右へ動く」ように見えるため（[sliderZoneBandY]）。
      */
     zoneFromFraction: Float? = null,
 ) {
@@ -774,7 +804,6 @@ private fun NaviLabeledSlider(
     val inactiveColor = activeColor.copy(alpha = SLIDER_INACTIVE_TRACK_ALPHA)
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = SLIDER_CENTER_TICK_ALPHA)
     val zoneColor = SLIDER_ZONE_BAND_COLOR
-    val zoneEdgeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             startLabel,
@@ -818,23 +847,28 @@ private fun NaviLabeledSlider(
                             cap = StrokeCap.Round,
                         )
                     }
-                    // ★「地図が出ない領域」の色帯（増分F・オーナー指示 2026-08-07）。
-                    // active の後に半透明で重ねる＝つまみが領域内でも帯が見え続ける。
-                    // 境界には縦の目盛りを立て、踏み込んだ地点を示す。
+                    // ★★「地図が出ない領域」の帯＝**トラックとは別のレーン（線の下）へ敷く**
+                    // （増分G・オーナー承認 y×4・2026-08-07。増分F の実装を是正）。
+                    //
+                    // 旧実装は **active と同じ線の上へ ほぼ不透明（0xCC）で塗っていた**ため、
+                    //   ①つまみが閾値より右へ進んでも**青が伸びない**（進捗が消える）
+                    //   ②境界の縦目盛りが**つまみの下に隠れる**（閾値61°とつまみ60°は約7px しか離れない）
+                    // が重なり、「**壁に当たって止まったのに、なお右へ動く＝脱線**」に見えていた
+                    // （オーナー実機報告 2026-08-07）。**進捗（青）と領域（帯）は別のことを言っている**ので、
+                    // 同じ線に重ねない。
+                    //
+                    // **境界の縦目盛りは廃止**＝「中央の目盛りと同じ形の線が 45°と61°に2本立つ」ことが
+                    // 紛らわしさの本体だった（オーナー「センターバーと同じものが60度にあります」）。
+                    // **帯の左端がそのまま境界を示す**ので、線を足す必要がない。
                     if (zoneFromFraction != null && zoneFromFraction < 1f) {
                         val zoneX = size.width * zoneFromFraction.coerceIn(0f, 1f)
+                        val zoneY = sliderZoneBandY(trackCenterY = y, trackHeightPx = size.height)
                         drawLine(
                             color = zoneColor,
-                            start = Offset(zoneX, y),
-                            end = Offset(size.width, y),
-                            strokeWidth = size.height,
+                            start = Offset(zoneX, zoneY),
+                            end = Offset(size.width, zoneY),
+                            strokeWidth = sliderZoneBandStrokeWidth(size.height),
                             cap = StrokeCap.Round,
-                        )
-                        drawLine(
-                            color = zoneEdgeColor,
-                            start = Offset(zoneX, -size.height * 0.9f),
-                            end = Offset(zoneX, size.height * 1.9f),
-                            strokeWidth = size.height * 0.34f,
                         )
                     }
                     // ★中央の目盛り（2026-07-29 オーナー指示）。**4本すべてに入れる**——
