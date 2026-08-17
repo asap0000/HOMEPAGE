@@ -25,13 +25,15 @@ object NaviFollow {
         lon: Double,
         previousChainageM: Double?,
         params: TrialParams = TrialParams(),
+        searchAll: Boolean = false,
     ): FollowFix? {
         if (!lat.isFinite() || !lon.isFinite() || previousChainageM?.isFinite() == false ||
             !params.mapMatchGrossMismatchM.isFinite()
         ) return null
 
         val route = buildRoute(segments, trackPointsBySegmentId) ?: return null
-        val candidates = if (previousChainageM == null) {
+        val wholeRouteSearch = searchAll || previousChainageM == null
+        val candidates = if (wholeRouteSearch) {
             route.edges
         } else {
             val cursor = route.points.indices.minByOrNull { index ->
@@ -44,7 +46,7 @@ object NaviFollow {
         }
         if (candidates.isEmpty()) return null
 
-        val selected = candidates.map { edge ->
+        val projected = candidates.map { edge ->
             projectPointToSegment(
                 pLat = lat,
                 pLon = lon,
@@ -55,7 +57,24 @@ object NaviFollow {
                 refLon = lon,
                 dist = HaversineGeoDistance,
             )
-        }.minByOrNull { it.lateralOffsetM } ?: return null
+        }
+        val best = projected.minByOrNull { it.lateralOffsetM } ?: return null
+        // ★全域探索の同着（横ずれが最良値+WHOLE_ROUTE_TIE_M 以内）の選び方は2通り（増分H・検収手直し）:
+        //   初回（previous なし）＝chainage の小さい方（承認②「コースの早い方から始める」。
+        //     始点と終点が3.3mまで近づく周回コースで、開いた直後に終点へ吸着しないため）。
+        //   コース外からの復帰（previous あり）＝前回 chainage に最も近い方（承認③「いま居る場所の
+        //     場面から再生」。同じ道を複数回通るコースで「早い方」を選ぶと過去の周回へ巻き戻り、
+        //     映像が過去へジャンプするため——実データ map#4 は約2.5周で全域が重複走行路）。
+        val selected = if (wholeRouteSearch) {
+            val ties = projected.filter { it.lateralOffsetM <= best.lateralOffsetM + WHOLE_ROUTE_TIE_M }
+            if (previousChainageM != null) {
+                ties.minByOrNull { abs(it.chainageM - previousChainageM) } ?: best
+            } else {
+                ties.minByOrNull { it.chainageM } ?: best
+            }
+        } else {
+            best
+        }
         if (selected.lateralOffsetM.toDouble() > params.mapMatchGrossMismatchM) return null
         return FollowFix(selected.chainageM, selected.lateralOffsetM.toDouble())
     }
@@ -101,4 +120,10 @@ object NaviFollow {
 
     // NaviRenderer.kt と同じ TRACK 判定。NaviRenderer の private const には依存させない。
     private const val TRACK_KIND = "TRACK"
+
+    /**
+     * ★全域探索で同等とみなす横ずれ。GPS実測の最悪精度15mを許容し、始点・終点が3.3mまで
+     * 近づく周回コースでは停車中でもchainageの小さい始点側を選ぶための値。
+     */
+    private const val WHOLE_ROUTE_TIE_M = 15.0
 }

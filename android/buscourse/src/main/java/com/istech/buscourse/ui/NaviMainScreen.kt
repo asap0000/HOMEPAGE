@@ -62,6 +62,7 @@ import com.istech.buscourse.navimap.NaviRenderSource
 import com.istech.buscourse.navimap.NaviRenderer
 import com.istech.buscourse.navimap.NaviSettingsPatch
 import com.istech.buscourse.navimap.NaviSettingsRepository
+import com.istech.buscourse.navimap.NaviSelfFix
 
 /** navi_map セグメントの種別（TRACK区間のみ距離程に寄与、[ui.NaviScreen]・[navimap.NaviRenderer]と同じ扱い）。 */
 private const val TRACK_KIND = "TRACK"
@@ -170,8 +171,16 @@ fun NaviMainScreen(
                         lat = location.latitude,
                         lon = location.longitude,
                         previousChainageM = followState.lastFixChainageM?.toDouble(),
+                        searchAll = !followState.onCourse,
                     )
-                    followState = naviMainApplyFollowFix(followState, fix)
+                    followState = naviMainApplyLocation(
+                        state = followState,
+                        lat = location.latitude,
+                        lon = location.longitude,
+                        bearingDeg = location.bearing.toDouble().takeIf { location.hasBearing() },
+                        speedMps = location.speed.toDouble().takeIf { location.hasSpeed() },
+                        fix = fix,
+                    )
                 },
                 onProviderDisabled = { followUnavailable = true },
                 onProviderEnabled = { followUnavailable = false },
@@ -206,6 +215,10 @@ fun NaviMainScreen(
                     source = NaviRenderSource.Real(state.naviMapId),
                     chainageM = followState.chainageM,
                     settings = settings,
+                    selfFix = followState.selfLat?.let { lat ->
+                        followState.selfLon?.let { lon -> NaviSelfFix(lat, lon, followState.selfHeadingDeg) }
+                    },
+                    onCourse = followState.onCourse,
                     modifier = Modifier.fillMaxSize(),
                 )
 
@@ -268,6 +281,10 @@ internal data class NaviMainFollowState(
     val mode: NaviMainMode = NaviMainMode.FOLLOWING,
     val chainageM: Float = 0f,
     val lastFixChainageM: Float? = null,
+    val onCourse: Boolean = true,
+    val selfLat: Double? = null,
+    val selfLon: Double? = null,
+    val selfHeadingDeg: Double? = null,
 )
 
 /** 距離スライダー操作＝プレビューへ入る（設計§5-1「スライダー操作で入る」）。 */
@@ -279,19 +296,45 @@ internal fun naviMainRecenter(state: NaviMainFollowState): NaviMainFollowState =
     state.copy(mode = NaviMainMode.FOLLOWING, chainageM = state.lastFixChainageM ?: state.chainageM)
 
 /**
- * GPS fix（[NaviFollow.chainageAt]の結果）を反映する。[fix]がnull（経路外・GPS欠測等）の場合は
- * 直前のchainageを保持する（設計§7-課題B「GPS欠測時の保持」、フリーズして良いという判断）。
- * 追従中のみ表示chainageを更新し、プレビュー中は[lastFixChainageM]だけを更新して表示は動かさない
- * （スライダーで固定した値をGPSが上書きしてしまわないように）。
+ * GPS実測位置と[NaviFollow.chainageAt]の結果を反映する。実測位置はコース内外を問わず更新し、
+ * chainageはヒステリシスでコース内と判定したときだけ進める。追従中のみ表示chainageを更新し、
+ * プレビュー中は[lastFixChainageM]だけを更新して表示は動かさない。
  */
-internal fun naviMainApplyFollowFix(state: NaviMainFollowState, fix: NaviFollow.FollowFix?): NaviMainFollowState {
-    if (fix == null) return state
-    val fixChainageM = fix.chainageM.toFloat()
-    return state.copy(
+internal fun naviMainApplyLocation(
+    state: NaviMainFollowState,
+    lat: Double,
+    lon: Double,
+    bearingDeg: Double?,
+    speedMps: Double?,
+    fix: NaviFollow.FollowFix?,
+): NaviMainFollowState {
+    val heading = if (bearingDeg != null && speedMps != null && speedMps >= BEARING_MIN_SPEED_MPS) {
+        bearingDeg
+    } else {
+        state.selfHeadingDeg
+    }
+    val base = state.copy(selfLat = lat, selfLon = lon, selfHeadingDeg = heading)
+    val acceptedFix = when {
+        state.onCourse && (fix == null || fix.lateralOffsetM > OFF_COURSE_ENTER_M) ->
+            return base.copy(onCourse = false)
+        state.onCourse -> fix
+        fix != null && fix.lateralOffsetM <= OFF_COURSE_EXIT_M -> fix
+        else -> return base
+    } ?: return base
+    val fixChainageM = acceptedFix.chainageM.toFloat()
+    return base.copy(
+        onCourse = true,
         chainageM = if (state.mode == NaviMainMode.FOLLOWING) fixChainageM else state.chainageM,
         lastFixChainageM = fixChainageM,
     )
 }
+
+/** ★コース外へ遷移する横ずれ。オーナー承認値40m（測位実測は中央4m、最悪15m）。 */
+private const val OFF_COURSE_ENTER_M = 40.0
+/** ★コースへ復帰する横ずれ。オーナー承認値20m（測位実測は中央4m、最悪15m）。 */
+private const val OFF_COURSE_EXIT_M = 20.0
+/** ★停車中の方位揺れを採用しない速度。1.0m/s未満は停車相当として直前の向きを保つ。 */
+private const val BEARING_MIN_SPEED_MPS = 1.0
 
 /** 本画面の状態（identity/navi_map解決の結果）。 */
 private sealed interface NaviMainReadiness {

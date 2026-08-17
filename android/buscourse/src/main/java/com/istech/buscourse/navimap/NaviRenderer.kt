@@ -111,6 +111,8 @@ fun NaviRenderer(
     source: NaviRenderSource,
     chainageM: Float,
     settings: NaviSettingsEffective,
+    selfFix: NaviSelfFix? = null,
+    onCourse: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -144,8 +146,13 @@ fun NaviRenderer(
         chainageM = chainageM.coerceIn(0f, maxOf(data.maxChainageM, 0f)),
         settings = settings,
         routeData = data,
+        selfFix = selfFix,
+        onCourse = onCourse,
     )
 }
+
+/** GPS実測の自車位置と、停車中は保持される実測進行方向。 */
+data class NaviSelfFix(val lat: Double, val lon: Double, val headingDeg: Double?)
 
 /** [NaviRenderer]の`source`が受け付ける供給元。 */
 sealed interface NaviRenderSource {
@@ -358,6 +365,8 @@ private fun NaviRendererBody(
     chainageM: Float,
     settings: NaviSettingsEffective,
     routeData: NaviRouteData,
+    selfFix: NaviSelfFix?,
+    onCourse: Boolean,
 ) {
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val naviOrientation = when (settings.orientation) {
@@ -393,6 +402,7 @@ private fun NaviRendererBody(
                     stageWidthPx = stageWidthPx,
                     stageHeightPx = stageHeightPx,
                     modifier = Modifier.fillMaxSize(),
+                    selfFix = selfFix,
                 )
             } else {
                 NaviRendererMapStage(
@@ -406,6 +416,19 @@ private fun NaviRendererBody(
                     stageWidthPx = stageWidthPx,
                     stageHeightPx = stageHeightPx,
                     modifier = Modifier.fillMaxSize(),
+                    selfFix = selfFix,
+                )
+            }
+
+            if (!onCourse) {
+                Text(
+                    text = "コース外",
+                    color = MaterialTheme.colorScheme.onError,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 88.dp)
+                        .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
                 )
             }
 
@@ -545,6 +568,7 @@ private fun NaviRendererMapStage(
     stageWidthPx: Float,
     stageHeightPx: Float,
     modifier: Modifier = Modifier,
+    selfFix: NaviSelfFix? = null,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -634,10 +658,17 @@ private fun NaviRendererMapStage(
 
     // 傾き（native部分）・向き・chainageの変化に応じてカメラを即時反映する（アニメーションなし）。
     val nativeTiltDeg = NaviRenderMath.nativeTiltDeg(settings.tiltDeg.toFloat())
-    val cameraState = remember(routeData, chainageM, naviOrientation, nativeTiltDeg) {
-        NaviCamera.cameraStateAtChainageM(
+    val cameraState = remember(routeData, chainageM, naviOrientation, nativeTiltDeg, selfFix) {
+        val courseState = NaviCamera.cameraStateAtChainageM(
             routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble(),
             naviOrientation, nativeTiltDeg.toDouble(), NAVI_RENDERER_ZOOM,
+        )
+        if (selfFix == null) courseState else courseState?.copy(
+            lat = selfFix.lat,
+            lon = selfFix.lon,
+            bearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) {
+                selfFix.headingDeg ?: courseState.bearingDeg
+            } else 0.0,
         )
     }
     val cameraPadding = remember(stageWidthPx, stageHeightPx, settings.selfCarFwdBackPct, settings.selfCarLateralPct) {
@@ -935,10 +966,11 @@ private fun NaviRendererMapStage(
         // 折り曲げ後の実位置を引ける今は起きない＝増分D の追補で得た道具がそのまま効く）。
         // ⚠ 引き換えに、遠くのピンが小さく描かれる遠近は消える（全部同じ大きさ）。
         // 密集して読みにくくなったら導線（リーダー線）で接地点との対応を示す＝オーナー案・バックログ。
-        val trueHeadingDeg = remember(routeData, chainageM) {
+        val courseHeadingDeg = remember(routeData, chainageM) {
             NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
         } ?: 0.0
-        val selfCarRotationDeg = (trueHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
+        val selfCarHeadingDeg = selfFix?.headingDeg ?: courseHeadingDeg
+        val selfCarRotationDeg = (selfCarHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
         NaviPinAndSelfCarOverlay(
             stops = routeData.stopPoints,
             pinScreenPositions = displayPinPositions,
@@ -1008,6 +1040,7 @@ private fun NaviRendererFallbackStage(
     stageWidthPx: Float,
     stageHeightPx: Float,
     modifier: Modifier = Modifier,
+    selfFix: NaviSelfFix? = null,
 ) {
     val lineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
     val groundColor = MaterialTheme.colorScheme.surfaceVariant
@@ -1033,10 +1066,13 @@ private fun NaviRendererFallbackStage(
             stop.sequenceIndex to Offset(stageWidthPx * fractionAlong, stageHeightPx * 0.5f)
         }
         val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
-        val trueHeadingDeg = NaviHeading.headingAtChainageM(
+        val courseHeadingDeg = NaviHeading.headingAtChainageM(
             routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble(),
         ) ?: 0.0
-        val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) trueHeadingDeg else 0.0
+        val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) {
+            selfFix?.headingDeg ?: courseHeadingDeg
+        } else 0.0
+        val selfCarHeadingDeg = selfFix?.headingDeg ?: courseHeadingDeg
 
         NaviPinAndSelfCarOverlay(
             stops = routeData.stopPoints,
@@ -1044,7 +1080,7 @@ private fun NaviRendererFallbackStage(
             nameByStopCardId = routeData.nameByStopCardId,
             stopNameVisible = settings.stopNameVisible,
             selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
-            selfCarRotationDeg = (trueHeadingDeg - cameraBearingDeg).toFloat(),
+            selfCarRotationDeg = (selfCarHeadingDeg - cameraBearingDeg).toFloat(),
             theme = settings.theme,
             // フォールバックは台形変形を掛けていない（グリッド地面もピンも素の平面）ため逆回転は不要。
             counterRotationXDeg = 0f,
