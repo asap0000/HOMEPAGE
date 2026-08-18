@@ -420,18 +420,6 @@ private fun NaviRendererBody(
                 )
             }
 
-            if (!onCourse) {
-                Text(
-                    text = "コース外",
-                    color = MaterialTheme.colorScheme.onError,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.align(Alignment.BottomStart)
-                        .padding(start = 16.dp, bottom = 88.dp)
-                        .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50))
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                )
-            }
-
             // 縦映像9:16オーバーレイ（MapViewの外側＝Composeレイヤ。地図をリサイズしない・設計§4）。
             // z順はpin/自車(z2)より後＝映像(z3)が上に重なる（設計§3のレイヤ図と一致）。
             //
@@ -459,22 +447,54 @@ private fun NaviRendererBody(
                     stageHeightPx - marginYPx * 2f, videoSize.heightPx, settings.videoVerticalPct,
                 )
                 with(localDensity) {
-                    NaviVideoOverlay(
-                        context = context,
-                        database = database,
-                        routeData = routeData,
-                        chainageM = chainageM,
-                        theme = settings.theme,
+                    // ★★「コース外」は**映像枠の中**へ重ねる（増分H 追補・オーナー実車確認 2026-08-18）。
+                    // 実車で「下部のメッセージ領域にかかって読めない」と判明したための是正だが、
+                    // 位置を上げるだけにしない——オーナー指摘「**動画が追尾できていない理由も判明する**」＝
+                    // **映像が止まる理由2つ（コース外で距離程が凍る／その区間に映像が無い）が同じ枠で読める**。
+                    // 枠の中に置くと、映像の大きさ・左右上下をどう設定しても下部バーと衝突しない。
+                    Box(
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .offset(x = offsetX.toDp(), y = offsetY.toDp())
                             .width(videoSize.widthPx.toDp())
                             .height(videoSize.heightPx.toDp()),
-                    )
+                    ) {
+                        NaviVideoOverlay(
+                            context = context,
+                            database = database,
+                            routeData = routeData,
+                            chainageM = chainageM,
+                            theme = settings.theme,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        if (!onCourse) NaviOffCourseBadge(Modifier.align(Alignment.TopCenter))
+                    }
                 }
+            } else if (!onCourse) {
+                // 映像なし（マップ主体＝映像0%）の設定では枠が無い。下部バーを避けて上端へ出す
+                // （「振り切れないように守る」実装はしない＝0%も正しい設定なので印だけは必ず届ける）。
+                NaviOffCourseBadge(Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
             }
         }
     }
+}
+
+/**
+ * 「コース外」の印（増分H）。**映像枠の中に置く**のが既定＝映像が進まない理由がその場で読める
+ * （もう一方の理由「この区間の映像はありません」も同じ枠に出るため、運転者は見る場所を1つ覚えればよい）。
+ * 案内文・矢印・点滅は付けない（承認済みの非目標「コースへ戻す案内はしない」）。
+ */
+@Composable
+private fun NaviOffCourseBadge(modifier: Modifier = Modifier) {
+    Text(
+        text = "コース外",
+        color = MaterialTheme.colorScheme.onError,
+        style = MaterialTheme.typography.labelMedium,
+        modifier = modifier
+            .padding(top = 8.dp)
+            .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
 }
 
 /** 空グラデーション（75°超で露出。昼夜でトーンを変える、設計§2・§2-1「75°超で空」・要件7）。 */
