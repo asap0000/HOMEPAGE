@@ -39,6 +39,19 @@ import com.istech.buscourse.course.CourseKind
 
 private data class NaviCoursePickRow(val course: CourseEntity, val sent: Boolean)
 
+/**
+ * ナビの選択一覧にそのコースを出すか（増分J・オーナー承認 y×3・2026-09-03）。
+ *
+ * **送り済み（現役のナビ用マップがある）なら、予約であっても出す**——旧実装は `kind != DRAFT` だけで
+ * 弾いていたため、**送ってあるのに永久に出てこないコース**が生まれた（実機に3本実在）。
+ * 「ナビ用に送る」に**種別を書き換える経路が無い**ので、予約は送っても予約のまま残る。
+ *
+ * 送っていないものは従来どおり＝**予約は出さない**（まだ成形していない下書きを選ばせない）。
+ * **コースの種別は書き換えない**（観察のために残している予約の性格を変えないため）。
+ */
+internal fun naviPickShouldShow(kind: String, sent: Boolean): Boolean =
+    sent || kind != CourseKind.DRAFT.name
+
 /** 識別情報を中心に選ぶナビ専用一覧（design-gate B-3改 y×5・2026-08-04）。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,17 +64,25 @@ fun NaviCoursePickScreen(
     var loaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        val courses = viewModel.repository.getCourses().filter { it.kind != CourseKind.DRAFT.name }
-        rows = courses.map { course ->
+        // ★★一覧に出す条件＝「送り済みか」を**先に**見る（増分J・オーナー承認 y×3・2026-09-03）。
+        //
+        // 旧実装は `kind != DRAFT` だけで弾いていたため、**送ってあるのに永久に出てこないコース**が生まれた
+        // （オーナー報告「ナビに送ったコース情報がナビ一覧に載らない」・実機に3本実在）。
+        // 原因は**入口だけ塞がれて出口が無かった**こと——予約を出さない除外は意図どおり（まだ成形していない
+        // 下書きを選ばせない）だが、**「ナビ用に送る」に種別を書き換える経路が無い**ので予約のまま残り続ける。
+        //
+        // ⇒ **送り済み（現役のナビ用マップがある）なら、予約であっても出す**。
+        // **送っていないものは従来どおり**＝予約は出さず、通常のコースは灰色で出す（識別情報を付ければ使える）。
+        // **コースの種別は書き換えない**（案A は不採用＝観察のために残している予約の性格を変えない）。
+        rows = viewModel.repository.getCourses().mapNotNull { course ->
             val identity = course.identityOrNull()
-            NaviCoursePickRow(
-                course = course,
-                sent = identity != null && viewModel.naviMapRepository.activeMapFor(
-                    identity.busId,
-                    identity.courseNo,
-                    identity.year,
-                ) != null,
-            )
+            val sent = identity != null && viewModel.naviMapRepository.activeMapFor(
+                identity.busId,
+                identity.courseNo,
+                identity.year,
+            ) != null
+            if (!naviPickShouldShow(kind = course.kind, sent = sent)) return@mapNotNull null
+            NaviCoursePickRow(course = course, sent = sent)
         }.sortedWith(
             compareBy<NaviCoursePickRow> { it.course.identityOrNull() == null }
                 .thenBy { it.course.busId }
