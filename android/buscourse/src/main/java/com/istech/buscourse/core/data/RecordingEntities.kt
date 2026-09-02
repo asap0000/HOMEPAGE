@@ -53,6 +53,14 @@ data class RecordingSessionEntity(
      * セッション一覧から編集する。
      */
     val memo: String? = null,
+    /**
+     * EX用書き出しを一度でも選んだ時刻（version 22）。
+     *
+     * **列は日時を持つが、画面に出すのは印だけ**（日時も回数も表示しない）。オーナー指示
+     * 「書き出し選択を一度はしたことだけわかるようにするだけの目印」。
+     * **後任がここを見て「日時があるなら出そう」と拡張しないこと。**
+     */
+    @ColumnInfo(name = "exported_at") val exportedAt: Long? = null,
 )
 
 /**

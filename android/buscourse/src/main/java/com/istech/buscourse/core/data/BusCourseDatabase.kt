@@ -176,7 +176,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
          * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
          * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
          */
-        const val SCHEMA_VERSION = 21
+        const val SCHEMA_VERSION = 22
 
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
@@ -204,6 +204,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_17_19,
                 MIGRATION_19_20,
                 MIGRATION_20_21,
+                MIGRATION_21_22,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -570,6 +571,14 @@ abstract class BusCourseDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `course` ADD COLUMN `shaping_started_at` INTEGER DEFAULT NULL")
                 db.execSQL("ALTER TABLE `course` ADD COLUMN `navi_block_reason` TEXT DEFAULT NULL")
+            }
+        }
+
+        /** EX用書き出しの目印と、後続の洗浄増分が使う畳み回数を追加する軽量レーン。 */
+        val MIGRATION_21_22 = object : androidx.room.migration.Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `folded_press_count` INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE `recording_session` ADD COLUMN `exported_at` INTEGER DEFAULT NULL")
             }
         }
     }

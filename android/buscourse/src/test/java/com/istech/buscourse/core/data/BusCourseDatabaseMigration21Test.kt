@@ -81,7 +81,7 @@ class BusCourseDatabaseMigration21Test {
         openSeededV20(context, name).close()
 
         val room = Room.databaseBuilder(context, BusCourseDatabase::class.java, name)
-            .addMigrations(BusCourseDatabase.MIGRATION_20_21)
+            .addMigrations(BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22)
             .build()
         try {
             val dao = room.courseDao()
@@ -143,6 +143,8 @@ class BusCourseDatabaseMigration21Test {
         // v21 の2列を落として v20 相当へ戻す（DROP COLUMN は Robolectric の SQLite が非対応＝
         // 共通ヘルパが sqlite_master の DDL から作り直す。[MigrationFixtureSupport] 参照）。
         db.downgradeCourseToBeforeV21()
+        db.downgradeCourseStopToBeforeV22()
+        db.downgradeRecordingSessionToBeforeV22()
         db.execSQL("PRAGMA user_version = 20")
         return db
     }

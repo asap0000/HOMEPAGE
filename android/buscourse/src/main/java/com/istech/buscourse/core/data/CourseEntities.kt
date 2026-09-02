@@ -220,6 +220,9 @@ data class CourseStopEntity(
      * （`error_time_s` は Windows 側の時間結合が請求元。必要になった時点で足す）。
      */
     @ColumnInfo(name = "error_space_m") val errorSpaceM: Double? = null,
+
+    /** 押下を畳んだ回数（version 22）。今回は列だけ用意し、null＝不明のまま扱う。 */
+    @ColumnInfo(name = "folded_press_count") val foldedPressCount: Int? = null,
 )
 
 /**

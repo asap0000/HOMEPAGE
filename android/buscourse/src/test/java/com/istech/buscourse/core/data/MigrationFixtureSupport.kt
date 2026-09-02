@@ -65,3 +65,40 @@ internal val COURSE_COLUMNS_BEFORE_V21 = listOf(
 /** `course` を **v21 の2列を持たない形**（v20 以前相当）へ戻す。 */
 internal fun SupportSQLiteDatabase.downgradeCourseToBeforeV21() =
     downgradeTableByDroppingColumns("course", V21_COURSE_ADDED_COLUMNS, COURSE_COLUMNS_BEFORE_V21)
+
+/** v22（[BusCourseDatabase.MIGRATION_21_22]）で純増した列。fixture を遡らせるときに落とす。 */
+internal val V22_COURSE_STOP_ADDED_COLUMNS = listOf("folded_press_count")
+internal val V22_RECORDING_SESSION_ADDED_COLUMNS = listOf("exported_at")
+
+/** v22 より前の `course_stop`（＝残す列）。 */
+internal val COURSE_STOP_COLUMNS_BEFORE_V22 = listOf(
+    "id", "course_id", "stop_card_id", "frame_id", "event_id", "sequence_index",
+    "expected_chainage_m", "resolved_latitude", "resolved_longitude", "provenance", "error_space_m",
+)
+
+/** v22 より前の `recording_session`（＝残す列）。 */
+internal val RECORDING_SESSION_COLUMNS_BEFORE_V22 = listOf(
+    "id", "course_id", "type", "target_from_stop_card_id", "target_to_stop_card_id",
+    "vehicle_id", "driver_id", "device_model", "started_at", "ended_at",
+    "gps_raw_log_rel_path", "frame_dir_rel_path", "base_frame_interval_ms",
+    "frame_count", "total_distance_m", "status", "memo",
+)
+
+/**
+ * `course_stop` から **v22 の列**を落とす（v21 以前相当へ）。
+ *
+ * ★必要な理由（2026-09-02 実測）: fixture は **Room に現行版の全表を作らせてから user_version だけ戻す**造りなので、
+ * 落とし忘れた列はファイルに残り続け、Room が 21→22 を走らせた時点で `duplicate column name` で落ちる
+ * （[downgradeCourseToBeforeV21] と同じ手当て）。
+ *
+ * **⚠ v19 より前へ戻す fixture では呼ばない**——[downgradeCourseStopToBeforeV19] が先に `course_stop` を
+ * v18 の形（`resolved_latitude` 等が無い）へ戻しており、こちらが仮定する列がもう存在しないため（実測で発覚）。
+ */
+internal fun SupportSQLiteDatabase.downgradeCourseStopToBeforeV22() =
+    downgradeTableByDroppingColumns("course_stop", V22_COURSE_STOP_ADDED_COLUMNS, COURSE_STOP_COLUMNS_BEFORE_V22)
+
+/** `recording_session` から **v22 の列**を落とす（v21 以前相当へ）。どの版の fixture でも安全。 */
+internal fun SupportSQLiteDatabase.downgradeRecordingSessionToBeforeV22() =
+    downgradeTableByDroppingColumns(
+        "recording_session", V22_RECORDING_SESSION_ADDED_COLUMNS, RECORDING_SESSION_COLUMNS_BEFORE_V22,
+    )
