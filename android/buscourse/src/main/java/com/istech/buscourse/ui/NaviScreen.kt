@@ -54,6 +54,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -122,8 +123,14 @@ private enum class NaviLayoutMode { SPLIT_MAP_TOP, SPLIT_VIDEO_TOP, MAP_ONLY, VI
 private const val MAP_RATIO_MIN = 0.2f
 private const val MAP_RATIO_MAX = 0.8f
 
-/** 分割ハンドルの当たり判定込みの見た目の高さ。 */
-private val SPLIT_HANDLE_HEIGHT = 20.dp
+/**
+ * 分割ハンドルの高さ（＝当たり判定）。
+ *
+ * ★20dp から広げた（増分K・2026-09-03）。実機で、狙いが少し外れると**掴めずに地図のスクロールへ取られる**
+ * のを確認した（境目を掴んだつもりが地図だけ動いた）。指の当たりは 48dp が目安なので、そこまで厚くする。
+ * **見た目のつまみ（細い横棒）は変えない**——太い帯を見せたいのではなく、掴める範囲を広げたいだけ。
+ */
+private val SPLIT_HANDLE_HEIGHT = 48.dp
 
 /**
  * ナビ用マップ（app_simple、`navi_*`テーブル）を実`.iscmap`地図の上に描く新規画面（(c2-b)）。
@@ -525,7 +532,17 @@ private fun NaviMapContent(
     // VIDEO_ONLYでは地図操作子（現在地FAB・停留所番号バッジ）を隠す（地図が見えていないため）。
     val mapVisible = layoutMode != NaviLayoutMode.VIDEO_ONLY
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // ★★下のスクラブUIは**重ねずに縦へ積む**（増分K・オーナー承認 y×3・2026-09-03）。
+    //
+    // 旧実装は `Box` で地図/映像を画面いっぱいに敷き、その上にスクラブUIを重ねていた。
+    // そのため**映像に割り当てた高さのうち下端がUIの下に隠れ**、既定の分割では
+    // **394px のうち 267px が見えない**状態だった（実機で画素を計測）。
+    // 境目を引いても「隠れていた分が出てくるだけ」なので、動かない（＝ロックされている）ように見えた。
+    // ⇒ **割り当てた量と見える量を一致させる**のが今回の芯。
+    //
+    // 地図の上に重ねる物（現在地FAB・停留所番号）は**地図/映像の領域の中だけ**で重ねる。
+    Column(modifier = modifier.fillMaxSize()) {
+      Box(Modifier.weight(1f).fillMaxWidth()) {
         SplitVideoMapArea(
             modifier = Modifier.fillMaxSize(),
             layoutMode = layoutMode,
@@ -582,21 +599,29 @@ private fun NaviMapContent(
             }
         }
 
-        // カメラ・スクラブUI（画面下部）。
+      }
+        // カメラ・スクラブUI（画面下部）。★重ねず、Column の下段に置く（増分K）。
         Surface(
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth(),
             tonalElevation = 3.dp,
         ) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                // ★★文字と操作を別の行に分ける（増分K・2026-09-03）。
+                //
+                // 旧実装は1行に「chainage の文字＋傾きの文字＋ボタン5つ」を横並びにしていたため、
+                // **幅に入りきらず右端の2つ（表示モード切替・上下入替）が画面外へ押し出されていた**
+                // （実機に3つしか出ていないことを確認。文字が「28998m傾き」と詰まるのが溢れの現れ）。
+                // **押せないボタンは無いのと同じ**で、「映像のみ」も「上下入替」も選べなかった。
+                // ⇒ 文字は上の行・ボタンは下の行にし、**ボタンの数が増えても溢れない**形にする。
+                Text(
+                    "chainage: ${chainageM.toInt()}m / ${maxChainageM.toInt()}m",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        "chainage: ${chainageM.toInt()}m / ${maxChainageM.toInt()}m",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // カメラの傾き（pitch）を上下ボタンで無段階に調整（0=真上／60=最も寝かせた鳥瞰）。
                         // App ローカルの表示状態のみで .isnavi／Room へ焼き戻さない（orientation と同じ扱い）。
@@ -728,13 +753,21 @@ private fun SplitVideoMapArea(
 /** 分割比率変更用のドラッグハンドル（横バー）。縦ドラッグの累計量[onDrag]（px）を呼び出し側へ渡す。 */
 @Composable
 private fun SplitDragHandle(modifier: Modifier, onDrag: (Float) -> Unit) {
+    // ★★`pointerInput(Unit)` はキーが変わらない限りブロックを作り直さないため、**最初に渡された
+    // ラムダを握り続ける**。そのラムダは当時の `mapRatio` をキャプチャしているので、
+    // **1回のドラッグの中で増分が積み上がらない**（実機で 615px 引いても 37px しか動かなかった＝
+    // 実質「最後の1移動分」だけが効いていた。増分K の実射で発覚・2026-09-03）。
+    //
+    // `rememberUpdatedState` で**常に最新のラムダを見る**ようにして解決する。
+    // 同型の落とし穴＝「`LayoutCoordinates` を state に保持して後から使うな」（増分E の教訓）。
+    val currentOnDrag by rememberUpdatedState(onDrag)
     Box(
         modifier = modifier
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
-                    onDrag(dragAmount.y)
+                    currentOnDrag(dragAmount.y)
                 }
             },
         contentAlignment = Alignment.Center,
