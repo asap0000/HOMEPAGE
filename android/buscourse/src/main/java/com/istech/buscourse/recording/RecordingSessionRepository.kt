@@ -30,6 +30,7 @@ import java.io.IOException
 import java.io.OutputStreamWriter
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.UUID
 
 /** `timelapse_frame.kind` の許容値（設計書§3.5、D6）。 */
 enum class FrameKind { LORES, HIRES }
@@ -70,6 +71,8 @@ enum class RecordingSessionStatus { RECORDING, COMPLETED, DISCARDED, INTERRUPTED
 class RecordingSessionRepository(
     private val context: Context,
     database: BusCourseDatabase,
+    private val now: () -> Long = System::currentTimeMillis,
+    private val runUid: () -> String = { UUID.randomUUID().toString() },
 ) {
     private val recordingSessionDao = database.recordingSessionDao()
     private val timelapseFrameDao = database.timelapseFrameDao()
@@ -111,7 +114,7 @@ class RecordingSessionRepository(
         targetToStopCardId: Long? = null,
         baseFrameIntervalMs: Long = 1_000L,
     ): RecordingSessionEntity = withContext(writeDispatcher) {
-        val now = System.currentTimeMillis()
+        val startedAt = now()
         val draft = RecordingSessionEntity(
             courseId = courseId,
             type = type.name,
@@ -120,7 +123,7 @@ class RecordingSessionRepository(
             vehicleId = vehicleId,
             driverId = driverId,
             deviceModel = Build.MODEL,
-            startedAt = now,
+            startedAt = startedAt,
             endedAt = null,
             gpsRawLogRelPath = "",
             frameDirRelPath = "",
@@ -128,6 +131,7 @@ class RecordingSessionRepository(
             frameCount = 0,
             totalDistanceM = null,
             status = RecordingSessionStatus.RECORDING.name,
+            runUid = runUid(),
         )
         val id = recordingSessionDao.insert(draft)
 

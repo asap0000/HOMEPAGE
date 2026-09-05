@@ -81,7 +81,7 @@ class BusCourseDatabaseMigration21Test {
         openSeededV20(context, name).close()
 
         val room = Room.databaseBuilder(context, BusCourseDatabase::class.java, name)
-            .addMigrations(BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22)
+            .addMigrations(BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22, BusCourseDatabase.MIGRATION_22_23)
             .build()
         try {
             val dao = room.courseDao()

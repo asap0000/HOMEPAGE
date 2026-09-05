@@ -50,4 +50,33 @@ class BusCourseDatabaseMigration22Test {
             helper.close()
         }
     }
+
+    @Test
+    fun migration22to23PreservesRowsAndAddsNullableRunUid() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val helper = androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory().create(
+            androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name("migration_23_${System.nanoTime()}.db")
+                .callback(object : androidx.sqlite.db.SupportSQLiteOpenHelper.Callback(22) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("CREATE TABLE recording_session (id INTEGER PRIMARY KEY NOT NULL, type TEXT NOT NULL, exported_at INTEGER DEFAULT NULL)")
+                    }
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                }).build(),
+        )
+        val db = helper.writableDatabase
+        try {
+            db.execSQL("INSERT INTO recording_session (id, type, exported_at) VALUES (37, 'FULL_RUN', 99)")
+            BusCourseDatabase.MIGRATION_22_23.migrate(db)
+            db.query("SELECT id, type, exported_at, run_uid FROM recording_session").use { c ->
+                assertThat(c.moveToFirst()).isTrue()
+                assertThat(c.getLong(0)).isEqualTo(37)
+                assertThat(c.getString(1)).isEqualTo("FULL_RUN")
+                assertThat(c.getLong(2)).isEqualTo(99)
+                assertThat(c.isNull(3)).isTrue()
+            }
+        } finally {
+            helper.close()
+        }
+    }
 }

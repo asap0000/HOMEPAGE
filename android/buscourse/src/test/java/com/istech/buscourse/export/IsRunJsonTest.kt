@@ -40,6 +40,15 @@ class IsRunJsonTest {
     }
 
     @Test
+    fun runUidIsNotOverwrittenAndIsEmittedAfterSessionId() {
+        assertThat(runUidOrGenerate(existing = "old", generated = "new")).isEqualTo("old")
+        assertThat(runUidOrGenerate(existing = null, generated = "new")).isEqualTo("new")
+        val json = IsRunJson.encode(IsRunFile(IsRunManifest(producedAtEpochMs = 10, runCount = 1), listOf(run(1, "FULL_RUN", "COMPLETED"))))
+        assertThat(json.indexOf("\"session_id\":1,\"run_uid\":\"uid-1\"")).isAtLeast(0)
+        assertThat(json).contains("\"schema_version\":1")
+    }
+
+    @Test
     fun shapedStopNullableValuesRemainNull() {
         val source = run(1, "FULL_RUN", "COMPLETED").copy(
             shapedStops = listOf(IsRunShapedStop(12, 5, 0, null, null, "RECORDED", null, null, 101)),
@@ -53,6 +62,7 @@ class IsRunJsonTest {
 
     private fun run(id: Long, type: String, status: String) = IsRunRun(
         sessionId = id,
+        runUid = "uid-$id",
         type = type,
         status = status,
         startedAt = 1,

@@ -69,6 +69,8 @@ internal fun SupportSQLiteDatabase.downgradeCourseToBeforeV21() =
 /** v22（[BusCourseDatabase.MIGRATION_21_22]）で純増した列。fixture を遡らせるときに落とす。 */
 internal val V22_COURSE_STOP_ADDED_COLUMNS = listOf("folded_press_count")
 internal val V22_RECORDING_SESSION_ADDED_COLUMNS = listOf("exported_at")
+/** v23（[BusCourseDatabase.MIGRATION_22_23]）で純増した列。fixture を遡らせるときに落とす。 */
+internal val V23_RECORDING_SESSION_ADDED_COLUMNS = listOf("run_uid")
 
 /** v22 より前の `course_stop`（＝残す列）。 */
 internal val COURSE_STOP_COLUMNS_BEFORE_V22 = listOf(
@@ -98,7 +100,17 @@ internal fun SupportSQLiteDatabase.downgradeCourseStopToBeforeV22() =
     downgradeTableByDroppingColumns("course_stop", V22_COURSE_STOP_ADDED_COLUMNS, COURSE_STOP_COLUMNS_BEFORE_V22)
 
 /** `recording_session` から **v22 の列**を落とす（v21 以前相当へ）。どの版の fixture でも安全。 */
-internal fun SupportSQLiteDatabase.downgradeRecordingSessionToBeforeV22() =
+internal fun SupportSQLiteDatabase.downgradeRecordingSessionToBeforeV22() {
+    downgradeRecordingSessionToBeforeV23()
     downgradeTableByDroppingColumns(
         "recording_session", V22_RECORDING_SESSION_ADDED_COLUMNS, RECORDING_SESSION_COLUMNS_BEFORE_V22,
     )
+}
+
+/** v23 の列を落とす（v22 相当へ）。v22 以前へ戻す場合はこの処理を先に行う。 */
+internal fun SupportSQLiteDatabase.downgradeRecordingSessionToBeforeV23() {
+    downgradeTableByDroppingColumns(
+        "recording_session", V23_RECORDING_SESSION_ADDED_COLUMNS,
+        RECORDING_SESSION_COLUMNS_BEFORE_V22 + V22_RECORDING_SESSION_ADDED_COLUMNS,
+    )
+}

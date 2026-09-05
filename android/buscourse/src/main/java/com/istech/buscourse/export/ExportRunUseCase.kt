@@ -9,6 +9,7 @@ import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 const val ISRUN_SCHEMA_VERSION = 1
 /**
@@ -22,6 +23,7 @@ const val ISRUN_MIME_TYPE = "application/octet-stream"
 
 data class ExportRunListItem(
     val sessionId: Long,
+    val runUid: String?,
     val type: String,
     val status: String,
     val startedAt: Long,
@@ -43,6 +45,7 @@ data class IsRunFile(val manifest: IsRunManifest, val runs: List<IsRunRun>)
 
 data class IsRunRun(
     val sessionId: Long,
+    val runUid: String,
     val type: String,
     val status: String,
     val startedAt: Long,
@@ -87,6 +90,9 @@ data class ExportRunResult(val runCount: Int, val gpsPointCount: Int)
 /** 「一度はした」の初回時刻を保ち、再書き出しでは上書きしない規則。 */
 fun exportedAtAfterSuccess(existing: Long?, now: Long): Long = existing ?: now
 
+/** 一度書いた識別子は変えない規則。 */
+fun runUidOrGenerate(existing: String?, generated: String): String = existing ?: generated
+
 /** `.isrun` の純粋なJSON組み立て。null と数値を変換せず、そのまま書く。 */
 object IsRunJson {
     fun encode(file: IsRunFile): String = buildString {
@@ -110,6 +116,7 @@ object IsRunJson {
     private fun StringBuilder.run(value: IsRunRun) {
         append('{')
         field("session_id", value.sessionId); comma()
+        field("run_uid", value.runUid); comma()
         field("type", value.type); comma()
         field("status", value.status); comma()
         field("started_at", value.startedAt); comma()
@@ -170,15 +177,16 @@ class ExportRunUseCase(
     private val context: Context,
     private val database: BusCourseDatabase,
     private val now: () -> Long = System::currentTimeMillis,
+    private val runUid: () -> String = { UUID.randomUUID().toString() },
 ) {
     suspend fun listRuns(): List<ExportRunListItem> = withContext(Dispatchers.IO) {
         database.openHelper.readableDatabase.query(
-            "SELECT s.id, s.type, s.status, s.started_at, s.total_distance_m, s.exported_at, " +
+            "SELECT s.id, s.run_uid, s.type, s.status, s.started_at, s.total_distance_m, s.exported_at, " +
                 "COUNT(g.id) AS gps_count FROM recording_session s LEFT JOIN gps_point g ON g.session_id=s.id " +
                 "GROUP BY s.id ORDER BY s.started_at DESC"
         ).use { c ->
             buildList {
-                while (c.moveToNext()) add(ExportRunListItem(c.long("id"), c.string("type"), c.string("status"),
+                while (c.moveToNext()) add(ExportRunListItem(c.long("id"), c.nullString("run_uid"), c.string("type"), c.string("status"),
                     c.long("started_at"), c.nullDouble("total_distance_m"), c.int("gps_count"), c.nullLong("exported_at")))
             }
         }
@@ -190,6 +198,25 @@ class ExportRunUseCase(
     suspend fun export(uri: Uri, sessionIds: Set<Long>): ExportRunResult = withContext(Dispatchers.IO) {
         require(sessionIds.isNotEmpty()) { "選んでください" }
         val producedAt = now()
+        val writableDb = database.openHelper.writableDatabase
+        writableDb.beginTransaction()
+        try {
+            sessionIds.forEach { id ->
+                val existing = writableDb.query(
+                    "SELECT run_uid FROM recording_session WHERE id=?", arrayOf(id.toString())
+                ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+                val uid = runUidOrGenerate(existing, runUid())
+                writableDb.execSQL(
+                    "UPDATE recording_session SET run_uid=? WHERE id=? AND run_uid IS NULL",
+                    arrayOf(uid, id),
+                )
+            }
+            writableDb.setTransactionSuccessful()
+        } finally {
+            writableDb.endTransaction()
+        }
+        // run_uid は不変の識別子なので、ファイル書き込みに失敗しても値が残ってよい。
+        // 一方 exported_at は「書き出し成功」の印なので、従来どおり成功後に更新する。
         val runs = sessionIds.sorted().mapNotNull(::loadRun)
         val file = IsRunFile(IsRunManifest(producedAtEpochMs = producedAt, runCount = runs.size), runs)
         try {
@@ -216,8 +243,12 @@ class ExportRunUseCase(
 
     private fun loadRun(id: Long): IsRunRun? {
         val db = database.openHelper.readableDatabase
-        val session = db.query("SELECT * FROM recording_session WHERE id=?", arrayOf(id.toString())).use { c ->
-            if (!c.moveToFirst()) null else IsRunRun(c.long("id"), c.string("type"), c.string("status"), c.long("started_at"),
+        val session = db.query(
+            "SELECT id, run_uid, type, status, started_at, ended_at, device_model, total_distance_m " +
+                "FROM recording_session WHERE id=?",
+            arrayOf(id.toString()),
+        ).use { c ->
+            if (!c.moveToFirst()) null else IsRunRun(c.long("id"), c.string("run_uid"), c.string("type"), c.string("status"), c.long("started_at"),
                 c.nullLong("ended_at"), c.nullString("device_model"), c.nullDouble("total_distance_m"), emptyList(), emptyList(), emptyList())
         } ?: return null
         val gps = db.query("SELECT ts_epoch_ms, lat, lon, accuracy_m FROM gps_point WHERE session_id=? ORDER BY seq", arrayOf(id.toString())).use { c ->

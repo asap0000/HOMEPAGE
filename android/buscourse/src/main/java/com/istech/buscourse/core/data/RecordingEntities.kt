@@ -61,6 +61,14 @@ data class RecordingSessionEntity(
      * **後任がここを見て「日時があるなら出そう」と拡張しないこと。**
      */
     @ColumnInfo(name = "exported_at") val exportedAt: Long? = null,
+    /**
+     * 走行を端末をまたいで一意に指す識別子（version 23）。UUID。
+     * 新規の走行は記録開始時に生成し、既存の走行は初回の EX用書き出し時に生成して保存する（`exported_at` と同型の遅延書き込み）。
+     * 一度書いたら不変——`recording_session.id` は端末内の連番で DB を作り直すと振り直されるため、
+     * EX 側の出所（source_id）にはこちらを使う（Windows 実測で id は176本の走行に対し30種類しかなく14件が衝突していた）。
+     * 画面には出さない。
+     */
+    @ColumnInfo(name = "run_uid") val runUid: String? = null,
 )
 
 /**
