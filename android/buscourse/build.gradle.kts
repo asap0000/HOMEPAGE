@@ -77,6 +77,19 @@ android {
             signingConfig = signingConfigs.getByName("debug")
             versionNameSuffix = "-field"
         }
+        // 検査場（kensa 席）が使う検査専用ビルド（2026-09-09追加）。applicationIdSuffix = ".kensa" を必ず付ける。
+        // field/release は suffix 無し＝実データ側なので、suffix を外すと上のコメントにある14,600枚の事故の再演になる。
+        // initWith(release) の理由：検査は実際に配る形に近いビルド（非 debuggable）で行う。PrivacyCamera の kensa と同じ設計思想。
+        // ★署名が PrivacyCamera と違う理由：あちらは専用 keystore が無ければ unsigned にして「インストールできない」を望む失敗にしている。
+        //   これは配布鍵で検査ビルドに署名してしまう混同を防ぐため。BusCourse には配布鍵（release keystore）がそもそも無いので、
+        //   その混同は起き得ず、debug 署名で足りる。⚠ 将来 release keystore を用意したら、この行を PrivacyCamera 型（専用 kensa keystore・無ければ unsigned）へ見直すこと。
+        // isMinifyEnabled は release を写すので現状 false（R8 は効かない）。検査場へは「PrivacyCamera 型の R8 前提はそのまま成立しない」と伝え済み。
+        create("kensa") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".kensa"
+            versionNameSuffix = "-kensa"
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {
