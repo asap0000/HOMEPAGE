@@ -91,6 +91,16 @@ import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
 import com.istech.buscourse.navimap.NaviMapRepository
 import com.istech.buscourse.navimap.NaviOrientation
+import com.istech.buscourse.navimap.NaviRenderMath
+import com.istech.buscourse.navimap.NAVI_APPROACH_LAYER_ID
+import com.istech.buscourse.navimap.NAVI_APPROACH_LINE_COLOR_HEX
+import com.istech.buscourse.navimap.NAVI_APPROACH_SOURCE_ID
+import com.istech.buscourse.navimap.NAVI_PASSED_LAYER_ID
+import com.istech.buscourse.navimap.NAVI_PASSED_LINE_COLOR_HEX
+import com.istech.buscourse.navimap.NAVI_PASSED_SOURCE_ID
+import com.istech.buscourse.navimap.NAVI_ROUTE_LINE_COLOR_HEX
+import com.istech.buscourse.navimap.RouteLineGroups
+import com.istech.buscourse.navimap.splitRouteLines
 import com.istech.buscourse.navimap.toCameraPosition
 import java.io.File
 import kotlin.math.max
@@ -104,8 +114,29 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 
-/** 経路線の色（[RouteMapScreen]と同じブランド青、[ROUTE_LINE_COLOR_HEX]相当をこのファイルでも定義）。 */
-private const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
+/** 増分Mの3群を、実地図と同じ重なり順で描き直す。 */
+private suspend fun showNaviRouteLineGroups(
+    context: Context,
+    database: BusCourseDatabase,
+    style: Style,
+    lines: RouteLineGroups,
+) {
+    for ((sourceId, layerId) in listOf(
+        NAVI_PASSED_SOURCE_ID to NAVI_PASSED_LAYER_ID,
+        NAVI_APPROACH_SOURCE_ID to NAVI_APPROACH_LAYER_ID,
+        "route-line-source" to "route-line-layer",
+    )) {
+        if (style.getLayer(layerId) != null) style.removeLayer(layerId)
+        if (style.getSource(sourceId) != null) style.removeSource(sourceId)
+    }
+    val overlay = RouteTrackOverlay(context, database, style)
+    // ★これから走る線をいちばん上に置くため、通過済み → 助走 → 案内中の順で登録する。
+    // 巡回ルートでは同じ道の上に1周目（灰）と2周目（青）が重なるので、順序を間違えると
+    // これから走る道が灰色に隠れる。
+    overlay.showRouteMultiLine(lines.passed, NAVI_PASSED_LINE_COLOR_HEX, NAVI_PASSED_SOURCE_ID, NAVI_PASSED_LAYER_ID)
+    overlay.showRouteMultiLine(lines.approach, NAVI_APPROACH_LINE_COLOR_HEX, NAVI_APPROACH_SOURCE_ID, NAVI_APPROACH_LAYER_ID)
+    overlay.showRouteMultiLine(lines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
+}
 
 private const val TRACK_KIND = "TRACK"
 
@@ -349,6 +380,7 @@ private fun NaviMapContent(
     }
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
+    var routeStyle by remember { mutableStateOf<Style?>(null) }
     var stopSymbolOverlay by remember { mutableStateOf<StopSymbolOverlay?>(null) }
     var gnssAdapter by remember { mutableStateOf<GnssBackedLocationEngineAdapter?>(null) }
     var tappedStopNumber by remember { mutableStateOf<Int?>(null) }
@@ -387,6 +419,7 @@ private fun NaviMapContent(
     var orientation by remember { mutableStateOf(NaviOrientation.NORTH_UP) }
     var maxChainageM by remember { mutableFloatStateOf(0f) }
     var chainageM by remember { mutableFloatStateOf(0f) }
+    var guidanceChainageRange by remember { mutableStateOf<ClosedFloatingPointRange<Double>?>(null) }
 
     // (c3) 表示モード・分割比率。App実行時state限定（orientation/basePitchDegと同じく永続化しない）。
     var layoutMode by remember { mutableStateOf(NaviLayoutMode.SPLIT_MAP_TOP) }
@@ -402,6 +435,7 @@ private fun NaviMapContent(
     val map = mapLibreMap
     LaunchedEffect(map, pkg.regionId, mapId) {
         if (map == null) return@LaunchedEffect
+        routeStyle = null
         val styleFile = BusCourseStorage.resolve(context, pkg.styleRelPath)
         map.setStyle(Style.Builder().fromUri("file://${styleFile.absolutePath}")) { style ->
             val packageBounds = LatLngBounds.Builder()
@@ -412,6 +446,7 @@ private fun NaviMapContent(
             // ピンチ上限は maxzoom でなく overzoom 上限まで許す（MVT ゆえ拡大しても鮮明・ピンの死角低減）。
             // maxzoom が既に上限を超える高精細パッケージではその maxzoom を優先する。
             map.setMaxZoomPreference(maxOf(pkg.maxzoom.toDouble(), NAVI_OVERZOOM_CEILING))
+            routeStyle = style
 
             scope.launch {
                 val dao = database.naviMapDao()
@@ -421,24 +456,6 @@ private fun NaviMapContent(
                     .filter { it.kind == TRACK_KIND }
                     .associate { segment -> segment.id to dao.getTrackPoints(segment.id).sortedBy { it.seq } }
                 val events = dao.getEvents(mapId)
-
-                // 経路線: 連続するTRACK群をGAPで区切り、複数ポリラインとして描く。全TRACK点を1本に
-                // 連結するとGAPを跨ぐTRACK終端どうしが直線で結ばれ「地図の穴」が線で埋まってしまうため、
-                // GAPが入るたびに区間を切る（GAP区間には線を引かない＝「100%地図」区間）。
-                val trackLines = buildList<List<Pair<Double, Double>>> {
-                    var current = mutableListOf<Pair<Double, Double>>()
-                    for (segment in loadedSegments) {
-                        if (segment.kind == TRACK_KIND) {
-                            current += loadedTrackPointsBySegmentId[segment.id].orEmpty().map { it.lat to it.lon }
-                        } else if (current.isNotEmpty()) {
-                            add(current.toList())
-                            current = mutableListOf()
-                        }
-                    }
-                    if (current.isNotEmpty()) add(current.toList())
-                }
-                RouteTrackOverlay(context, database, style)
-                    .showRouteMultiLine(trackLines, NAVI_ROUTE_LINE_COLOR_HEX)
 
                 // 停留所マーカー: chainage昇順のevent、座標はNaviCameraで解決。停留所名は出さない
                 // （PII、順序番号のみ）。
@@ -495,8 +512,27 @@ private fun NaviMapContent(
                 chainageM = 0f
                 trackPointsBySegmentId = loadedTrackPointsBySegmentId
                 segments = loadedSegments
+                guidanceChainageRange = NaviRenderMath.guidanceChainageRange(
+                    orderedEvents.map { it.chainageStartM },
+                )
             }
         }
+    }
+
+    LaunchedEffect(routeStyle, segments, trackPointsBySegmentId, guidanceChainageRange, chainageM) {
+        val style = routeStyle ?: return@LaunchedEffect
+        if (segments.isEmpty()) return@LaunchedEffect
+        showNaviRouteLineGroups(
+            context = context,
+            database = database,
+            style = style,
+            lines = splitRouteLines(
+                segments = segments,
+                trackPointsBySegmentId = trackPointsBySegmentId,
+                guidanceChainageRange = guidanceChainageRange,
+                currentChainageM = chainageM.toDouble(),
+            ),
+        )
     }
 
     // chainage/orientationが変わるたびにカメラを即時反映する（アニメーションなし）。初期カメラ

@@ -29,7 +29,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -314,10 +313,14 @@ private fun buildPreviewRouteData(): NaviRouteData {
 // ---------------------------------------------------------------------------------------------
 
 /** 経路線の色（[com.istech.buscourse.ui.NaviScreen]と同じブランド青）。 */
-private const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
-private const val NAVI_APPROACH_LINE_COLOR_HEX = "#9DB4EE"
-private const val NAVI_APPROACH_SOURCE_ID = "navi-approach-line-source"
-private const val NAVI_APPROACH_LAYER_ID = "navi-approach-line-layer"
+// ★[com.istech.buscourse.ui.NaviScreen]（ナビ確認画面）からも参照する共有定数（増分M で共通化）。色を変えるときはここだけを直せば両方の画面に効く——以前は同じ定数が両ファイルに重複しており、片方だけ直すと見え方が割れる状態だった。
+internal const val NAVI_ROUTE_LINE_COLOR_HEX = "#3366FF"
+internal const val NAVI_APPROACH_LINE_COLOR_HEX = "#9DB4EE"
+internal const val NAVI_PASSED_LINE_COLOR_HEX = "#B6BCC8"
+internal const val NAVI_PASSED_SOURCE_ID = "navi-passed-line-source"
+internal const val NAVI_PASSED_LAYER_ID = "navi-passed-line-layer"
+internal const val NAVI_APPROACH_SOURCE_ID = "navi-approach-line-source"
+internal const val NAVI_APPROACH_LAYER_ID = "navi-approach-line-layer"
 
 /**
  * 映像オーバーレイと「実機ナビ画面枠」の角丸フレームが干渉しないための、四辺共通のわずかな余白
@@ -388,6 +391,7 @@ private fun NaviRendererBody(
                 NaviRendererPreviewGridStage(
                     routeData = routeData,
                     settings = settings,
+                    chainageM = chainageM,
                     naviOrientation = naviOrientation,
                     stageWidthPx = stageWidthPx,
                     stageHeightPx = stageHeightPx,
@@ -508,23 +512,26 @@ private fun naviSkyBrush(skyAlpha: Float, theme: NaviTheme): Brush {
     )
 }
 
-private data class RouteLineGroups(
+internal data class RouteLineGroups(
+    val passed: List<List<Pair<Double, Double>>>,
     val approach: List<List<Pair<Double, Double>>>,
     val guidance: List<List<Pair<Double, Double>>>,
 )
 
 /** GAPを保ったまま、停留所範囲の境界点を線形補間して両側の線に共有させる。 */
-private fun splitRouteLines(
-    routeData: NaviRouteData,
+internal fun splitRouteLines(
+    segments: List<NaviSegmentEntity>,
+    trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
+    guidanceChainageRange: ClosedFloatingPointRange<Double>?,
+    currentChainageM: Double,
 ): RouteLineGroups {
-    val range = routeData.guidanceChainageRange
     // ★連続する TRACK は1本に連結し、GAP でだけ切る（増分D 以前の挙動を保つ）。
     // TRACK ごとに分けると、GAP を挟まず隣接する TRACK の間に線が引かれず ex_full で途切れる。
     val tracks = buildList<List<NaviTrackPointEntity>> {
         var current = mutableListOf<NaviTrackPointEntity>()
-        for (segment in routeData.segments.sortedBy { it.seq }) {
+        for (segment in segments.sortedBy { it.seq }) {
             if (segment.kind == TRACK_KIND) {
-                current += routeData.trackPointsBySegmentId[segment.id].orEmpty()
+                current += trackPointsBySegmentId[segment.id].orEmpty()
                     .sortedBy { point -> point.chainageM }
             } else if (current.isNotEmpty()) {
                 add(current.toList())
@@ -533,10 +540,6 @@ private fun splitRouteLines(
         }
         if (current.isNotEmpty()) add(current.toList())
     }
-    if (range == null) {
-        return RouteLineGroups(emptyList(), tracks.map { line -> line.map { it.lat to it.lon } })
-    }
-
     fun clipped(
         points: List<NaviTrackPointEntity>,
         lower: Double,
@@ -562,10 +565,39 @@ private fun splitRouteLines(
         return result
     }
 
-    val before = tracks.map { clipped(it, Double.NEGATIVE_INFINITY, range.start) }.filter { it.size >= 2 }
-    val guidance = tracks.map { clipped(it, range.start, range.endInclusive) }.filter { it.size >= 2 }
-    val after = tracks.map { clipped(it, range.endInclusive, Double.POSITIVE_INFINITY) }.filter { it.size >= 2 }
-    return RouteLineGroups(before + after, guidance)
+    fun linesFor(phase: RoutePhase): List<List<Pair<Double, Double>>> =
+        NaviRenderMath.routePhaseRanges(guidanceChainageRange, currentChainageM)
+            .getValue(phase)
+            .flatMap { range -> tracks.map { clipped(it, range.start, range.endInclusive) } }
+            .filter { it.size >= 2 }
+
+    return RouteLineGroups(
+        passed = linesFor(RoutePhase.PASSED),
+        approach = linesFor(RoutePhase.APPROACH),
+        guidance = linesFor(RoutePhase.GUIDANCE),
+    )
+}
+
+/** 3群の既存レイヤを外し、常に増分Mの重なり順で描き直す。 */
+private suspend fun showRouteLineGroups(
+    overlay: RouteTrackOverlay,
+    style: Style,
+    lines: RouteLineGroups,
+) {
+    for ((sourceId, layerId) in listOf(
+        NAVI_PASSED_SOURCE_ID to NAVI_PASSED_LAYER_ID,
+        NAVI_APPROACH_SOURCE_ID to NAVI_APPROACH_LAYER_ID,
+        "route-line-source" to "route-line-layer",
+    )) {
+        if (style.getLayer(layerId) != null) style.removeLayer(layerId)
+        if (style.getSource(sourceId) != null) style.removeSource(sourceId)
+    }
+    // ★これから走る線をいちばん上に置くため、通過済み → 助走 → 案内中の順で登録する。
+    // 巡回ルートでは同じ道の上に1周目（灰）と2周目（青）が重なるので、順序を間違えると
+    // これから走る道が灰色に隠れる。
+    overlay.showRouteMultiLine(lines.passed, NAVI_PASSED_LINE_COLOR_HEX, NAVI_PASSED_SOURCE_ID, NAVI_PASSED_LAYER_ID)
+    overlay.showRouteMultiLine(lines.approach, NAVI_APPROACH_LINE_COLOR_HEX, NAVI_APPROACH_SOURCE_ID, NAVI_APPROACH_LAYER_ID)
+    overlay.showRouteMultiLine(lines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
 }
 
 /**
@@ -591,9 +623,9 @@ private fun NaviRendererMapStage(
     selfFix: NaviSelfFix? = null,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
+    var routeStyle by remember { mutableStateOf<Style?>(null) }
     var pinScreenPositions by remember { mutableStateOf<Map<Int, Offset>>(emptyMap()) }
     // ★スタイル読み込み完了フラグ（増分P4b-3 バグ1修正）。理由は下のLaunchedEffect(map, pkg.regionId)の
     // コメント参照。カメラ（tilt含む）を「スタイル読み込み完了後にもう一度」確実に当て直すためのトリガー。
@@ -623,6 +655,7 @@ private fun NaviRendererMapStage(
     val map = mapLibreMap
     LaunchedEffect(map, pkg.regionId) {
         if (map == null) return@LaunchedEffect
+        routeStyle = null
         // 傾きスライダー（settings.tiltDeg）が唯一のtilt操作元。二本指ジェスチャは止める（P1 POC踏襲）。
         // ★地図の位置・向き・傾きは「設定と自車」だけが決める（設計 §5「自車＝地図の原点」）。
         // 指で地図だけを動かせると自車マーカーが画面上に取り残され、**原点という不変条件が壊れる**
@@ -646,20 +679,7 @@ private fun NaviRendererMapStage(
             map.setLatLngBoundsForCameraTarget(bounds)
             map.setMaxZoomPreference(maxOf(pkg.maxzoom.toDouble(), NAVI_RENDERER_OVERZOOM_CEILING))
 
-            val trackLines = splitRouteLines(routeData)
-            val overlay = RouteTrackOverlay(context, database, style)
-            // Style.OnStyleLoadedコールバックはsuspendでないため、別途起動したscopeでDB非依存の
-            // suspend関数を呼ぶ（[com.istech.buscourse.ui.NaviScreen]と同じ流儀）。
-            scope.launch {
-                // MapLibreは追加順で上に重なるため、助走を先に登録する。
-                overlay.showRouteMultiLine(
-                    trackLines.approach,
-                    NAVI_APPROACH_LINE_COLOR_HEX,
-                    NAVI_APPROACH_SOURCE_ID,
-                    NAVI_APPROACH_LAYER_ID,
-                )
-                overlay.showRouteMultiLine(trackLines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
-            }
+            routeStyle = style
 
             // ★バグ1修正（増分P4b-3）: 下のカメラ適用LaunchedEffectは`map`が出来た直後、
             // つまりこのスタイル読み込み（非同期コールバック）が完了する**前**に一度走る
@@ -674,6 +694,20 @@ private fun NaviRendererMapStage(
             // 現在のtiltを含むカメラ状態を最後に勝たせる（同じ値の再適用は無害・冪等）。
             styleLoaded = true
         }
+    }
+
+    LaunchedEffect(routeStyle, routeData, chainageM) {
+        val style = routeStyle ?: return@LaunchedEffect
+        showRouteLineGroups(
+            overlay = RouteTrackOverlay(context, database, style),
+            style = style,
+            lines = splitRouteLines(
+                segments = routeData.segments,
+                trackPointsBySegmentId = routeData.trackPointsBySegmentId,
+                guidanceChainageRange = routeData.guidanceChainageRange,
+                currentChainageM = chainageM.toDouble(),
+            ),
+        )
     }
 
     // 傾き（native部分）・向き・chainageの変化に応じてカメラを即時反映する（アニメーションなし）。
@@ -922,6 +956,7 @@ private fun NaviRendererMapStage(
                     cellPx = gridCellPx,
                     routePoints = gridRoutePoints,
                     guidanceRange = routeData.guidanceChainageRange,
+                    currentChainageM = chainageM.toDouble(),
                     theme = settings.theme,
                 )
             }
@@ -999,6 +1034,7 @@ private fun NaviRendererMapStage(
             selfCarAnchorPx = selfCarDisplayPx,
             selfCarRotationDeg = selfCarRotationDeg,
             theme = settings.theme,
+            currentChainageM = chainageM.toDouble(),
             // 変形の外に居るので逆回転は不要（掛けると二重に傾く）。
             counterRotationXDeg = 0f,
             stageWidthPx = stageWidthPx,
@@ -1102,6 +1138,7 @@ private fun NaviRendererFallbackStage(
             selfCarAnchorPx = Offset(stageWidthPx * selfCarAnchor.xFraction, stageHeightPx * selfCarAnchor.yFraction),
             selfCarRotationDeg = (selfCarHeadingDeg - cameraBearingDeg).toFloat(),
             theme = settings.theme,
+            currentChainageM = chainageM.toDouble(),
             // フォールバックは台形変形を掛けていない（グリッド地面もピンも素の平面）ため逆回転は不要。
             counterRotationXDeg = 0f,
             stageWidthPx = stageWidthPx,
@@ -1288,11 +1325,13 @@ private const val PREVIEW_SELF_CAR_SHADOW_RADIUS_FRACTION = 0.013f
  * - **昼夜**: グリッド地面・線の配色を`settings.theme`で直接切り替える（Compose標準の
  *   `MaterialTheme.colorScheme`はシステムのライト/ダークに従ってしまい、アプリ内の昼夜設定と
  *   独立してしまうため使わない）。
+ * `chainageM` は通過済みのグレイアウト判定に使う（増分M）。設定画面のプレビューは合成ルートでスライダーを持たないため 0 が渡り、全区間が未通過（青）のまま表示される——これは意図した挙動。
  */
 @Composable
 private fun NaviRendererPreviewGridStage(
     routeData: NaviRouteData,
     settings: NaviSettingsEffective,
+    chainageM: Float,
     naviOrientation: NaviOrientation,
     stageWidthPx: Float,
     stageHeightPx: Float,
@@ -1395,6 +1434,7 @@ private fun NaviRendererPreviewGridStage(
             selfCarAnchorPx = originPx,
             selfCarRotationDeg = selfCarRotationDeg,
             theme = settings.theme,
+            currentChainageM = chainageM.toDouble(),
             // 地面の変形はもうグラフィックレイヤーではなく自前の射影計算なので、打ち消す逆回転は不要。
             counterRotationXDeg = 0f,
             pinScale = { sequenceIndex -> pinPlacements[sequenceIndex]?.scale ?: 1f },
@@ -1804,6 +1844,7 @@ private fun NaviPinAndSelfCarOverlay(
     selfCarAnchorPx: Offset,
     selfCarRotationDeg: Float,
     theme: NaviTheme,
+    currentChainageM: Double,
     /**
      * ステージ幅（px）。停留所ラベルが枠の右端／左端で切れないよう水平位置をクランプするために使う
      * （★第5ラウンド是正・差し戻し2）。停留所そのもの（接地点＝[pinScreenPositions]）は動かさない。
@@ -1855,6 +1896,7 @@ private fun NaviPinAndSelfCarOverlay(
                 NaviBillboardPin(
                     label = label,
                     theme = theme,
+                    passed = stop.chainageM <= currentChainageM,
                     modifier = Modifier
                         .billboardScale(pinScale(stop.sequenceIndex))
                         .billboardCounterRotation(counterRotationXDeg),
@@ -1969,8 +2011,13 @@ private fun Density.selfCarTopLeftOffset(point: Offset): IntOffset {
  * §3-2「地図を動かさない」原則には抵触しない（幅は内容に応じて伸びてよい。高さのみ固定）。
  */
 @Composable
-private fun NaviBillboardPin(label: String, theme: NaviTheme, modifier: Modifier = Modifier) {
-    val (bg, fg) = pinColors(theme)
+private fun NaviBillboardPin(
+    label: String,
+    theme: NaviTheme,
+    passed: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val (bg, fg) = pinColors(theme, passed)
     Box(
         modifier = modifier
             .height(PIN_SIZE_DP)
@@ -2080,6 +2127,7 @@ private val GRID_LINE_DAY = Color(0xFFD9D3C6)
 private val GRID_LINE_NIGHT = Color(0xFF243044)
 private val GRID_ROUTE_GUIDANCE = Color(0xFF3366FF)
 private val GRID_ROUTE_APPROACH = Color(0xFF9DB4EE)
+private val GRID_ROUTE_PASSED = Color(0xFFB6BCC8)
 
 /** グリッド帯の線数の上限（SHG12 の ANR 教訓＝投影ループ自体を固定上限で縛る）。 */
 private const val GRID_MAX_LINES = 36
@@ -2097,6 +2145,7 @@ private fun DrawScope.drawNaviGridBand(
     cellPx: Float,
     routePoints: List<Triple<Float, Float, Double>>,
     guidanceRange: ClosedFloatingPointRange<Double>?,
+    currentChainageM: Double,
     theme: NaviTheme,
 ) {
     val horizonOffset = NaviRenderMath.previewGroundHorizonOffsetY(tiltDeg, cameraDistancePx) ?: return
@@ -2175,10 +2224,10 @@ private fun DrawScope.drawNaviGridBand(
             val p0 = project(l0, d0)
             val p1 = project(l1, d1)
             val midChainage = (c0 + c1) / 2.0
-            val color = if (guidanceRange != null && midChainage in guidanceRange) {
-                GRID_ROUTE_GUIDANCE
-            } else {
-                GRID_ROUTE_APPROACH
+            val color = when {
+                midChainage <= currentChainageM -> GRID_ROUTE_PASSED
+                guidanceRange != null && midChainage in guidanceRange -> GRID_ROUTE_GUIDANCE
+                else -> GRID_ROUTE_APPROACH
             }
             drawLine(
                 color,
@@ -2286,9 +2335,11 @@ private fun NaviSelfCarMarker(rotationDeg: Float, theme: NaviTheme, modifier: Mo
     }
 }
 
-private fun pinColors(theme: NaviTheme): Pair<Color, Color> = when (theme) {
-    NaviTheme.DAY -> Color(0xFF3366FF) to Color.White
-    NaviTheme.NIGHT -> Color(0xFF1B2A4A) to Color(0xFFFFD166)
+private fun pinColors(theme: NaviTheme, passed: Boolean = false): Pair<Color, Color> = when {
+    passed && theme == NaviTheme.DAY -> Color(0xFFB6BCC8) to Color.White
+    passed && theme == NaviTheme.NIGHT -> Color(0xFF3A4152) to Color(0xFF9AA3B4)
+    theme == NaviTheme.DAY -> Color(0xFF3366FF) to Color.White
+    else -> Color(0xFF1B2A4A) to Color(0xFFFFD166)
 }
 
 /**

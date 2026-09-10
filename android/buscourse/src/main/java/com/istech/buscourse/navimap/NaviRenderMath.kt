@@ -4,6 +4,9 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+/** 経路線の段階（表示の色分け・増分M）。 */
+enum class RoutePhase { PASSED, APPROACH, GUIDANCE }
+
 /**
  * [NaviRenderer]が使う純計算だけを集めたobject（Android/Compose非依存・JVM上でRobolectric無しに
  * 単体テスト可能）。「傾きから native tilt と extraRotation への分配」「映像サイズ計算」
@@ -107,6 +110,40 @@ object NaviRenderMath {
     fun guidanceChainageRange(chainagesM: List<Double?>): ClosedFloatingPointRange<Double>? {
         val finite = chainagesM.filterNotNull().filter { it.isFinite() }
         return finite.minOrNull()?.let { it..finite.maxOrNull()!! }
+    }
+
+    /**
+     * chainage 軸を「通過済み／助走／案内中」の区間へ切る（増分M）。
+     * 返す各区間は [start, endInclusive] の閉区間で、start <= endInclusive のものだけを含む。
+     */
+    fun routePhaseRanges(
+        guidanceRange: ClosedFloatingPointRange<Double>?,
+        currentChainageM: Double,
+    ): Map<RoutePhase, List<ClosedFloatingPointRange<Double>>> {
+        val passed = if (currentChainageM > 0.0) {
+            listOf(Double.NEGATIVE_INFINITY..currentChainageM)
+        } else {
+            emptyList()
+        }
+        if (guidanceRange == null) {
+            return mapOf(
+                RoutePhase.PASSED to passed,
+                RoutePhase.APPROACH to emptyList(),
+                RoutePhase.GUIDANCE to listOf(currentChainageM..Double.POSITIVE_INFINITY),
+            )
+        }
+
+        fun rangeOrEmpty(start: Double, end: Double): List<ClosedFloatingPointRange<Double>> =
+            if (start <= end) listOf(start..end) else emptyList()
+
+        val guidance = rangeOrEmpty(maxOf(currentChainageM, guidanceRange.start), guidanceRange.endInclusive)
+        val approachBefore = rangeOrEmpty(currentChainageM, guidanceRange.start)
+        val approachAfter = rangeOrEmpty(maxOf(currentChainageM, guidanceRange.endInclusive), Double.POSITIVE_INFINITY)
+        return mapOf(
+            RoutePhase.PASSED to passed,
+            RoutePhase.APPROACH to approachBefore + approachAfter,
+            RoutePhase.GUIDANCE to guidance,
+        )
     }
 
     /** MapLibre native tilt の上限（SDK上限。設計 §2）。 */

@@ -5,6 +5,46 @@ import org.junit.Test
 
 class NaviRenderMathTest {
 
+    // --- 増分M: 通過済み／助走／案内中の距離程分割 ---
+
+    @Test fun routePhaseRanges_atStart_keepsExistingGuidanceAndApproach() {
+        val ranges = NaviRenderMath.routePhaseRanges(100.0..200.0, currentChainageM = 0.0)
+
+        assertThat(ranges.getValue(RoutePhase.PASSED)).isEmpty()
+        assertThat(ranges.getValue(RoutePhase.GUIDANCE)).containsExactly(100.0..200.0)
+        assertThat(ranges.getValue(RoutePhase.APPROACH)).containsExactly(0.0..100.0, 200.0..Double.POSITIVE_INFINITY)
+    }
+
+    @Test fun routePhaseRanges_duringGuidance_marksEverythingBeforeNowAsPassed() {
+        val ranges = NaviRenderMath.routePhaseRanges(100.0..200.0, currentChainageM = 150.0)
+
+        assertThat(ranges.getValue(RoutePhase.PASSED)).containsExactly(Double.NEGATIVE_INFINITY..150.0)
+        assertThat(ranges.getValue(RoutePhase.GUIDANCE)).containsExactly(150.0..200.0)
+        assertThat(ranges.getValue(RoutePhase.APPROACH)).containsExactly(200.0..Double.POSITIVE_INFINITY)
+    }
+
+    @Test fun routePhaseRanges_afterGuidance_hasNoGuidanceRange() {
+        val ranges = NaviRenderMath.routePhaseRanges(100.0..200.0, currentChainageM = 250.0)
+
+        assertThat(ranges.getValue(RoutePhase.PASSED)).containsExactly(Double.NEGATIVE_INFINITY..250.0)
+        assertThat(ranges.getValue(RoutePhase.GUIDANCE)).isEmpty()
+        assertThat(ranges.getValue(RoutePhase.APPROACH)).containsExactly(250.0..Double.POSITIVE_INFINITY)
+    }
+
+    @Test fun routePhaseRanges_withoutStops_usesGuidanceFromCurrentPosition() {
+        val ranges = NaviRenderMath.routePhaseRanges(guidanceRange = null, currentChainageM = 80.0)
+
+        assertThat(ranges.getValue(RoutePhase.PASSED)).containsExactly(Double.NEGATIVE_INFINITY..80.0)
+        assertThat(ranges.getValue(RoutePhase.APPROACH)).isEmpty()
+        assertThat(ranges.getValue(RoutePhase.GUIDANCE)).containsExactly(80.0..Double.POSITIVE_INFINITY)
+    }
+
+    @Test fun routePhaseRanges_neverReturnsAnInvertedRange() {
+        val ranges = NaviRenderMath.routePhaseRanges(100.0..200.0, currentChainageM = 250.0)
+
+        assertThat(ranges.values.flatten().all { it.start <= it.endInclusive }).isTrue()
+    }
+
     /**
      * 増分D must3 の受け皿＝三角は縁に置くので、ラベルは辺に応じて内側へ逃がす。
      * どの辺にも接していないとき（始点が縁へクランプされ交点＝始点になる真正面のケース）は下向き。
