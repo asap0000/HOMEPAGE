@@ -431,6 +431,8 @@ private fun NaviMapContent(
     // 線・ラベルは鮮明なまま拡大でき、停留所ピン（画面ピクセル固定）に対して地図が相対的に大きくなり
     // 死角が減る（オーナー要望 2026-07-24）。maxzoom で切り下げず既定値をそのまま使う。
     val naviZoom = DEFAULT_NAVI_ZOOM
+    // ★増分N: 利用者がピンチで変えた縮尺を、自車の追従で毎秒上書きしないための一度きりの初期化。
+    var zoomInitialized by remember { mutableStateOf(false) }
 
     val map = mapLibreMap
     LaunchedEffect(map, pkg.regionId, mapId) {
@@ -543,7 +545,17 @@ private fun NaviMapContent(
         NaviCamera.cameraStateAtChainageM(
             segments, trackPointsBySegmentId, chainageM.toDouble(),
             orientation, basePitchDeg, naviZoom,
-        )?.let { state -> currentMap.cameraPosition = state.toCameraPosition() }
+        )?.let { state ->
+            // ★カメラを丸ごと代入すると、利用者が触った成分まで一緒に戻る——増分Hでpaddingが毎回
+            // 上書きされていたのと同じ形。zoomだけは地図側の現在値を正とする。
+            val zoomToApply = NaviRenderMath.cameraZoomToApply(
+                initialized = zoomInitialized,
+                currentMapZoom = currentMap.cameraPosition.zoom,
+                defaultZoom = naviZoom,
+            )
+            currentMap.cameraPosition = state.copy(zoomLevel = zoomToApply).toCameraPosition()
+            zoomInitialized = true
+        }
     }
 
     // (c3) chainageスクラブに連動して映像フレームを解決する。cueが引けない（route_point由来の

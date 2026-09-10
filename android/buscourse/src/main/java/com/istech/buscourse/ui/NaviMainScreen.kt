@@ -104,6 +104,9 @@ fun NaviMainScreen(
     // 走行追従の状態（設計§5-1の3状態モデル。追従⇔プレビューの切替はNaviMainFollowStateの
     // 純関数で行う＝ロジックをComposableから追い出してテスト可能にする）。
     var followState by remember(courseId) { mutableStateOf(NaviMainFollowState()) }
+    // ★同じボタンを2回押しても再び発火させるため真偽値でなくカウンタにする。真偽値だと「戻す」を
+    // 立てたあと下ろす後始末が要り、下ろし忘れると次のカメラ適用で毎回リセットされる（＝増分Nが無意味になる）。
+    var resetZoomSignal by remember(courseId) { mutableStateOf(0) }
 
     LaunchedEffect(courseId) {
         val identity = database.courseDao().getById(courseId)?.identityOrNull()
@@ -219,6 +222,7 @@ fun NaviMainScreen(
                         followState.selfLon?.let { lon -> NaviSelfFix(lat, lon, followState.selfHeadingDeg) }
                     },
                     onCourse = followState.onCourse,
+                    resetZoomSignal = resetZoomSignal,
                     modifier = Modifier.fillMaxSize(),
                 )
 
@@ -234,6 +238,7 @@ fun NaviMainScreen(
                             ).show()
                         } else {
                             followState = naviMainRecenter(followState)
+                            resetZoomSignal += 1
                         }
                     },
                     modifier = Modifier.align(Alignment.BottomEnd)

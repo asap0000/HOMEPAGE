@@ -104,6 +104,7 @@ import org.maplibre.android.maps.Style
  *   DB非依存な合成サンプル。
  * @param chainageM 現在位置＝距離程。本画面は距離スライダー、プレビューは固定値を渡す想定。
  * @param settings 運転者設定の実効値（[NaviSettingsEffective]、P2実装済み）。DataStoreは読まない。
+ * @param resetZoomSignal 現在地ボタンによる既定縮尺への復帰要求。繰り返し要求を区別するカウンタ。
  */
 @Composable
 fun NaviRenderer(
@@ -112,6 +113,7 @@ fun NaviRenderer(
     settings: NaviSettingsEffective,
     selfFix: NaviSelfFix? = null,
     onCourse: Boolean = true,
+    resetZoomSignal: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -147,6 +149,7 @@ fun NaviRenderer(
         routeData = data,
         selfFix = selfFix,
         onCourse = onCourse,
+        resetZoomSignal = resetZoomSignal,
     )
 }
 
@@ -370,6 +373,7 @@ private fun NaviRendererBody(
     routeData: NaviRouteData,
     selfFix: NaviSelfFix?,
     onCourse: Boolean,
+    resetZoomSignal: Int,
 ) {
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val naviOrientation = when (settings.orientation) {
@@ -421,6 +425,7 @@ private fun NaviRendererBody(
                     stageHeightPx = stageHeightPx,
                     modifier = Modifier.fillMaxSize(),
                     selfFix = selfFix,
+                    resetZoomSignal = resetZoomSignal,
                 )
             }
 
@@ -621,6 +626,7 @@ private fun NaviRendererMapStage(
     stageHeightPx: Float,
     modifier: Modifier = Modifier,
     selfFix: NaviSelfFix? = null,
+    resetZoomSignal: Int,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -630,6 +636,8 @@ private fun NaviRendererMapStage(
     // ★スタイル読み込み完了フラグ（増分P4b-3 バグ1修正）。理由は下のLaunchedEffect(map, pkg.regionId)の
     // コメント参照。カメラ（tilt含む）を「スタイル読み込み完了後にもう一度」確実に当て直すためのトリガー。
     var styleLoaded by remember { mutableStateOf(false) }
+    // ★増分N: 利用者がピンチで変えた縮尺を、自車の追従で毎秒上書きしないための一度きりの初期化。
+    var zoomInitialized by remember { mutableStateOf(false) }
 
     val mapView = remember { MapView(context).apply { onCreate(null) } }
 
@@ -732,6 +740,10 @@ private fun NaviRendererMapStage(
         )
     }
 
+    LaunchedEffect(resetZoomSignal) {
+        if (resetZoomSignal > 0) zoomInitialized = false
+    }
+
     fun recomputePinScreenPositions() {
         val currentMap = map ?: return
         pinScreenPositions = routeData.stopPoints.associate { stop ->
@@ -743,14 +755,21 @@ private fun NaviRendererMapStage(
     // ★`styleLoaded`をキーに含める（バグ1修正・増分P4b-3）: スタイル読み込み完了後にもう一度
     // このブロックを走らせ、`setLatLngBoundsForCameraTarget`/`setMaxZoomPreference`より後にtilt込みの
     // カメラを最終適用として当て直す（値が同じなら単なる再適用で無害）。
-    LaunchedEffect(map, cameraState, cameraPadding, styleLoaded) {
+    LaunchedEffect(map, cameraState, cameraPadding, styleLoaded, resetZoomSignal) {
         if (map == null) return@LaunchedEffect
         // ★padding は CameraPosition に**同梱**する（2026-07-26 実機で判明）。
         // 以前は `map.setPadding(...)` の直後に padding を持たない CameraPosition を代入しており、
         // **後者が前者を毎回上書きして padding が消えていた**（＝自車だけ動いて地図が付いてこない＝
         // オーナーが「簡易表現」と明示的に否定した挙動）。詳細は [toCameraPosition] の KDoc。
         cameraState?.let {
-            map.cameraPosition = it.toCameraPosition(
+            // ★カメラを丸ごと代入すると、利用者が触った成分まで一緒に戻る——増分Hでpaddingが毎回
+            // 上書きされていたのと同じ形。zoomだけは地図側の現在値を正とする。
+            val zoomToApply = NaviRenderMath.cameraZoomToApply(
+                initialized = zoomInitialized,
+                currentMapZoom = map.cameraPosition.zoom,
+                defaultZoom = NAVI_RENDERER_ZOOM,
+            )
+            map.cameraPosition = it.copy(zoomLevel = zoomToApply).toCameraPosition(
                 NaviCameraPadding(
                     cameraPadding.left,
                     cameraPadding.top,
@@ -758,6 +777,7 @@ private fun NaviRendererMapStage(
                     cameraPadding.bottom,
                 ),
             )
+            zoomInitialized = true
         }
         recomputePinScreenPositions()
     }

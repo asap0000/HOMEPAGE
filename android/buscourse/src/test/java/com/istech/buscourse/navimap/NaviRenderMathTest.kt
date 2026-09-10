@@ -5,6 +5,23 @@ import org.junit.Test
 
 class NaviRenderMathTest {
 
+    // --- 増分N: ピンチした地図の縮尺を維持する ---
+
+    @Test fun cameraZoomToApply_beforeInitialization_returnsDefaultZoom() {
+        assertThat(NaviRenderMath.cameraZoomToApply(false, currentMapZoom = 14.0, defaultZoom = 16.0))
+            .isEqualTo(16.0)
+    }
+
+    @Test fun cameraZoomToApply_afterInitialization_returnsCurrentMapZoom() {
+        assertThat(NaviRenderMath.cameraZoomToApply(true, currentMapZoom = 17.25, defaultZoom = 16.0))
+            .isEqualTo(17.25)
+    }
+
+    @Test fun cameraZoomToApply_afterInitialization_keepsCurrentDefaultZoom() {
+        assertThat(NaviRenderMath.cameraZoomToApply(true, currentMapZoom = 16.0, defaultZoom = 16.0))
+            .isEqualTo(16.0)
+    }
+
     // --- 増分M: 通過済み／助走／案内中の距離程分割 ---
 
     @Test fun routePhaseRanges_atStart_keepsExistingGuidanceAndApproach() {

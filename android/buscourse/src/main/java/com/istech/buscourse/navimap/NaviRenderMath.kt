@@ -16,6 +16,10 @@ object NaviRenderMath {
 
     data class ScreenPointPx(val x: Float, val y: Float)
 
+    /** カメラへ当てる縮尺を決める（増分N）。初期化前は既定、以後は地図の現在値を尊重する。 */
+    fun cameraZoomToApply(initialized: Boolean, currentMapZoom: Double, defaultZoom: Double): Double =
+        if (initialized) currentMapZoom else defaultZoom
+
     // ★`groundTopYPx`（消失点 = stageHeight - cameraDistance/tan θ）は削除した（2026-08-06）。
     // 傾き90°の実機で、実際の地図上端 y≒700 に対して y≒2234 を返し、三角が画面最下部へ沈んだ。
     // `graphicsLayer.cameraDistance` は渡した値がそのままピクセル距離にならない（内部で密度換算される）ため、
