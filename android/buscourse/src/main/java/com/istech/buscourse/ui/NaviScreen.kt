@@ -82,7 +82,6 @@ import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.map.GnssBackedLocationEngineAdapter
 import com.istech.buscourse.map.MapVehiclePositionOverlay
-import com.istech.buscourse.map.RouteTrackOverlay
 import com.istech.buscourse.map.StopSymbolOverlay
 import com.istech.buscourse.map.StopSymbolPoint
 import com.istech.buscourse.navimap.NaviCamera
@@ -92,14 +91,7 @@ import com.istech.buscourse.navimap.NaviMapGenerator
 import com.istech.buscourse.navimap.NaviMapRepository
 import com.istech.buscourse.navimap.NaviOrientation
 import com.istech.buscourse.navimap.NaviRenderMath
-import com.istech.buscourse.navimap.NAVI_APPROACH_LAYER_ID
-import com.istech.buscourse.navimap.NAVI_APPROACH_LINE_COLOR_HEX
-import com.istech.buscourse.navimap.NAVI_APPROACH_SOURCE_ID
-import com.istech.buscourse.navimap.NAVI_PASSED_LAYER_ID
-import com.istech.buscourse.navimap.NAVI_PASSED_LINE_COLOR_HEX
-import com.istech.buscourse.navimap.NAVI_PASSED_SOURCE_ID
-import com.istech.buscourse.navimap.NAVI_ROUTE_LINE_COLOR_HEX
-import com.istech.buscourse.navimap.RouteLineGroups
+import com.istech.buscourse.navimap.showRouteLineGroups
 import com.istech.buscourse.navimap.splitRouteLines
 import com.istech.buscourse.navimap.toCameraPosition
 import java.io.File
@@ -113,30 +105,6 @@ import org.maplibre.android.location.modes.RenderMode
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
-
-/** 増分Mの3群を、実地図と同じ重なり順で描き直す。 */
-private suspend fun showNaviRouteLineGroups(
-    context: Context,
-    database: BusCourseDatabase,
-    style: Style,
-    lines: RouteLineGroups,
-) {
-    for ((sourceId, layerId) in listOf(
-        NAVI_PASSED_SOURCE_ID to NAVI_PASSED_LAYER_ID,
-        NAVI_APPROACH_SOURCE_ID to NAVI_APPROACH_LAYER_ID,
-        "route-line-source" to "route-line-layer",
-    )) {
-        if (style.getLayer(layerId) != null) style.removeLayer(layerId)
-        if (style.getSource(sourceId) != null) style.removeSource(sourceId)
-    }
-    val overlay = RouteTrackOverlay(context, database, style)
-    // ★これから走る線をいちばん上に置くため、通過済み → 助走 → 案内中の順で登録する。
-    // 巡回ルートでは同じ道の上に1周目（灰）と2周目（青）が重なるので、順序を間違えると
-    // これから走る道が灰色に隠れる。
-    overlay.showRouteMultiLine(lines.passed, NAVI_PASSED_LINE_COLOR_HEX, NAVI_PASSED_SOURCE_ID, NAVI_PASSED_LAYER_ID)
-    overlay.showRouteMultiLine(lines.approach, NAVI_APPROACH_LINE_COLOR_HEX, NAVI_APPROACH_SOURCE_ID, NAVI_APPROACH_LAYER_ID)
-    overlay.showRouteMultiLine(lines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
-}
 
 private const val TRACK_KIND = "TRACK"
 
@@ -524,9 +492,7 @@ private fun NaviMapContent(
     LaunchedEffect(routeStyle, segments, trackPointsBySegmentId, guidanceChainageRange, chainageM) {
         val style = routeStyle ?: return@LaunchedEffect
         if (segments.isEmpty()) return@LaunchedEffect
-        showNaviRouteLineGroups(
-            context = context,
-            database = database,
+        showRouteLineGroups(
             style = style,
             lines = splitRouteLines(
                 segments = segments,

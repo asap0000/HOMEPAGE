@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -75,7 +76,6 @@ import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
 import com.istech.buscourse.core.geo.GeoMath
 import com.istech.buscourse.map.MapDataPackageRepository
-import com.istech.buscourse.map.RouteTrackOverlay
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -84,6 +84,14 @@ import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.MultiLineString
+import org.maplibre.geojson.Point
 
 /**
  * 映像ナビ3画面（本画面P4／設定画面プレビューP3／確認画面）が共有する唯一の描画部品
@@ -324,6 +332,12 @@ internal const val NAVI_PASSED_SOURCE_ID = "navi-passed-line-source"
 internal const val NAVI_PASSED_LAYER_ID = "navi-passed-line-layer"
 internal const val NAVI_APPROACH_SOURCE_ID = "navi-approach-line-source"
 internal const val NAVI_APPROACH_LAYER_ID = "navi-approach-line-layer"
+// ★`RouteTrackOverlay` の ROUTE_LINE_SOURCE_ID / ROUTE_LINE_LAYER_ID と同じ文字列。あちらは単線版
+// `showRouteLine`（コース設計画面）が使い、ナビとは Style を共有しないので競合しない。IDを変えるときは両方。
+internal const val NAVI_ROUTE_LINE_SOURCE_ID = "route-line-source"
+internal const val NAVI_ROUTE_LINE_LAYER_ID = "route-line-layer"
+private const val NAVI_ROUTE_LINE_WIDTH_PX = 4f
+private const val NAVI_ROUTE_LINE_LOG_TAG = "NaviRouteLine"
 
 /**
  * 映像オーバーレイと「実機ナビ画面枠」の角丸フレームが干渉しないための、四辺共通のわずかな余白
@@ -583,26 +597,85 @@ internal fun splitRouteLines(
     )
 }
 
-/** 3群の既存レイヤを外し、常に増分Mの重なり順で描き直す。 */
-private suspend fun showRouteLineGroups(
-    overlay: RouteTrackOverlay,
+/** ナビ経路線3群を、初回に決めた重なり順を保って更新する。 */
+internal fun showRouteLineGroups(
     style: Style,
     lines: RouteLineGroups,
 ) {
-    for ((sourceId, layerId) in listOf(
-        NAVI_PASSED_SOURCE_ID to NAVI_PASSED_LAYER_ID,
-        NAVI_APPROACH_SOURCE_ID to NAVI_APPROACH_LAYER_ID,
-        "route-line-source" to "route-line-layer",
-    )) {
-        if (style.getLayer(layerId) != null) style.removeLayer(layerId)
-        if (style.getSource(sourceId) != null) style.removeSource(sourceId)
-    }
     // ★これから走る線をいちばん上に置くため、通過済み → 助走 → 案内中の順で登録する。
     // 巡回ルートでは同じ道の上に1周目（灰）と2周目（青）が重なるので、順序を間違えると
     // これから走る道が灰色に隠れる。
-    overlay.showRouteMultiLine(lines.passed, NAVI_PASSED_LINE_COLOR_HEX, NAVI_PASSED_SOURCE_ID, NAVI_PASSED_LAYER_ID)
-    overlay.showRouteMultiLine(lines.approach, NAVI_APPROACH_LINE_COLOR_HEX, NAVI_APPROACH_SOURCE_ID, NAVI_APPROACH_LAYER_ID)
-    overlay.showRouteMultiLine(lines.guidance, NAVI_ROUTE_LINE_COLOR_HEX)
+    // ★毎回removeLayerすると線がいったん消えてから描き直されるので、走行中は毎秒フラッシュして
+    // 脈を打って見える（オーナー指摘 2026-09-11）。重なり順は初回に積んだ順で決まり、以後
+    // setGeoJsonでは変わらない。
+    val layerIds = listOf(
+        NAVI_PASSED_LAYER_ID,
+        NAVI_APPROACH_LAYER_ID,
+        NAVI_ROUTE_LINE_LAYER_ID,
+    )
+    val rebuildsLayers = layerIds.any { style.getLayer(it) == null }
+    showRouteLineGroup(
+        style,
+        lines.passed,
+        NAVI_PASSED_LINE_COLOR_HEX,
+        NAVI_PASSED_SOURCE_ID,
+        NAVI_PASSED_LAYER_ID,
+    )
+    showRouteLineGroup(
+        style,
+        lines.approach,
+        NAVI_APPROACH_LINE_COLOR_HEX,
+        NAVI_APPROACH_SOURCE_ID,
+        NAVI_APPROACH_LAYER_ID,
+    )
+    showRouteLineGroup(
+        style,
+        lines.guidance,
+        NAVI_ROUTE_LINE_COLOR_HEX,
+        NAVI_ROUTE_LINE_SOURCE_ID,
+        NAVI_ROUTE_LINE_LAYER_ID,
+    )
+    if (rebuildsLayers) Log.d(NAVI_ROUTE_LINE_LOG_TAG, "ナビ経路線レイヤを初回登録しました")
+}
+
+/**
+ * [showRouteLineGroups]の1群を、既存source/layerを保ったまま更新する。
+ *
+ * ★GAP で分断したまま `MultiLineString` で描く。ナビの本線は TRACK セグメントが GAP を挟んで並ぶ
+ * ことがあり、全点を1本の LineString へ単純連結すると、GAP を跨ぐ TRACK 終端どうしが直線で結ばれて
+ * 「地図の穴」が線で埋まってしまう。呼び出し側が GAP ごとに区切った点列リストを渡し、ここで各区間を
+ * 独立したラインとして描く（区間間には線を引かない）。2点未満の区間は捨てる。
+ * （2026-09-11 に `RouteTrackOverlay.showRouteMultiLine` を畳んだとき、その KDoc から移した知見。）
+ */
+private fun showRouteLineGroup(
+    style: Style,
+    lines: List<List<Pair<Double, Double>>>,
+    colorHex: String,
+    sourceId: String,
+    layerId: String,
+) {
+    val source = style.getSourceAs<GeoJsonSource>(sourceId)
+        ?: GeoJsonSource(sourceId).also { style.addSource(it) }
+    val usableLines = lines.filter { it.size >= 2 }
+    if (usableLines.isEmpty()) {
+        // ★空でもsource/layerを残す。次の秒に作り直すと、その群だけ毎秒フラッシュしてしまう。
+        source.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
+    } else {
+        val lineStrings = usableLines.map { line ->
+            line.map { (lat, lon) -> Point.fromLngLat(lon, lat) }
+        }
+        source.setGeoJson(Feature.fromGeometry(MultiLineString.fromLngLats(lineStrings)))
+    }
+    if (style.getLayer(layerId) == null) {
+        style.addLayer(
+            LineLayer(layerId, sourceId).withProperties(
+                PropertyFactory.lineColor(android.graphics.Color.parseColor(colorHex)),
+                PropertyFactory.lineWidth(NAVI_ROUTE_LINE_WIDTH_PX),
+                PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+            )
+        )
+    }
 }
 
 /**
@@ -707,7 +780,6 @@ private fun NaviRendererMapStage(
     LaunchedEffect(routeStyle, routeData, chainageM) {
         val style = routeStyle ?: return@LaunchedEffect
         showRouteLineGroups(
-            overlay = RouteTrackOverlay(context, database, style),
             style = style,
             lines = splitRouteLines(
                 segments = routeData.segments,
