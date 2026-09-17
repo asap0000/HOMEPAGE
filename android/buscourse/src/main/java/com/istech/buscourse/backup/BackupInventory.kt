@@ -27,6 +27,10 @@ object BackupInventory {
     private val SEGMENTS = Category("files/buscourse/segments/**", "区間軌跡GPX（地図描画・プランナーEXへの一次素材）")
     private val COMPARISONS = Category("files/buscourse/comparisons/**", "試走比較の残骸（v14でテーブルはdrop済み。小さいため同梱し判断を後回しにする、未決2）")
     private val NAVI_SETTINGS = Category("files/datastore/navi_settings.preferences_pb", "映像ナビ設定（作り直すのが面倒）")
+    private val NAVI_COURSE_VISIBILITY = Category(
+        "files/datastore/navi_course_visibility.preferences_pb",
+        "ナビ一覧で使う／使わないに倒した覚え（増分O。端末ごとの運用の形そのもので、付け直すのが面倒）",
+    )
 
     private val MAPS = Category("files/buscourse/maps/**", "地図パッケージ（.iscmapの展開物。PCで作り直せる。タイル群で巨大）")
     private val RECORDING_STATE = Category("files/datastore/recording_state.preferences_pb", "記録中の一時状態（移行先で意味を持たない）")
@@ -38,7 +42,8 @@ object BackupInventory {
     private val UNKNOWN = Category("(未知のパス)", "棚卸し判定表に無い未知の対象のため、安全側で除外する")
 
     /** manifest.json「含めたもの」の一覧（表示用）。 */
-    val INCLUDED_CATEGORIES: List<Category> = listOf(DB, STOPCARDS, SESSIONS, SEGMENTS, COMPARISONS, NAVI_SETTINGS)
+    val INCLUDED_CATEGORIES: List<Category> =
+        listOf(DB, STOPCARDS, SESSIONS, SEGMENTS, COMPARISONS, NAVI_SETTINGS, NAVI_COURSE_VISIBILITY)
 
     /** manifest.json「除いたもの」の一覧（理由つき、表示用）。 */
     val EXCLUDED_CATEGORIES: List<Category> = listOf(MAPS, RECORDING_STATE, EXPORTS, BACKUP_STATE)
@@ -67,6 +72,9 @@ object BackupInventory {
     fun classifyDataStoreFileName(fileName: String): InventoryDecision {
         return when {
             fileName.startsWith("navi_settings") -> InventoryDecision(true, NAVI_SETTINGS.reason)
+            // ★増分O（2026-09-17）。ここへ足さないと UNKNOWN＝安全側で除外され、機種変更でこの覚えだけが静かに消える。
+            fileName.startsWith("navi_course_visibility") ->
+                InventoryDecision(true, NAVI_COURSE_VISIBILITY.reason)
             fileName.startsWith("recording_state") -> InventoryDecision(false, RECORDING_STATE.reason)
             fileName.startsWith("backup_state") -> InventoryDecision(false, BACKUP_STATE.reason)
             else -> InventoryDecision(false, UNKNOWN.reason)

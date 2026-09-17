@@ -57,6 +57,15 @@ class BackupInventoryTest {
     }
 
     @Test
+    fun `datastore navi_course_visibility is included so the per-device choice survives a handset change`() {
+        // ★増分O（2026-09-17）。棚卸し表へ登録し忘れると UNKNOWN＝安全側で除外され、
+        // 機種変更のたびに「使う／使わない」の覚えだけが静かに消える（バックアップ時には気づけない）。
+        val decision = BackupInventory.classifyDataStoreFileName("navi_course_visibility.preferences_pb")
+        assertThat(decision.include).isTrue()
+        assertThat(decision.reason).isNotEmpty()
+    }
+
+    @Test
     fun `datastore backup_state is excluded to avoid carrying identity across devices`() {
         val decision = BackupInventory.classifyDataStoreFileName("backup_state.preferences_pb")
         assertThat(decision.include).isFalse()
