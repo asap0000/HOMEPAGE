@@ -98,6 +98,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        # ★v3 の既定 packages は `tools platform-tools`。旧 SDK Tools（`tools`）が Google から消え、
+        # `Failed to find package 'tools'` でコンパイルより前に落ちる（09-14 までは緑＝外の変化）。
+        # PrivacyCamera 席が istech-KINGFISHER で同じ形に直して緑へ戻した（検査場の便 2026-09-21）。
+        with:
+          packages: 'platform-tools'
 
       # Caches Gradle dependencies & wrapper between runs -> much faster builds.
       - name: Set up Gradle (with caching)
