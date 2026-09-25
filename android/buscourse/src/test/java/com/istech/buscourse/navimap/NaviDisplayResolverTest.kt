@@ -28,12 +28,13 @@ class NaviDisplayResolverTest {
                 orientation = NaviMapOrientation.HEADING_UP,
                 theme = NaviTheme.DAY,
                 stopNameVisible = false,
+                leadMaxSec = 3.0,
             ),
             hint = NaviMapDisplayHint(orientation = "north_up", pitchDeg = 10.0),
         )
 
         assertThat(actual).isEqualTo(
-            NaviSettingsEffective(75.0, 70, 20, 90, 80, 10, NaviMapOrientation.HEADING_UP, NaviTheme.DAY, false),
+            NaviSettingsEffective(75.0, 70, 20, 90, 80, 10, NaviMapOrientation.HEADING_UP, NaviTheme.DAY, false, 3.0),
         )
     }
 
@@ -51,6 +52,10 @@ class NaviDisplayResolverTest {
         val actual = NaviDisplayResolver.resolve(NaviSettingsPatch(), null)
 
         assertThat(actual).isEqualTo(productDefaults())
+    }
+
+    @Test fun invalidLeadMaximumFallsBackToFiveSeconds() {
+        assertThat(NaviDisplayResolver.resolve(NaviSettingsPatch(leadMaxSec = 4.0), null).leadMaxSec).isEqualTo(5.0)
     }
 
     @Test fun unknownHintOrientation_degradesToProductDefault() {

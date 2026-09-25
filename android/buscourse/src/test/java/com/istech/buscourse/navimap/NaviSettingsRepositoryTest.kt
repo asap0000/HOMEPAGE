@@ -32,6 +32,7 @@ class NaviSettingsRepositoryTest {
         repository.setOrientation(NaviMapOrientation.NORTH_UP)
         repository.setTheme(NaviTheme.DAY)
         repository.setStopNameVisible(false)
+        repository.setLeadMaxSec(3.0)
 
         assertThat(repository.patchFlow.first()).isEqualTo(
             NaviSettingsPatch(
@@ -44,6 +45,7 @@ class NaviSettingsRepositoryTest {
                 orientation = NaviMapOrientation.NORTH_UP,
                 theme = NaviTheme.DAY,
                 stopNameVisible = false,
+                leadMaxSec = 3.0,
             ),
         )
     }

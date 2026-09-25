@@ -4,11 +4,13 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +71,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
@@ -79,6 +83,9 @@ import com.istech.buscourse.map.MapDataPackageRepository
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
@@ -121,6 +128,8 @@ fun NaviRenderer(
     settings: NaviSettingsEffective,
     selfFix: NaviSelfFix? = null,
     onCourse: Boolean = true,
+    searchAll: Boolean = false,
+    leadActive: Boolean = false,
     resetZoomSignal: Int = 0,
     modifier: Modifier = Modifier,
 ) {
@@ -157,12 +166,22 @@ fun NaviRenderer(
         routeData = data,
         selfFix = selfFix,
         onCourse = onCourse,
+        searchAll = searchAll,
+        leadActive = leadActive,
         resetZoomSignal = resetZoomSignal,
     )
 }
 
 /** GPS実測の自車位置と、停車中は保持される実測進行方向。 */
-data class NaviSelfFix(val lat: Double, val lon: Double, val headingDeg: Double?)
+data class NaviSelfFix(
+    val lat: Double,
+    val lon: Double,
+    val headingDeg: Double?,
+    /** GPS が返した速度（`Location.hasSpeed()` が偽なら null）。映像の先読みに使う。 */
+    val speedMps: Double? = null,
+    /** この測位を受け取った端末の経過時刻。先読みの「2.5秒以上古い速度は0」の判定に使う。 */
+    val elapsedRealtimeMs: Long = 0L,
+)
 
 /** [NaviRenderer]の`source`が受け付ける供給元。 */
 sealed interface NaviRenderSource {
@@ -387,6 +406,8 @@ private fun NaviRendererBody(
     routeData: NaviRouteData,
     selfFix: NaviSelfFix?,
     onCourse: Boolean,
+    searchAll: Boolean,
+    leadActive: Boolean,
     resetZoomSignal: Int,
 ) {
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -487,6 +508,11 @@ private fun NaviRendererBody(
                             database = database,
                             routeData = routeData,
                             chainageM = chainageM,
+                            selfFix = selfFix,
+                            leadMaxSec = settings.leadMaxSec,
+                            onCourse = onCourse,
+                            searchAll = searchAll,
+                            leadActive = leadActive,
                             theme = settings.theme,
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -2462,6 +2488,11 @@ private fun NaviVideoOverlay(
     database: BusCourseDatabase,
     routeData: NaviRouteData,
     chainageM: Float,
+    selfFix: NaviSelfFix?,
+    leadMaxSec: Double,
+    onCourse: Boolean,
+    searchAll: Boolean,
+    leadActive: Boolean,
     theme: NaviTheme,
     modifier: Modifier = Modifier,
 ) {
@@ -2470,17 +2501,73 @@ private fun NaviVideoOverlay(
         return
     }
 
+    // ★先読みは GPS 追従中だけ（紙芝居 改1・指示書D）。スライダーで手動で動かしている間と確認画面は今までどおり。
+    val leadFix = selfFix?.takeIf { leadActive }
+    val speedAgeMs = leadFix?.let { SystemClock.elapsedRealtime() - it.elapsedRealtimeMs } ?: Long.MAX_VALUE
+    val leadSeconds = if (leadFix == null) 0.0 else NaviVideoLead.leadSeconds(leadFix.speedMps, speedAgeMs, leadMaxSec)
+    val leadDistanceM = if (leadFix == null) 0.0 else (leadFix.speedMps ?: 0.0) * leadSeconds
     var videoFrameFile by remember { mutableStateOf<File?>(null) }
-    LaunchedEffect(chainageM, routeData) {
+    val diagnosticScope = rememberCoroutineScope()
+
+    // ★debug 限定: 配布先と同じ「1.0m 除去法で間引いた映像」の上で先読みを試すスイッチ（指示書F）。既定＝切＝全コマ。
+    var thinningOn by remember { mutableStateOf(false) }
+    val keptFramesBySession by produceState<Map<Long, List<NaviThinnedFrames.Frame>>?>(initialValue = null, routeData) {
+        if (!BuildConfig.DEBUG) return@produceState
+        val dao = database.timelapseFrameDao()
+        val sessionIds = routeData.segments.mapNotNull { it.sessionId }.distinct()
+        val loresBySession = sessionIds.associateWith { id ->
+            dao.getBySession(id).filter { it.kind == "LORES" }
+                .map { NaviThinnedFrames.Frame(it.capturedAt, it.fileRelPath) }
+        }
+        value = withContext(Dispatchers.Default) {
+            NaviThinnedFrames.keptFramesBySession(routeData.segments, routeData.trackPointsBySegmentId, loresBySession)
+        }
+    }
+
+    // 切り替えたら後ろへ戻さない基準も捨てて引き直す（別の映像列に切り替わるため）。
+    var previousLookupM by remember(routeData, thinningOn) { mutableStateOf<Double?>(null) }
+    var previousChainageM by remember(routeData) { mutableStateOf<Double?>(null) }
+    var freshnessTick by remember { mutableStateOf(0) }
+    LaunchedEffect(leadFix) {
+        if (leadFix != null) {
+            // 次の測位が来ないまま 2.5 秒経ったら、先読みを 0 に落とすために計算し直す。
+            delay(NaviVideoLead.GPS_STALE_MS)
+            freshnessTick++
+        }
+    }
+    LaunchedEffect(leadFix, chainageM, routeData, leadMaxSec, freshnessTick, thinningOn, keptFramesBySession) {
+        val lookup = if (leadFix == null) NaviVideoLead.Lookup(chainageM.toDouble(), true) else
+            NaviVideoLead.lookup(previousLookupM, previousChainageM, chainageM.toDouble(), leadDistanceM, routeData.maxChainageM.toDouble())
+        val lookupChainageM = lookup.chainageM
+        val lastDrawn = previousLookupM
+        previousChainageM = chainageM.toDouble()
         val cue = NaviFrameResolver.frameCueAtChainageM(
-            routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble(),
+            routeData.segments, routeData.trackPointsBySegmentId, lookupChainageM,
         )
-        videoFrameFile = if (cue == null) {
-            null
-        } else {
-            database.timelapseFrameDao()
-                .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
-                ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+        val redraw = lookup.reset || NaviVideoLead.shouldDraw(lastDrawn, lookupChainageM)
+        if (redraw) {
+            previousLookupM = lookupChainageM
+            val kept = keptFramesBySession
+            videoFrameFile = when {
+                cue == null -> null
+                // 間引き入: 残したコマの中から「引く時刻以前でいちばん新しい1枚」（時刻の軸はずらさない）。
+                BuildConfig.DEBUG && thinningOn && kept != null ->
+                    kept[cue.sessionId]?.let { NaviThinnedFrames.atOrBefore(it, cue.capturedAtMs) }
+                        ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+                else -> database.timelapseFrameDao()
+                    .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
+                    ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+            }
+        }
+        // ★調査記録は引き直しを決めた後に書く（前のコマを書くと①の突き合わせに使えない）。GPS 追従中だけ。
+        if (leadFix != null) {
+            val shownFile = videoFrameFile
+            diagnosticScope.launch {
+                NaviLeadDiagnostic.append(
+                    context, leadFix.elapsedRealtimeMs, chainageM.toDouble(),
+                    onCourse, searchAll, leadFix.speedMps, leadSeconds, lookupChainageM, lookup.reset, cue, shownFile,
+                )
+            }
         }
     }
 
@@ -2505,6 +2592,18 @@ private fun NaviVideoOverlay(
                 style = MaterialTheme.typography.bodySmall,
                 minLines = 2,
                 maxLines = 2,
+            )
+        }
+        if (BuildConfig.DEBUG) {
+            Text(
+                if (thinningOn) "間引き：入" else "間引き：切",
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable { thinningOn = !thinningOn }
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
             )
         }
     }

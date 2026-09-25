@@ -183,6 +183,7 @@ fun NaviMainScreen(
                         bearingDeg = location.bearing.toDouble().takeIf { location.hasBearing() },
                         speedMps = location.speed.toDouble().takeIf { location.hasSpeed() },
                         fix = fix,
+                        fixElapsedRealtimeMs = location.elapsedRealtimeNanos / 1_000_000,
                     )
                 },
                 onProviderDisabled = { followUnavailable = true },
@@ -219,9 +220,11 @@ fun NaviMainScreen(
                     chainageM = followState.chainageM,
                     settings = settings,
                     selfFix = followState.selfLat?.let { lat ->
-                        followState.selfLon?.let { lon -> NaviSelfFix(lat, lon, followState.selfHeadingDeg) }
+                        followState.selfLon?.let { lon -> NaviSelfFix(lat, lon, followState.selfHeadingDeg, followState.speedMps, followState.fixElapsedRealtimeMs) }
                     },
                     onCourse = followState.onCourse,
+                    searchAll = !followState.onCourse,
+                    leadActive = followState.mode == NaviMainMode.FOLLOWING,
                     resetZoomSignal = resetZoomSignal,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -290,6 +293,8 @@ internal data class NaviMainFollowState(
     val selfLat: Double? = null,
     val selfLon: Double? = null,
     val selfHeadingDeg: Double? = null,
+    val speedMps: Double? = null,
+    val fixElapsedRealtimeMs: Long = 0L,
 )
 
 /** 距離スライダー操作＝プレビューへ入る（設計§5-1「スライダー操作で入る」）。 */
@@ -312,13 +317,14 @@ internal fun naviMainApplyLocation(
     bearingDeg: Double?,
     speedMps: Double?,
     fix: NaviFollow.FollowFix?,
+    fixElapsedRealtimeMs: Long = 0L,
 ): NaviMainFollowState {
     val heading = if (bearingDeg != null && speedMps != null && speedMps >= BEARING_MIN_SPEED_MPS) {
         bearingDeg
     } else {
         state.selfHeadingDeg
     }
-    val base = state.copy(selfLat = lat, selfLon = lon, selfHeadingDeg = heading)
+    val base = state.copy(selfLat = lat, selfLon = lon, selfHeadingDeg = heading, speedMps = speedMps, fixElapsedRealtimeMs = fixElapsedRealtimeMs)
     val acceptedFix = when {
         state.onCourse && (fix == null || fix.lateralOffsetM > OFF_COURSE_ENTER_M) ->
             return base.copy(onCourse = false)

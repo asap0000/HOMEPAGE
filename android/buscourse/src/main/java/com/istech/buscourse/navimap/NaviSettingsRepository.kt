@@ -27,6 +27,7 @@ class NaviSettingsRepository(private val context: Context) {
             orientation = NaviMapOrientation.fromStorageValueOrNull(preferences[KEY_ORIENTATION]),
             theme = NaviTheme.fromStorageValueOrNull(preferences[KEY_THEME]),
             stopNameVisible = preferences[KEY_STOP_NAME_VISIBLE],
+            leadMaxSec = preferences[KEY_LEAD_MAX_SEC],
         )
     }
 
@@ -59,6 +60,7 @@ class NaviSettingsRepository(private val context: Context) {
     suspend fun setTheme(value: NaviTheme) = edit { it[KEY_THEME] = value.toStorageValue() }
 
     suspend fun setStopNameVisible(value: Boolean) = edit { it[KEY_STOP_NAME_VISIBLE] = value }
+    suspend fun setLeadMaxSec(value: Double) = edit { it[KEY_LEAD_MAX_SEC] = NaviSettingsDefaults.clampLeadMaxSec(value) }
 
     /** 指定項目の運転者設定を消し、ヒントまたは製品既定へ戻す。 */
     suspend fun clear(field: NaviSettingsField) = edit { preferences ->
@@ -72,6 +74,7 @@ class NaviSettingsRepository(private val context: Context) {
             NaviSettingsField.ORIENTATION -> preferences.remove(KEY_ORIENTATION)
             NaviSettingsField.THEME -> preferences.remove(KEY_THEME)
             NaviSettingsField.STOP_NAME_VISIBLE -> preferences.remove(KEY_STOP_NAME_VISIBLE)
+            NaviSettingsField.LEAD_MAX_SEC -> preferences.remove(KEY_LEAD_MAX_SEC)
         }
     }
 
@@ -89,6 +92,7 @@ class NaviSettingsRepository(private val context: Context) {
         val KEY_ORIENTATION = stringPreferencesKey("orientation")
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_STOP_NAME_VISIBLE = booleanPreferencesKey("stop_name_visible")
+        val KEY_LEAD_MAX_SEC = doublePreferencesKey("lead_max_sec")
     }
 }
 
@@ -103,4 +107,5 @@ enum class NaviSettingsField {
     ORIENTATION,
     THEME,
     STOP_NAME_VISIBLE,
+    LEAD_MAX_SEC,
 }

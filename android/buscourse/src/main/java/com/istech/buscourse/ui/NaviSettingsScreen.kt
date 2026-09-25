@@ -112,6 +112,7 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
     var orientation by remember { mutableStateOf(NaviSettingsDefaults.ORIENTATION) }
     var theme by remember { mutableStateOf(NaviSettingsDefaults.THEME) }
     var stopNameVisible by remember { mutableStateOf(NaviSettingsDefaults.STOP_NAME_VISIBLE) }
+    var leadMaxSec by remember { mutableStateOf(NaviSettingsDefaults.LEAD_MAX_SEC) }
 
     LaunchedEffect(Unit) {
         val effective = NaviDisplayResolver.resolve(repository.patchFlow.first(), hint = null)
@@ -124,6 +125,7 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
         orientation = effective.orientation
         theme = effective.theme
         stopNameVisible = effective.stopNameVisible
+        leadMaxSec = effective.leadMaxSec
     }
 
     val settings = NaviSettingsEffective(
@@ -136,6 +138,7 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
         orientation = orientation,
         theme = theme,
         stopNameVisible = stopNameVisible,
+        leadMaxSec = leadMaxSec,
     )
 
     fun moveSelfCarFwdBack(deltaPct: Int) {
@@ -249,6 +252,11 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
                         onStopNameVisibleChange = {
                             stopNameVisible = it
                             scope.launch { repository.setStopNameVisible(it) }
+                        },
+                        leadMaxSec = leadMaxSec,
+                        onLeadMaxSecChange = {
+                            leadMaxSec = it
+                            scope.launch { repository.setLeadMaxSec(it) }
                         },
                     )
                 }
@@ -916,6 +924,8 @@ private fun NaviDisplayCard(
     onThemeChange: (NaviTheme) -> Unit,
     stopNameVisible: Boolean,
     onStopNameVisibleChange: (Boolean) -> Unit,
+    leadMaxSec: Double,
+    onLeadMaxSecChange: (Double) -> Unit,
 ) {
     // ★2026-07-29（オーナー指示）: 見出しを削って**1画面に収める**。
     // カード見出し「表示」はタブと重複。「地図の向き」「昼夜」は**ボタンの文字を読めば分かる**ので不要
@@ -950,6 +960,15 @@ private fun NaviDisplayCard(
             selected = stopNameVisible,
             onSelect = onStopNameVisibleChange,
         )
+        NaviSegmentedToggle(
+            label = "映像の先読み（最高値）",
+            options = NaviSettingsDefaults.LEAD_MAX_SEC_OPTIONS.map { value ->
+                value to when (value) { 0.0 -> "なし"; else -> "${value.toInt()}秒" }
+            },
+            selected = leadMaxSec,
+            onSelect = onLeadMaxSecChange,
+        )
+        Text("時速60kmで最高値。遅いほど短くなる", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
