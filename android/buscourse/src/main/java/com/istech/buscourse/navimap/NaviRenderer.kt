@@ -33,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +86,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
@@ -202,6 +204,7 @@ private const val TRACK_KIND = "TRACK"
 private data class NaviRouteData(
     val segments: List<NaviSegmentEntity>,
     val trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
+    val preparedRoute: NaviPreparedRoute,
     val stopPoints: List<ResolvedStopPoint>,
     /** 停留所名表示ON時にローカル解決した名前（設計§6-5）。Previewは常に空（stopCardIdが無いため）。 */
     val nameByStopCardId: Map<Long, String>,
@@ -231,12 +234,13 @@ private suspend fun loadRealRouteData(database: BusCourseDatabase, naviMapId: Lo
     val trackPointsBySegmentId = segments
         .filter { it.kind == TRACK_KIND }
         .associate { segment -> segment.id to dao.getTrackPoints(segment.id).sortedBy { it.seq } }
+    val preparedRoute = NaviPreparedRoute(segments, trackPointsBySegmentId)
     val events = dao.getEvents(naviMapId)
 
     val orderedEvents = events.filter { it.chainageStartM != null }.sortedBy { it.chainageStartM }
     val stopPoints = orderedEvents.mapIndexedNotNull { index, event ->
         val chainage = event.chainageStartM ?: return@mapIndexedNotNull null
-        val (lat, lon) = NaviCamera.positionAtChainageM(segments, trackPointsBySegmentId, chainage)
+        val (lat, lon) = NaviCamera.positionAtChainageM(preparedRoute, chainage)
             ?: return@mapIndexedNotNull null
         ResolvedStopPoint(
             stopCardId = event.stopCardId,
@@ -261,6 +265,7 @@ private suspend fun loadRealRouteData(database: BusCourseDatabase, naviMapId: Lo
     return NaviRouteData(
         segments,
         trackPointsBySegmentId,
+        preparedRoute,
         stopPoints,
         nameByStopCardId,
         maxChainageM,
@@ -330,6 +335,7 @@ private fun buildPreviewRouteData(): NaviRouteData {
     return NaviRouteData(
         segments = segments,
         trackPointsBySegmentId = trackPointsBySegmentId,
+        preparedRoute = NaviPreparedRoute(segments, trackPointsBySegmentId),
         stopPoints = stopPoints,
         nameByStopCardId = nameByStopCardId,
         maxChainageM = PREVIEW_ROUTE_LENGTH_M.toFloat(),
@@ -820,7 +826,7 @@ private fun NaviRendererMapStage(
     val nativeTiltDeg = NaviRenderMath.nativeTiltDeg(settings.tiltDeg.toFloat())
     val cameraState = remember(routeData, chainageM, naviOrientation, nativeTiltDeg, selfFix) {
         val courseState = NaviCamera.cameraStateAtChainageM(
-            routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble(),
+            routeData.preparedRoute, chainageM.toDouble(),
             naviOrientation, nativeTiltDeg.toDouble(), NAVI_RENDERER_ZOOM,
         )
         if (selfFix == null) courseState else courseState?.copy(
@@ -1140,7 +1146,7 @@ private fun NaviRendererMapStage(
         // ⚠ 引き換えに、遠くのピンが小さく描かれる遠近は消える（全部同じ大きさ）。
         // 密集して読みにくくなったら導線（リーダー線）で接地点との対応を示す＝オーナー案・バックログ。
         val courseHeadingDeg = remember(routeData, chainageM) {
-            NaviHeading.headingAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
+            NaviHeading.headingAtChainageM(routeData.preparedRoute, chainageM.toDouble())
         } ?: 0.0
         val selfCarHeadingDeg = selfFix?.headingDeg ?: courseHeadingDeg
         val selfCarRotationDeg = (selfCarHeadingDeg - (cameraState?.bearingDeg ?: 0.0)).toFloat()
@@ -1241,7 +1247,7 @@ private fun NaviRendererFallbackStage(
         }
         val selfCarAnchor = NaviRenderMath.selfCarAnchorFraction(settings.selfCarFwdBackPct, settings.selfCarLateralPct)
         val courseHeadingDeg = NaviHeading.headingAtChainageM(
-            routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble(),
+            routeData.preparedRoute, chainageM.toDouble(),
         ) ?: 0.0
         val cameraBearingDeg = if (naviOrientation == NaviOrientation.HEADING_UP) {
             selfFix?.headingDeg ?: courseHeadingDeg
@@ -2509,23 +2515,37 @@ private fun NaviVideoOverlay(
     var videoFrameFile by remember { mutableStateOf<File?>(null) }
     val diagnosticScope = rememberCoroutineScope()
 
-    // ★debug 限定: 配布先と同じ「1.0m 除去法で間引いた映像」の上で先読みを試すスイッチ（指示書F）。既定＝切＝全コマ。
-    var thinningOn by remember { mutableStateOf(false) }
-    val keptFramesBySession by produceState<Map<Long, List<NaviThinnedFrames.Frame>>?>(initialValue = null, routeData) {
-        if (!BuildConfig.DEBUG) return@produceState
-        val dao = database.timelapseFrameDao()
-        val sessionIds = routeData.segments.mapNotNull { it.sessionId }.distinct()
-        val loresBySession = sessionIds.associateWith { id ->
-            dao.getBySession(id).filter { it.kind == "LORES" }
-                .map { NaviThinnedFrames.Frame(it.capturedAt, it.fileRelPath) }
-        }
-        value = withContext(Dispatchers.Default) {
-            NaviThinnedFrames.keptFramesBySession(routeData.segments, routeData.trackPointsBySegmentId, loresBySession)
+    // ★全ビルドで一覧を開いたときに一度作る。debug の「切」用に全コマ一覧も同時に保持する。
+    var thinningOn by remember { mutableStateOf(true) }
+    val catalogState by produceState<FrameCatalogState>(FrameCatalogState.Loading, routeData) {
+        value = try {
+            val loresBySession = withContext(Dispatchers.IO) {
+                routeData.segments.mapNotNull { it.sessionId }.distinct().associateWith { id ->
+                    database.timelapseFrameDao().getBySession(id).asSequence()
+                        .filter { it.kind == "LORES" }
+                        .map { NaviThinnedFrames.Frame(it.capturedAt, it.fileRelPath) }
+                        .toList()
+                }
+            }
+            withContext(Dispatchers.Default) {
+                val catalogs = NaviThinnedFrames.catalogsBySession(
+                    routeData.segments, routeData.trackPointsBySegmentId, loresBySession,
+                    includeAll = BuildConfig.DEBUG,
+                )
+                FrameCatalogState.Ready(catalogs.thinnedBySession, catalogs.allBySession)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(NAVI_VIDEO_LOG_TAG, "映像一覧を作成できませんでした。従来の検索へ切り替えます", error)
+            FrameCatalogState.Failed
         }
     }
 
     // 切り替えたら後ろへ戻さない基準も捨てて引き直す（別の映像列に切り替わるため）。
-    var previousLookupM by remember(routeData, thinningOn) { mutableStateOf<Double?>(null) }
+    // ★一覧ができた瞬間も基準を捨てて引き直す。捨てないと、開いて停車したままのとき
+    // 「準備中に記録した位置から1m動いていない」ので引き直しが起きず、映像が出ないまま残る（検分で発見）。
+    var previousLookupM by remember(routeData, thinningOn, catalogState is FrameCatalogState.Ready) { mutableStateOf<Double?>(null) }
     var previousChainageM by remember(routeData) { mutableStateOf<Double?>(null) }
     var freshnessTick by remember { mutableStateOf(0) }
     LaunchedEffect(leadFix) {
@@ -2537,7 +2557,7 @@ private fun NaviVideoOverlay(
     }
     // ★debug 限定の計測（2026-09-26・1.0m 除去法の標準化の前後比較）。SHG12 で「改める前／後」を同じ列で比べる。
     val perf = remember(routeData) { NaviVideoPerf(openedAtMs = SystemClock.elapsedRealtime()) }
-    LaunchedEffect(leadFix, chainageM, routeData, leadMaxSec, freshnessTick, thinningOn, keptFramesBySession) {
+    LaunchedEffect(leadFix, chainageM, routeData, leadMaxSec, freshnessTick, thinningOn, catalogState) {
         val lookup = if (leadFix == null) NaviVideoLead.Lookup(chainageM.toDouble(), true) else
             NaviVideoLead.lookup(previousLookupM, previousChainageM, chainageM.toDouble(), leadDistanceM, routeData.maxChainageM.toDouble())
         val lookupChainageM = lookup.chainageM
@@ -2545,13 +2565,13 @@ private fun NaviVideoOverlay(
         previousChainageM = chainageM.toDouble()
         val cueStartNs = System.nanoTime()
         val cue = NaviFrameResolver.frameCueAtChainageM(
-            routeData.segments, routeData.trackPointsBySegmentId, lookupChainageM,
+            routeData.preparedRoute, lookupChainageM,
         )
         val cueUs = (System.nanoTime() - cueStartNs) / 1000
         // 地図側（自車位置）も測位ごとに同じ並べ替えをしている。その代表として1回ぶんを測る（debug だけ）。
         val camUs = if (BuildConfig.DEBUG && leadFix != null) {
             val camStartNs = System.nanoTime()
-            NaviCamera.positionAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
+            NaviCamera.positionAtChainageM(routeData.preparedRoute, chainageM.toDouble())
             (System.nanoTime() - camStartNs) / 1000
         } else {
             -1L
@@ -2560,17 +2580,21 @@ private fun NaviVideoOverlay(
         val redraw = lookup.reset || NaviVideoLead.shouldDraw(lastDrawn, lookupChainageM)
         if (redraw) {
             previousLookupM = lookupChainageM
-            val kept = keptFramesBySession
             val findStartNs = System.nanoTime()
             videoFrameFile = when {
                 cue == null -> null
-                // 間引き入: 残したコマの中から「引く時刻以前でいちばん新しい1枚」（時刻の軸はずらさない）。
-                BuildConfig.DEBUG && thinningOn && kept != null ->
-                    kept[cue.sessionId]?.let { NaviThinnedFrames.atOrBefore(it, cue.capturedAtMs) }
+                catalogState == FrameCatalogState.Loading -> null
+                catalogState is FrameCatalogState.Ready -> {
+                    val ready = catalogState as FrameCatalogState.Ready
+                    val frames = if (BuildConfig.DEBUG && !thinningOn) ready.all else ready.thinned
+                    frames[cue.sessionId]?.let { NaviThinnedFrames.atOrBefore(it, cue.capturedAtMs) }
                         ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
-                else -> database.timelapseFrameDao()
-                    .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
-                    ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+                }
+                else -> withContext(Dispatchers.IO) {
+                    database.timelapseFrameDao()
+                        .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
+                        ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+                }
             }
             findUs = (System.nanoTime() - findStartNs) / 1000
         }
@@ -2587,11 +2611,16 @@ private fun NaviVideoOverlay(
         }
     }
 
+    val latestFramePath by rememberUpdatedState(videoFrameFile?.path)
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = videoFrameFile?.path) {
         val file = videoFrameFile
+        val requestedPath = file?.path
         val decodeStartNs = System.nanoTime()
-        value = if (file != null && file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
-        if (value != null) {
+        val decoded = if (file != null) withContext(Dispatchers.IO) {
+            if (file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
+        } else null
+        if (requestedPath == latestFramePath) value = decoded
+        if (decoded != null && requestedPath == latestFramePath) {
             perf.lastDecodeUs = (System.nanoTime() - decodeStartNs) / 1000
             perf.decodeCount++
             if (perf.firstFrameMs < 0) perf.firstFrameMs = SystemClock.elapsedRealtime() - perf.openedAtMs
@@ -2609,12 +2638,15 @@ private fun NaviVideoOverlay(
             )
         } else {
             Text(
-                "この区間の映像はありません",
+                if (catalogState == FrameCatalogState.Loading) "映像を準備しています" else "この区間の映像はありません",
                 color = Color.White,
                 style = MaterialTheme.typography.bodySmall,
                 minLines = 2,
                 maxLines = 2,
             )
+        }
+        if (bmp != null && catalogState == FrameCatalogState.Loading) {
+            Text("映像を準備しています", color = Color.White, style = MaterialTheme.typography.bodySmall)
         }
         if (BuildConfig.DEBUG) {
             Text(
@@ -2637,6 +2669,17 @@ private class NaviVideoPerf(val openedAtMs: Long) {
     var decodeCount: Int = 0
     var firstFrameMs: Long = -1
 }
+
+private sealed interface FrameCatalogState {
+    data object Loading : FrameCatalogState
+    data class Ready(
+        val thinned: Map<Long, List<NaviThinnedFrames.Frame>>,
+        val all: Map<Long, List<NaviThinnedFrames.Frame>>,
+    ) : FrameCatalogState
+    data object Failed : FrameCatalogState
+}
+
+private const val NAVI_VIDEO_LOG_TAG = "NaviVideo"
 
 /**
  * Previewソース用のダミー色面＋テストパターン（設計§3-0「ダミー映像」）。DB・ファイルI/Oを一切行わない。

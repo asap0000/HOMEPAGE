@@ -3,7 +3,6 @@ package com.istech.buscourse.navimap
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
 import com.istech.buscourse.core.geo.GeoMath
-import kotlin.math.abs
 
 /** Pure chainage-to-heading resolution for navigation rendering. */
 object NaviHeading {
@@ -16,21 +15,22 @@ object NaviHeading {
         segments: List<NaviSegmentEntity>,
         trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
         chainageM: Double,
-    ): Double? {
-        val orderedSegments = segments.sortedBy { it.seq }
+    ): Double? = headingAtChainageM(NaviPreparedRoute(segments, trackPointsBySegmentId), chainageM)
+
+    fun headingAtChainageM(prepared: NaviPreparedRoute, chainageM: Double): Double? {
+        val orderedSegments = prepared.segments
         val segment = resolveSegment(orderedSegments, chainageM) ?: return null
 
         if (segment.kind != TRACK_KIND) {
-            return precedingTerminalHeading(orderedSegments, trackPointsBySegmentId, chainageM)
+            return precedingTerminalHeading(prepared, chainageM)
         }
 
-        val points = trackPointsBySegmentId[segment.id].orEmpty().sortedBy { it.chainageM }
+        val points = prepared.trackPointsBySegmentId[segment.id].orEmpty()
         tangentAt(points, chainageM)?.let { return it }
 
         // A malformed TRACK with no usable tangent behaves like a GAP: retain the prior tangent.
         return precedingTerminalHeading(
-            orderedSegments = orderedSegments,
-            trackPointsBySegmentId = trackPointsBySegmentId,
+            prepared = prepared,
             chainageM = chainageM,
             excludedSegmentId = segment.id,
         )
@@ -55,8 +55,7 @@ object NaviHeading {
         val selectedPairIndex = when {
             chainageM < points.first().chainageM -> 0
             chainageM > points.last().chainageM -> points.lastIndex - 1
-            else -> points.indexOfLast { it.chainageM <= chainageM }
-                .coerceIn(0, points.lastIndex - 1)
+            else -> (upperBound(points, chainageM) - 1).coerceIn(0, points.lastIndex - 1)
         }
 
         return nearestUsableTangent(points, selectedPairIndex)
@@ -70,32 +69,43 @@ object NaviHeading {
         points: List<NaviTrackPointEntity>,
         preferredPairIndex: Int,
     ): Double? {
-        val pairIndices = (0 until points.lastIndex).sortedBy { abs(it - preferredPairIndex) }
-        for (index in pairIndices) {
-            val first = points[index]
-            val second = points[index + 1]
-            val bearing = GeoMath.bearingDeg(first.lat, first.lon, second.lat, second.lon)
-            if (!bearing.isNaN()) return bearing
+        for (distance in 0..points.lastIndex) {
+            val left = preferredPairIndex - distance
+            if (left >= 0) usableTangent(points, left)?.let { return it }
+            val right = preferredPairIndex + distance
+            if (distance > 0 && right < points.lastIndex) usableTangent(points, right)?.let { return it }
         }
         return null
     }
 
+    private fun usableTangent(points: List<NaviTrackPointEntity>, index: Int): Double? {
+        val first = points[index]
+        val second = points[index + 1]
+        val bearing = GeoMath.bearingDeg(first.lat, first.lon, second.lat, second.lon)
+        return bearing.takeUnless { it.isNaN() }
+    }
+
     private fun precedingTerminalHeading(
-        orderedSegments: List<NaviSegmentEntity>,
-        trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
+        prepared: NaviPreparedRoute,
         chainageM: Double,
         excludedSegmentId: Long? = null,
     ): Double? {
-        val precedingTracks = orderedSegments
-            .asSequence()
-            .filter { it.kind == TRACK_KIND && it.id != excludedSegmentId && it.chainageEndM <= chainageM }
-            .sortedWith(compareByDescending<NaviSegmentEntity> { it.chainageEndM }.thenByDescending { it.seq })
-
-        for (track in precedingTracks) {
-            val terminal = terminalTangent(trackPointsBySegmentId[track.id].orEmpty().sortedBy { it.chainageM })
+        for (track in prepared.tracksByTerminalDescending) {
+            if (track.id == excludedSegmentId || track.chainageEndM > chainageM) continue
+            val terminal = terminalTangent(prepared.trackPointsBySegmentId[track.id].orEmpty())
             if (terminal != null) return terminal
         }
         return null
+    }
+
+    private fun upperBound(points: List<NaviTrackPointEntity>, chainageM: Double): Int {
+        var low = 0
+        var high = points.size
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (points[mid].chainageM <= chainageM) low = mid + 1 else high = mid
+        }
+        return low
     }
 
     private const val TRACK_KIND = "TRACK"

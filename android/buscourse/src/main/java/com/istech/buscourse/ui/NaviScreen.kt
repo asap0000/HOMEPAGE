@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -90,6 +91,8 @@ import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
 import com.istech.buscourse.navimap.NaviMapRepository
 import com.istech.buscourse.navimap.NaviOrientation
+import com.istech.buscourse.navimap.NaviPreparedRoute
+import com.istech.buscourse.navimap.NaviThinnedFrames
 import com.istech.buscourse.navimap.NaviRenderMath
 import com.istech.buscourse.navimap.showRouteLineGroups
 import com.istech.buscourse.navimap.splitRouteLines
@@ -97,6 +100,9 @@ import com.istech.buscourse.navimap.toCameraPosition
 import java.io.File
 import kotlin.math.max
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
@@ -381,6 +387,10 @@ private fun NaviMapContent(
     // NaviCamera入力（chainage→座標/heading解決）用に、ロード済みのセグメント一式を保持する。
     var segments by remember { mutableStateOf<List<NaviSegmentEntity>>(emptyList()) }
     var trackPointsBySegmentId by remember { mutableStateOf<Map<Long, List<NaviTrackPointEntity>>>(emptyMap()) }
+    var preparedRoute by remember { mutableStateOf<NaviPreparedRoute?>(null) }
+    var frameCatalog by remember { mutableStateOf<Map<Long, List<NaviThinnedFrames.Frame>>?>(null) }
+    var frameCatalogLoading by remember { mutableStateOf(true) }
+    var frameCatalogFailed by remember { mutableStateOf(false) }
     var basePitchDeg by remember { mutableStateOf(0.0) }
     // トグルの初期値はnaviMap.displayOrientationから写像するが、★実行時state限定
     // （.isnavi／Roomへ絶対に書き戻さない。増分4契約・照合キー=course_identity）。
@@ -425,6 +435,7 @@ private fun NaviMapContent(
                 val loadedTrackPointsBySegmentId = loadedSegments
                     .filter { it.kind == TRACK_KIND }
                     .associate { segment -> segment.id to dao.getTrackPoints(segment.id).sortedBy { it.seq } }
+                val loadedPreparedRoute = NaviPreparedRoute(loadedSegments, loadedTrackPointsBySegmentId)
                 val events = dao.getEvents(mapId)
 
                 // 停留所マーカー: chainage昇順のevent、座標はNaviCameraで解決。停留所名は出さない
@@ -433,7 +444,7 @@ private fun NaviMapContent(
                     .filter { it.chainageStartM != null }
                     .sortedBy { it.chainageStartM }
                 val symbolPoints = orderedEvents.mapIndexedNotNull { index, event ->
-                    resolvedStopSymbolPoint(loadedSegments, loadedTrackPointsBySegmentId, event, index)
+                    resolvedStopSymbolPoint(loadedPreparedRoute, event, index)
                 }
                 stopSymbolOverlay?.onDestroy()
                 val overlay = StopSymbolOverlay(
@@ -481,6 +492,10 @@ private fun NaviMapContent(
                     ?.toFloat() ?: 0f
                 chainageM = 0f
                 trackPointsBySegmentId = loadedTrackPointsBySegmentId
+                preparedRoute = loadedPreparedRoute
+                frameCatalog = null
+                frameCatalogFailed = false
+                frameCatalogLoading = true
                 segments = loadedSegments
                 guidanceChainageRange = NaviRenderMath.guidanceChainageRange(
                     orderedEvents.map { it.chainageStartM },
@@ -505,11 +520,12 @@ private fun NaviMapContent(
 
     // chainage/orientationが変わるたびにカメラを即時反映する（アニメーションなし）。初期カメラ
     // （segmentsロード完了）もこの単一経路が担う。
-    LaunchedEffect(chainageM, orientation, segments, trackPointsBySegmentId, basePitchDeg, naviZoom) {
+    LaunchedEffect(chainageM, orientation, preparedRoute, basePitchDeg, naviZoom) {
         val currentMap = mapLibreMap
-        if (currentMap == null || segments.isEmpty()) return@LaunchedEffect
+        val prepared = preparedRoute ?: return@LaunchedEffect
+        if (currentMap == null || prepared.segments.isEmpty()) return@LaunchedEffect
         NaviCamera.cameraStateAtChainageM(
-            segments, trackPointsBySegmentId, chainageM.toDouble(),
+            prepared, chainageM.toDouble(),
             orientation, basePitchDeg, naviZoom,
         )?.let { state ->
             // ★カメラを丸ごと代入すると、利用者が触った成分まで一緒に戻る——増分Hでpaddingが毎回
@@ -524,22 +540,58 @@ private fun NaviMapContent(
         }
     }
 
+    LaunchedEffect(preparedRoute) {
+        val prepared = preparedRoute ?: return@LaunchedEffect
+        frameCatalogLoading = true
+        frameCatalogFailed = false
+        try {
+            val loresBySession = withContext(Dispatchers.IO) {
+                prepared.segments.mapNotNull { it.sessionId }.distinct().associateWith { id ->
+                    database.timelapseFrameDao().getBySession(id).asSequence()
+                        .filter { it.kind == "LORES" }
+                        .map { NaviThinnedFrames.Frame(it.capturedAt, it.fileRelPath) }
+                        .toList()
+                }
+            }
+            frameCatalog = withContext(Dispatchers.Default) {
+                NaviThinnedFrames.catalogsBySession(
+                    prepared.segments, prepared.trackPointsBySegmentId, loresBySession, includeAll = false,
+                ).thinnedBySession
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w("NaviScreen", "映像一覧を作成できませんでした。従来の検索へ切り替えます", error)
+            frameCatalogFailed = true
+        } finally {
+            frameCatalogLoading = false
+        }
+    }
+
     // (c3) chainageスクラブに連動して映像フレームを解決する。cueが引けない（route_point由来の
     // コース＝映像なし等）場合はnullにし、映像面は「この区間の映像はありません」プレースホルダを出す。
     // chainageMが変わるたびに前回のsuspendはLaunchedEffectのcancel-and-relaunchで打ち切られるため、
     // 連続スクラブでの過剰なDB問い合わせ（throttle）はこの単一経路で自然に満たされる。
-    LaunchedEffect(chainageM, segments, trackPointsBySegmentId) {
-        if (segments.isEmpty()) {
+    LaunchedEffect(chainageM, preparedRoute, frameCatalog, frameCatalogLoading, frameCatalogFailed) {
+        val prepared = preparedRoute
+        if (prepared == null || prepared.segments.isEmpty()) {
             videoFrameFile = null
             return@LaunchedEffect
         }
-        val cue = NaviFrameResolver.frameCueAtChainageM(segments, trackPointsBySegmentId, chainageM.toDouble())
+        if (frameCatalogLoading) return@LaunchedEffect
+        val cue = NaviFrameResolver.frameCueAtChainageM(prepared, chainageM.toDouble())
         videoFrameFile = if (cue == null) {
             null
-        } else {
-            database.timelapseFrameDao()
-                .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
+        } else if (!frameCatalogFailed) {
+            frameCatalog?.get(cue.sessionId)
+                ?.let { NaviThinnedFrames.atOrBefore(it, cue.capturedAtMs) }
                 ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+        } else {
+            withContext(Dispatchers.IO) {
+                database.timelapseFrameDao()
+                    .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
+                    ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
+            }
         }
     }
 
@@ -563,7 +615,9 @@ private fun NaviMapContent(
             mapRatio = mapRatio,
             onMapRatioChange = { mapRatio = it.coerceIn(MAP_RATIO_MIN, MAP_RATIO_MAX) },
             mapContent = { AndroidView(modifier = Modifier.fillMaxSize(), factory = { mapView }) },
-            videoContent = { NaviVideoSurface(file = videoFrameFile, modifier = Modifier.fillMaxSize()) },
+            videoContent = {
+                NaviVideoSurface(file = videoFrameFile, preparing = frameCatalogLoading, modifier = Modifier.fillMaxSize())
+            },
         )
 
         // 現在地ジャンプFAB（スクラブUIの上に重ねる）。位置未許可・測位未完了はToastで穏当に。
@@ -803,13 +857,14 @@ private fun SplitDragHandle(modifier: Modifier, onDrag: (Float) -> Unit) {
  * （映像なしコース＝chainageに対応するsession_id/base_epoch_msが無い、フレーム未解決、ファイル欠落の全ケース共通）。
  */
 @Composable
-private fun NaviVideoSurface(file: File?, modifier: Modifier = Modifier) {
+private fun NaviVideoSurface(file: File?, preparing: Boolean = false, modifier: Modifier = Modifier) {
+    val latestPath by rememberUpdatedState(file?.path)
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = file?.path) {
-        value = if (file != null && file.exists()) {
-            BitmapFactory.decodeFile(file.absolutePath)
-        } else {
-            null
-        }
+        val requestedPath = file?.path
+        val decoded = if (file != null) withContext(Dispatchers.IO) {
+            if (file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
+        } else null
+        if (requestedPath == latestPath) value = decoded
     }
     Box(
         modifier = modifier.background(Color.Black),
@@ -825,10 +880,13 @@ private fun NaviVideoSurface(file: File?, modifier: Modifier = Modifier) {
             )
         } else {
             Text(
-                "この区間の映像はありません",
+                if (preparing) "映像を準備しています" else "この区間の映像はありません",
                 color = Color.White,
                 style = MaterialTheme.typography.bodyMedium,
             )
+        }
+        if (bmp != null && preparing) {
+            Text("映像を準備しています", color = Color.White, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -852,13 +910,12 @@ private const val NAVI_OVERZOOM_CEILING = 18.0
  * 座標を解決できないイベント（軌跡の外側等）は描画対象から除く。
  */
 private fun resolvedStopSymbolPoint(
-    segments: List<NaviSegmentEntity>,
-    trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
+    preparedRoute: NaviPreparedRoute,
     event: NaviEventEntity,
     sequenceIndex: Int,
 ): StopSymbolPoint? {
     val chainage = event.chainageStartM ?: return null
-    val (lat, lon) = NaviCamera.positionAtChainageM(segments, trackPointsBySegmentId, chainage) ?: return null
+    val (lat, lon) = NaviCamera.positionAtChainageM(preparedRoute, chainage) ?: return null
     return StopSymbolPoint(
         stopCardId = event.stopCardId,
         latitude = lat,

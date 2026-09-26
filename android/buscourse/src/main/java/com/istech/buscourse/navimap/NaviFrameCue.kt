@@ -25,17 +25,20 @@ object NaviFrameResolver {
         segments: List<NaviSegmentEntity>,
         trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
         chainageM: Double,
-    ): NaviFrameCue? {
-        val orderedSegments = segments.sortedBy { it.seq }
+    ): NaviFrameCue? = frameCueAtChainageM(NaviPreparedRoute(segments, trackPointsBySegmentId), chainageM)
+
+    /** 準備済み経路を使い、並べ替えずに cue を解決する。 */
+    fun frameCueAtChainageM(prepared: NaviPreparedRoute, chainageM: Double): NaviFrameCue? {
+        val orderedSegments = prepared.segments
         val segment = resolveSegment(orderedSegments, chainageM) ?: return null
 
         val resolved = if (segment.kind == TRACK_KIND) {
             // ★[NaviCamera.positionAtChainageM]と同じく、点が引けないTRACK（0点等）は
             // 直前TRACK終端へフォールバックする（対称性の維持）。
-            interpolateTRelS(trackPointsBySegmentId[segment.id].orEmpty(), chainageM)?.let { segment to it }
-                ?: precedingTerminalCue(orderedSegments, trackPointsBySegmentId, chainageM)
+            interpolateTRelS(prepared.trackPointsBySegmentId[segment.id].orEmpty(), chainageM)?.let { segment to it }
+                ?: precedingTerminalCue(prepared, chainageM)
         } else {
-            precedingTerminalCue(orderedSegments, trackPointsBySegmentId, chainageM)
+            precedingTerminalCue(prepared, chainageM)
         } ?: return null
 
         val (effectiveSegment, tRelS) = resolved
@@ -58,12 +61,18 @@ object NaviFrameResolver {
         unsortedPoints: List<NaviTrackPointEntity>,
         chainageM: Double,
     ): Double? {
-        val points = unsortedPoints.sortedBy { it.chainageM }
+        val points = unsortedPoints
         if (points.isEmpty()) return null
         if (points.size == 1 || chainageM <= points.first().chainageM) return points.first().tRelS
         if (chainageM >= points.last().chainageM) return points.last().tRelS
 
-        val upperIndex = points.indexOfFirst { it.chainageM >= chainageM }
+        var low = 0
+        var high = points.lastIndex
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (points[mid].chainageM >= chainageM) high = mid else low = mid + 1
+        }
+        val upperIndex = low
         val first = points[upperIndex - 1]
         val second = points[upperIndex]
         val denominator = second.chainageM - first.chainageM
@@ -75,18 +84,15 @@ object NaviFrameResolver {
 
     /** [NaviCamera.precedingTerminalPosition]のt_rel_s版。凍結先セグメント自体もsession_id解決のため返す。 */
     private fun precedingTerminalCue(
-        orderedSegments: List<NaviSegmentEntity>,
-        trackPointsBySegmentId: Map<Long, List<NaviTrackPointEntity>>,
+        prepared: NaviPreparedRoute,
         chainageM: Double,
-    ): Pair<NaviSegmentEntity, Double>? = orderedSegments
-        .asSequence()
-        .filter { it.kind == TRACK_KIND && it.chainageEndM <= chainageM }
-        .sortedWith(compareByDescending<NaviSegmentEntity> { it.chainageEndM }.thenByDescending { it.seq })
-        .mapNotNull { seg ->
-            trackPointsBySegmentId[seg.id].orEmpty().maxByOrNull { point -> point.chainageM }
-                ?.let { seg to it.tRelS }
+    ): Pair<NaviSegmentEntity, Double>? {
+        for (seg in prepared.tracksByTerminalDescending) {
+            if (seg.chainageEndM > chainageM) continue
+            prepared.terminalPointBySegmentId[seg.id]?.let { return seg to it.tRelS }
         }
-        .firstOrNull()
+        return null
+    }
 
     private const val TRACK_KIND = "TRACK"
 }

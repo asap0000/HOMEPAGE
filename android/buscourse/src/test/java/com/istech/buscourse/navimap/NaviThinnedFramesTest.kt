@@ -33,4 +33,28 @@ class NaviThinnedFramesTest {
         assertThat(NaviThinnedFrames.atOrBefore(kept, 1_000_000L + 12_000)?.fileRelPath).isEqualTo("f12.jpg")
         assertThat(NaviThinnedFrames.atOrBefore(kept, 999_999L)).isNull()
     }
+
+    @Test fun intervalHead_keepsLatestFrameBeforeIntervalStart() {
+        val offsetSegment = segment.copy(baseEpochMs = 1_000_000L)
+        val offsetPoints = listOf(
+            points[0].copy(tRelS = 5.0),
+            points[1].copy(tRelS = 15.0),
+        )
+        val frames = listOf(frame(3), frame(4), frame(6), frame(8))
+        val catalog = NaviThinnedFrames.keptFramesBySession(
+            listOf(offsetSegment), mapOf(1L to offsetPoints), mapOf(7L to frames),
+        )[7L]!!
+
+        assertThat(catalog.first().fileRelPath).isEqualTo("f4.jpg")
+        // 区間の開始時刻ちょうどでも、開始前に撮影した最新コマを引ける。
+        assertThat(NaviThinnedFrames.atOrBefore(catalog, 1_005_000L)?.fileRelPath).isEqualTo("f4.jpg")
+    }
+
+    @Test fun unthinnedCatalogKeepsEveryIntervalFrameAndUsesSameTimeSearch() {
+        val all = NaviThinnedFrames.keptFramesBySession(
+            listOf(segment), mapOf(1L to points), mapOf(7L to (0..20).map(::frame)), thinningOn = false,
+        )[7L]!!
+        assertThat(all.map { it.fileRelPath }).containsExactlyElementsIn((0..20).map { "f$it.jpg" }).inOrder()
+        assertThat(NaviThinnedFrames.atOrBefore(all, 1_010_000L)?.fileRelPath).isEqualTo("f10.jpg")
+    }
 }
