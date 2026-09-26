@@ -2569,7 +2569,7 @@ private fun NaviVideoOverlay(
         )
         val cueUs = (System.nanoTime() - cueStartNs) / 1000
         // 地図側（自車位置）も測位ごとに同じ並べ替えをしている。その代表として1回ぶんを測る（debug だけ）。
-        val camUs = if (BuildConfig.DEBUG && leadFix != null) {
+        val camUs = if (BuildConfig.DEBUG) {
             val camStartNs = System.nanoTime()
             NaviCamera.positionAtChainageM(routeData.preparedRoute, chainageM.toDouble())
             (System.nanoTime() - camStartNs) / 1000
@@ -2598,13 +2598,14 @@ private fun NaviVideoOverlay(
             }
             findUs = (System.nanoTime() - findStartNs) / 1000
         }
-        // ★調査記録は引き直しを決めた後に書く（前のコマを書くと①の突き合わせに使えない）。GPS 追従中だけ。
-        if (leadFix != null) {
+        // ★調査記録は引き直しを決めた後に書く（前のコマを書くと①の突き合わせに使えない）。
+        // debug では手動（スライダー）の間も書く＝室内でも同じ操作で処理時間を比べられる（2026-09-26・SHG12 の前後比較）。
+        if (BuildConfig.DEBUG) {
             val shownFile = videoFrameFile
             diagnosticScope.launch {
                 NaviLeadDiagnostic.append(
-                    context, leadFix.elapsedRealtimeMs, chainageM.toDouble(),
-                    onCourse, searchAll, leadFix.speedMps, leadSeconds, lookupChainageM, lookup.reset, cue, shownFile,
+                    context, leadFix?.elapsedRealtimeMs ?: SystemClock.elapsedRealtime(), chainageM.toDouble(),
+                    onCourse, searchAll, leadFix?.speedMps, leadSeconds, lookupChainageM, lookup.reset, cue, shownFile,
                     perf = listOf(cueUs, camUs, findUs, perf.lastDecodeUs, perf.decodeCount, perf.firstFrameMs, thinningOn),
                 )
             }
