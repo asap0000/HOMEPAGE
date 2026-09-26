@@ -25,6 +25,11 @@ class GnssBackedLocationEngineAdapter(private val gnss: GnssLocationSource) {
     fun connect(sink: VehiclePositionSink) {
         gnss.start(
             minIntervalMs = 1000L,
+            // ★ここだけ距離フィルタを残す理由（2026-08-01・[GnssLocationSource.start] の既定は 0f へ変更済み）:
+            // 本アダプタは**地図上の自車位置の表示専用**で、記録には一切関与しない。停車中に位置が
+            // 来なくても「自車が止まって見える」だけで実害がなく、静止時の GPS 漂流でピンが揺れるのを抑えられる。
+            // **⚠ 記録側（`BusRecordingService`）は既定の 0f を使うこと**——距離フィルタを入れると
+            // 停車が1点も記録されない（POC実走で GPS の 33〜39% が欠測した実測あり）。
             minDistanceM = 2f,
             onLocation = { location -> sink.onLocationUpdate(location) },
         )

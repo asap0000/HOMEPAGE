@@ -12,6 +12,9 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "course",
+    indices = [
+        Index(value = ["bus_id", "course_no", "year"], unique = true, name = "index_course_identity"),
+    ],
     foreignKeys = [
         ForeignKey(
             entity = CourseEntity::class, parentColumns = ["id"],
@@ -36,7 +39,54 @@ data class CourseEntity(
      * `is_hub`・`stop_card_id` 列と同様、単純な ALTER TABLE ADD COLUMN に留める方針、§3.5）。
      */
     @ColumnInfo(name = "source_session_id") val sourceSessionId: Long? = null,
+    @ColumnInfo(name = "bus_id") val busId: String? = null,
+    @ColumnInfo(name = "course_no") val courseNo: Int? = null,
+    /** 年度（4月始まり）。2026 = 2026-04-01〜2027-03-31。 */
+    @ColumnInfo(name = "year") val year: Int? = null,
+    /**
+     * 成形（コース編集）に入った時刻。**NULL＝まだ成形していない**（version 21、DB列台帳 A-3）。
+     *
+     * **開いた時点ではなく保存した時点で立てる**——覗いただけで固定されると、洗浄し直しで置き換えられなくなる
+     * （design-gate 復唱②「未成形の予約は洗浄し直しで置き換わる／成形に入った予約は置き換えず別に並ぶ」）。
+     * 判定に使うのは [com.istech.buscourse.course.CourseRepository.washAndReserve]（置き換え対象の選別）と
+     * 一覧の状態表示。
+     */
+    @ColumnInfo(name = "shaping_started_at") val shapingStartedAt: Long? = null,
+    /**
+     * 直しようがない理由でナビ用マップを作れなかった事実（version 21、DB列台帳 A-3）。
+     * **NULL＝そういう失敗はしていない**。値は [NaviBlockReason] の機械可読コード（官房推奨 2026-08-03）
+     * ——表示文言を入れると文言改訂のたびに旧行が古い言い回しで残り、「一覧表記は実在表記に固定」の規律と干渉する。
+     *
+     * **なぜ列が要るか**: 他の状態は導出できる（送り済み・変更あり＝`navi_map` の有無と [updatedAt] の前後、
+     * 予約＝[kind] と [shapingStartedAt]）。**`navi_map` は生成に成功したときしか行が無いので、
+     * 「送ろうとして直しようがない理由で失敗した」事実だけはどこにも残らない**。
+     * これが無いと一覧の印が「成形中」のままになり、利用者が同じ失敗をしに戻ってくる。
+     * **編集して保存したら必ずクリアする**（中身が変わったので再挑戦できる）。
+     */
+    @ColumnInfo(name = "navi_block_reason") val naviBlockReason: String? = null,
 )
+
+/**
+ * [CourseEntity.naviBlockReason] に入る機械可読の理由コード（version 21）。
+ * **表示文言はここに持たない**——UI 側で対応させる（官房推奨 2026-08-03）。
+ */
+enum class NaviBlockReason {
+    /**
+     * 軌跡が作れずナビ用マップを構成できない。
+     * カードだけで組まれたコース（実測 GPS も route_point も無い）が該当し、**編集で点を足せば解消しうる**
+     * ＝永久の断定ではないため、保存でクリアする運用と対になる。
+     */
+    NO_TRACK,
+}
+
+data class CourseIdentity(val busId: String, val courseNo: Int, val year: Int)
+
+fun CourseEntity.identityOrNull(): CourseIdentity? {
+    val identityBusId = busId ?: return null
+    val identityCourseNo = courseNo ?: return null
+    val identityYear = year ?: return null
+    return CourseIdentity(identityBusId, identityCourseNo, identityYear)
+}
 
 /**
  * `course_stop`（コース内の停留所順列。設計書§3.5）。企画原則の「順列」部分そのもの。
@@ -125,7 +175,88 @@ data class CourseStopEntity(
     @ColumnInfo(name = "sequence_index") val sequenceIndex: Int,
     /** コース起点からの累積距離キャッシュ。RoutePreprocessor が route_point 生成時に算出（§3.9・§7.3） */
     @ColumnInfo(name = "expected_chainage_m") val expectedChainageM: Double?,
+
+    // ------------------------------------------------------------------
+    // version 19（2026-07-30。元は v18 として実装したが、v18 は `937e340`（旧データ救済・
+    // navi_frame_index）の先着予約と判明し、官房裁定で v19 へリナンバー）: 結合で生まれた点を扱うための4列。
+    //
+    // 【なぜ要るのか】3ポインタ（frame/event/card）は**そのセッションに実体があること**を前提にする。
+    // ところが 2026-07-30 に発覚した停留所マーカー欠落セッションのリカバリーでは、
+    // **どのポインタも指せない点**を作る必要が出た——
+    //   ①別セッションの停留所位置を移植した点（移植元のカードは別 DB・別端末にある）
+    //   ②軌跡の滞留だけを根拠に推定した点（カードも映像コマも存在しない）
+    // これらは「座標を自分で持つ点」でなければ表現できない。
+    //
+    // 【出自と誤差が必須である理由】istech 正典 `docs/2026-07-30_制度定義_時空の分離と再統合.md`
+    // 条2「結合は必ず出自と誤差を持つ」。**復元・推定した値を実記録と同格に置かない**
+    // ——同格に混ぜると後から区別できなくなる（不可逆）。下流が品質でフィルタできることが要件。
+    // ------------------------------------------------------------------
+
+    /**
+     * 結合で生まれた点の座標（緯度）。**3ポインタのどれも指せない点だけが持つ**。
+     * ポインタがある点では null（位置は従来どおり coalesce(frame, event, card) で解決する）。
+     */
+    @ColumnInfo(name = "resolved_latitude") val resolvedLatitude: Double? = null,
+
+    /** 結合で生まれた点の座標（経度）。[resolvedLatitude] と同時に非null／同時にnull。 */
+    @ColumnInfo(name = "resolved_longitude") val resolvedLongitude: Double? = null,
+
+    /**
+     * 出自（どうやってこの点を得たか）。**族は横断で固定**（正典 §4.1・2026-07-30 官房裁定）。
+     * 値は [CourseStopProvenance] の name。既定 `RECORDED`＝実記録（従来の点はすべてこれ）。
+     *
+     * **「出自は最も弱い根拠に合わせる」**（正典 条2）——厳密に算出した部分があっても、
+     * 土台が近似で作られているなら同じ札を継ぐ。強い部分だけ見て強い札を付けると下流がフィルタできない。
+     */
+    @ColumnInfo(name = "provenance", defaultValue = "'RECORDED'")
+    val provenance: String = CourseStopProvenance.RECORDED.name,
+
+    /**
+     * 空間軸の推定誤差（±m）。移植なら「移植元の停留所と、貼り付けた軌跡上の点との距離」。
+     *
+     * **時間軸の誤差（±秒）とは別列で持つ**（正典 条2・2026-07-30 裁定。当チームの問いが採られた）。
+     * 単位の違う値を同じ列に入れない——時間と空間が別軸なら誤差も別軸で持つのが正しい。
+     * 当チームの移植・推定は空間で合わせるため、現時点で使うのはこの列だけ
+     * （`error_time_s` は Windows 側の時間結合が請求元。必要になった時点で足す）。
+     */
+    @ColumnInfo(name = "error_space_m") val errorSpaceM: Double? = null,
+
+    /** 押下を畳んだ回数（version 22）。今回は列だけ用意し、null＝不明のまま扱う。 */
+    @ColumnInfo(name = "folded_press_count") val foldedPressCount: Int? = null,
 )
+
+/**
+ * [CourseStopEntity.provenance] の値（**族は istech 正典 §4.1 で横断固定**・2026-07-30 官房裁定）。
+ *
+ * **綴りは各系統ローカルのままでよい**と明記されている（改名は移行コストを復旧のブロッカーに変えるため）。
+ * 当チームが使うのは4値で、`JOINED_TEMPORAL`（時間結合＝Windows/EX の請求元）は当面使わない。
+ */
+enum class CourseStopProvenance {
+    /** 実測。一次情報そのまま（結合していない）。**従来の点はすべてこれ**。 */
+    RECORDED,
+
+    /**
+     * 空間一致。座標の近接で既知の停留所カードに一致させた（正典の概念値 `MATCHED_SPATIAL`）。
+     * 綴りは鋳造時（当初 v18 として実装・v19 へリナンバー）のまま（正典 §4.1 が改名不要と明記）。
+     */
+    GEOFENCE_MATCHED,
+
+    /**
+     * 移植。**別セッションの記録を持ち込んだ**。
+     * `JOINED_TEMPORAL`（時刻をずらして貼る）**では言い足りない**——**出所そのものが別セッション**。
+     * 2026-07-30 のリカバリーでは 53 件すべてが別の走行日に由来し、**当日人が押したマーカーは1件も無い**。
+     */
+    TRANSPLANTED,
+
+    /**
+     * 合成。一致せずフォールバックで生成した＝**根拠が最も弱い**（正典の概念値 `SYNTHESIZED`）。
+     * 軌跡の滞留だけを根拠にした点（カードも映像コマも無い）がこれに当たる。
+     */
+    FALLBACK_SYNTHESIZED,
+
+    /** 人の補正。人が後から直した・足した（正典 条3）。 */
+    HUMAN_CORRECTED,
+}
 
 /**
  * `course_segment`（コース内の区間＝順列の隣接ペアごとの軌跡割当。設計書§3.5）。

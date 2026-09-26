@@ -7,20 +7,31 @@ import androidx.lifecycle.viewModelScope
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.MapDataPackageEntity
+import com.istech.buscourse.core.data.NaviBlockReason
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.course.ApplyApprovedResult
-import com.istech.buscourse.course.CourseCreationResult
+import com.istech.buscourse.course.CourseCutResult
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.course.CourseStopEdit
 import com.istech.buscourse.course.DuplicateFrameCandidate
 import com.istech.buscourse.course.FindOrCreateCandidate
 import com.istech.buscourse.course.SegmentExtractionResult
+import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
+import com.istech.buscourse.navimap.NaviMapGenerationException
+import com.istech.buscourse.navimap.NaviMapGenerator
+import com.istech.buscourse.navimap.NaviMapRepository
 import kotlinx.coroutines.launch
 import java.io.File
+
+sealed interface SendToNaviResult {
+    object Success : SendToNaviResult
+    data class Retryable(val message: String) : SendToNaviResult
+    data class Blocked(val reason: NaviBlockReason) : SendToNaviResult
+}
 
 /**
  * フェーズ2 UI 共有 ViewModel（設計書§2.1 course パッケージのUI面）。
@@ -57,9 +68,14 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     /** 取り込み済み地図パッケージの一覧・選択状態（読み取りは画面から直接呼んでよい、既存方針どおり）。 */
     val mapRepository: MapDataPackageRepository by lazy { MapDataPackageRepository(database) }
 
+    /** ナビ選択・識別情報警告の読み取り窓口（design-gate B-3改 y×5・2026-08-04）。 */
+    val naviMapRepository: NaviMapRepository by lazy { NaviMapRepository(database) }
+
     private val mapPackageImporter: MapPackageImporter by lazy {
         MapPackageImporter(getApplication<BusCourseApplication>(), mapRepository)
     }
+
+    private val naviMapGenerator by lazy { NaviMapGenerator(database) }
 
     /**
      * courseIdごとの編成下書き（画面破棄・戻る操作で失われないようViewModelに保持する）。
@@ -253,18 +269,6 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** コース全体のGPXエクスポート（CourseDetailScreen、§3.11.3）。 */
-    fun exportCourse(courseId: Long, onResult: (Result<File>) -> Unit = {}) {
-        viewModelScope.launch {
-            val result = runCatching { repository.exportCourse(courseId) }
-            logOutcome(result, WorkLogCategory.GPX, "GPXエクスポート") { file ->
-                val courseName = runCatching { repository.getCourseWithDetails(courseId)?.course?.name }.getOrNull()
-                "コース『${courseName ?: "ID:$courseId"}』をGPXエクスポート（${file.name}）"
-            }
-            onResult(result)
-        }
-    }
-
     /** 試走ログからの区間自動抽出（ExtractionScreen、§3.9）。 */
     fun extractSegmentsFromSession(
         sessionId: Long,
@@ -334,8 +338,8 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     /**
      * コース確定→route_point生成（②「コース編成(抽出)」フェーズC-1、SessionAnalysisDialog
      * 「欠損/割り込みレポート」の「このセッションでコースを確定（ルート生成）」ボタン、2026-07-14追加）。
-     * 承認済み（フェーズB）のセッションから、そのコースのナビ用連続トラックを拠点→拠点にクリップして
-     * 確定し、`route_point` へ保存する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
+     * 承認済み（フェーズB）のセッションから、そのコースのナビ用連続トラックをコース停留所の時間クラスタに
+     * クリップして確定し、`route_point` へ保存する。書き込み系のため他の関数と同様に[viewModelScope]管理下で実行する。
      */
     fun confirmCourseRoute(
         courseId: Long,
@@ -351,25 +355,15 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /**
-     * コース創設（トップダウン、3パス成熟モデルのパス1＋パス2、S4「コース創設」画面
-     * [CourseCreateScreen] 「創設」ボタン、2026-07-14追加・2026-07-15全面改訂）。
-     * [hubStopCardIds] は拠点分割の選択拠点、[courseNames] は断片indexに対応するコース名（空なら
-     * 既定名）。書き込み（course_stop等の複数DAO操作）を伴うため、他の書き込み系関数と同様に
-     * [viewModelScope] 管理下で実行する（画面遷移によるスコープキャンセルで中途半端な創設状態を
-     * 残さないため）。
-     */
-    fun createCoursesFromSession(
+    fun washAndReserve(
         sessionId: Long,
-        hubStopCardIds: Set<Long>,
-        courseNames: List<String> = emptyList(),
-        onResult: (Result<CourseCreationResult>) -> Unit = {},
+        stayDepartM: Double,
+        onResult: (Result<com.istech.buscourse.course.WashReserveResult>) -> Unit = {},
     ) {
         viewModelScope.launch {
-            val result = runCatching { repository.createCoursesFromSession(sessionId, hubStopCardIds, courseNames) }
-            logOutcome(result, WorkLogCategory.COURSE, "コース創設") { r ->
-                "セッション#${sessionId}からコース創設（作成${r.createdCourseIds.size}件・停留所${r.totalStopCount}件・" +
-                    "カード吸着${r.cardAttachedStopCount}件・映像のみ${r.frameOnlyStopCount}件）"
+            val result = runCatching { repository.washAndReserve(sessionId, stayDepartM) }
+            logOutcome(result, WorkLogCategory.COURSE, "洗浄して予約") { r ->
+                "セッション#${sessionId}を洗浄して予約（停留所${r.stopCount}件）"
             }
             onResult(result)
         }
@@ -422,7 +416,11 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             val result = runCatching { repository.createCourse(name, kind, baseCourseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの作成") {
-                "コース『$name』を作成" + if (kind == CourseKind.TEMPORARY) "（臨時）" else ""
+                "コース『$name』を作成" + when (kind) {
+                    CourseKind.TEMPORARY -> "（臨時）"
+                    CourseKind.DRAFT -> "（予約）"
+                    CourseKind.STANDARD -> ""
+                }
             }
             onResult(result)
         }
@@ -439,6 +437,95 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
             val result = runCatching { repository.deleteCourse(courseId) }
             logOutcome(result, WorkLogCategory.COURSE, "コースの削除") {
                 "コース『${courseName ?: "ID:$courseId"}』を削除"
+            }
+            onResult(result)
+        }
+    }
+
+    fun cutCourse(
+        courseId: Long,
+        cutIndexes: Set<Int>,
+        onResult: (Result<CourseCutResult>) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val courseName = runCatching { repository.getCourseEditDetails(courseId)?.course?.name }.getOrNull()
+            val result = runCatching { repository.cutCourseAt(courseId, cutIndexes) }
+            logOutcome(result, WorkLogCategory.COURSE, "コースを切る") { cut ->
+                "『${courseName ?: "ID:$courseId"}』を ${cut.createdCourseIds.size} 本に分割"
+            }
+            onResult(result)
+        }
+    }
+
+    /**
+     * コース identity（`bus_id`/`course_no`/`year`）の設定・編集（CourseDetailScreen 編集ダイアログ
+     * 「保存」、(e) コース identity設定UI、2026-07-24追加）。[UpdateIdentityResult] は `Result<T>` では
+     * ないため、`logOutcome`（`Result`前提）は使わず、成功判定を `== UpdateIdentityResult.Success` で
+     * 直接行う。ログ本文には identity の3値のみを載せ、停留所名・園児名等の PII は含めない。
+     * 失敗（Duplicate/Invalid/NotFound）は [onResult] でUIへ返すのみでログは記録しない。
+     */
+    fun updateCourseIdentity(
+        courseId: Long,
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        onResult: (UpdateIdentityResult) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateCourseIdentity(courseId, busId, courseNo, year)
+            if (result == UpdateIdentityResult.Success) {
+                repository.logWork(WorkLogCategory.COURSE, "識別情報を設定（${year}年 ${busId}${courseNo}）")
+            }
+            onResult(result)
+        }
+    }
+
+    fun sendCourseToNavi(
+        courseId: Long,
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        onResult: (SendToNaviResult) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            // ★同じ identity を入れ直しただけのときは書かない——`updateIdentity` は同値でも `updated_at` を
+            // 進めるため、そのあと送信が失敗すると**内容を何も変えていないのに「送り済み→変更あり」**になる（実射で再現）。
+            val identityResult =
+                if (repository.hasSameIdentity(courseId, busId, courseNo, year)) UpdateIdentityResult.Success
+                else repository.updateCourseIdentity(courseId, busId, courseNo, year)
+            val result = when (identityResult) {
+                UpdateIdentityResult.DuplicateIdentity -> SendToNaviResult.Retryable(
+                    "同じ『${year}年 ${busId.trim()}${courseNo}コース』が別のコースに使われています。番号を変えてもう一度お試しください。"
+                )
+                UpdateIdentityResult.InvalidInput -> SendToNaviResult.Retryable("バス識別子・コース番号・年度を正しく入力してください。")
+                UpdateIdentityResult.CourseNotFound -> SendToNaviResult.Retryable("コースが見つかりませんでした。")
+                UpdateIdentityResult.Success -> {
+                    if (mapRepository.getSelected() == null) {
+                        SendToNaviResult.Retryable("オフライン地図（.iscmap）が選ばれていません。地図データ管理で選んでください。")
+                    } else {
+                        try {
+                            naviMapGenerator.generateFromCourse(courseId)
+                            // 送れなかった理由を消し、成形済みにする（消さないと一覧が「送れません」と嘘をつき続け、
+                            // 立てないと保存せずに送った予約が洗浄し直しで消える）。
+                            repository.markCourseSentToNavi(courseId)
+                            SendToNaviResult.Success
+                        } catch (e: NaviMapGenerationException) {
+                            if (e.reason == NaviMapGenerationException.Reason.INSUFFICIENT_TRACK_POINTS) {
+                                repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+                                SendToNaviResult.Blocked(NaviBlockReason.NO_TRACK)
+                            } else {
+                                SendToNaviResult.Retryable("ナビ用の地図を作れませんでした。入力と地図データを確認して、もう一度お試しください。")
+                            }
+                        } catch (e: Exception) {
+                            SendToNaviResult.Retryable("ナビ用の地図を作れませんでした。入力と地図データを確認して、もう一度お試しください。")
+                        }
+                    }
+                }
+            }
+            when (result) {
+                SendToNaviResult.Success -> repository.logWork(WorkLogCategory.COURSE, "ナビ用に送る")
+                is SendToNaviResult.Blocked -> repository.logWork(WorkLogCategory.ERROR, "ナビ用に送る", result.reason.name)
+                is SendToNaviResult.Retryable -> repository.logWork(WorkLogCategory.ERROR, "ナビ用に送る", result.message)
             }
             onResult(result)
         }

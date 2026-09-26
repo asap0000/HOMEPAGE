@@ -1,18 +1,12 @@
-name: Release APK
+name: BusCourse Release (draft)
 
-# Publishes a signed APK as a GitHub Release.
-#   - Push a tag like v1.0.0  ->  release is created automatically.
-#   - Or run manually (workflow_dispatch) and type a tag name.
-# Tags follow semantic versioning with three components (istech versioning rule):
-# vMAJOR.MINOR.PATCH, e.g. v1.0.0, bugfix -> v1.0.1.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag/version (e.g. v1.0.0)"
+      version:
+        description: "BusCourse version (MAJOR.MINOR.PATCH)"
         required: true
+        type: string
 
 permissions:
   contents: write
@@ -23,14 +17,19 @@ jobs:
     defaults:
       run:
         working-directory: android
-    env:
-      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match MAJOR.MINOR.PATCH (for example 1.2.3)."
+            exit 1
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -40,82 +39,120 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        # v3 の既定 packages は旧 SDK Tools `tools` を含み、Google から削除済み。
+        with:
+          packages: 'platform-tools'
 
       - name: Set up Gradle (with caching)
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install SDK packages
-        run: |
-          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+        run: yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Decrypt release keystore
+      - name: Restore BusCourse release keystore
         env:
-          KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
+          BUSCOURSE_KEYSTORE_BASE64: ${{ secrets.BUSCOURSE_KEYSTORE_BASE64 }}
+          BUSCOURSE_STORE_PASSWORD: ${{ secrets.BUSCOURSE_STORE_PASSWORD }}
+          BUSCOURSE_KEY_ALIAS: ${{ secrets.BUSCOURSE_KEY_ALIAS }}
+          BUSCOURSE_KEY_PASSWORD: ${{ secrets.BUSCOURSE_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_PASSPHRASE" ]; then
-            echo "::error::KEYSTORE_PASSPHRASE secret is missing; cannot sign the release." >&2
+          if [ -z "$BUSCOURSE_KEYSTORE_BASE64" ] || [ -z "$BUSCOURSE_STORE_PASSWORD" ] || \
+             [ -z "$BUSCOURSE_KEY_ALIAS" ] || [ -z "$BUSCOURSE_KEY_PASSWORD" ]; then
+            echo "::error::All four BusCourse signing secrets must be configured."
             exit 1
           fi
-          gpg --quiet --batch --yes --decrypt \
-            --passphrase "$KEYSTORE_PASSPHRASE" \
-            --output "$RUNNER_TEMP/release.keystore" \
-            app/release.keystore.gpg
-          echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          KEYSTORE_PATH="$RUNNER_TEMP/buscourse-release.p12"
+          if ! printf '%s' "$BUSCOURSE_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH" || [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "::error::Could not restore the BusCourse release keystore."
+            exit 1
+          fi
+          # ★合言葉は $GITHUB_ENV に書かない（後のステップ全体へ漏らさない）。ビルドのステップにだけ env で渡す。
+          echo "BUSCOURSE_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
-      - name: Compute versionCode / versionName
+      - name: Stop if the release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
         run: |
-          # versionCode: a monotonically increasing integer per release run.
-          # github.run_number only ever grows for this workflow; the +1000 base keeps
-          # it comfortably above already-shipped builds and leaves headroom.
-          echo "VERSION_CODE=$((1000 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
-          # versionName: the release tag without the leading "v" (e.g. v0.3-beta -> 0.3-beta).
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "VERSION_NAME=${TAG#v}" >> "$GITHUB_ENV"
+          TAG="buscourse-v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
 
-      - name: Build signed release APK
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-
-      # istech オフライン厳守の機械的担保: リリース前の最終ゲート(lite/pro 両方を検査)。
-      - name: Verify offline policy (no INTERNET permission)
+      - name: Compute versionCode and versionName
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
+          echo "VERSION_CODE=$((100 + $GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build BusCourse release APK
+        env:
+          BUSCOURSE_STORE_PASSWORD: ${{ secrets.BUSCOURSE_STORE_PASSWORD }}
+          BUSCOURSE_KEY_ALIAS: ${{ secrets.BUSCOURSE_KEY_ALIAS }}
+          BUSCOURSE_KEY_PASSWORD: ${{ secrets.BUSCOURSE_KEY_PASSWORD }}
+        run: ./gradlew :buscourse:testDebugUnitTest :buscourse:assembleRelease --no-daemon --stacktrace
+
+      - name: Verify release APK
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          APK="buscourse/build/outputs/apk/release/buscourse-release.apk"
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          for apk in app/build/outputs/apk/lite/release/app-lite-release.apk \
-                     app/build/outputs/apk/pro/release/app-pro-release.apk; do
-            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
-              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
-              exit 1
-            fi
-            echo "OK: $apk does not request INTERNET permission."
-          done
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          if [ ! -f "$APK" ]; then
+            echo "::error::Expected release APK was not produced: $APK"
+            exit 1
+          fi
+          if "$AAPT" dump permissions "$APK" | grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE)'; then
+            echo "::error::Release APK requests a network permission."
+            exit 1
+          fi
+          echo "OK: release APK has no network permissions."
+          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+          if ! printf '%s\n' "$CERTS" | grep -q 'Signer #1 certificate DN:'; then
+            echo "::error::APK signature verification did not report a signer."
+            exit 1
+          fi
+          if printf '%s\n' "$CERTS" | grep -q 'CN=Android Debug'; then
+            echo "::error::Release APK is signed with the Android debug certificate."
+            exit 1
+          fi
+          VERSION_NAME=$("$AAPT" dump badging "$APK" | sed -n "s/^package:.*versionName='\\([^']*\\)'.*/\\1/p")
+          if [ "$VERSION_NAME" != "$VERSION" ]; then
+            echo "::error::APK versionName '$VERSION_NAME' does not match requested version '$VERSION'."
+            exit 1
+          fi
+          echo "OK: signed APK versionName matches $VERSION."
 
-      # istech リリース手順: 成果物には SHA-256 チェックサムを添付し、
-      # リリースノートにも併記する（ランディングページ転記用）。
-      - name: Stage APKs and generate SHA-256 checksums
+      - name: Stage APK and SHA-256 checksum
         id: stage
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          cp app/build/outputs/apk/lite/release/app-lite-release.apk \
-             "$GITHUB_WORKSPACE/PrivacyCamera-Lite-${TAG}.apk"
-          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
-             "$GITHUB_WORKSPACE/PrivacyCamera-Pro-${TAG}.apk"
+          APK_NAME="BusCourse-$VERSION.apk"
+          cp buscourse/build/outputs/apk/release/buscourse-release.apk "$GITHUB_WORKSPACE/$APK_NAME"
           cd "$GITHUB_WORKSPACE"
-          sha256sum "PrivacyCamera-Lite-${TAG}.apk" | tee "PrivacyCamera-Lite-${TAG}.apk.sha256"
-          sha256sum "PrivacyCamera-Pro-${TAG}.apk" | tee "PrivacyCamera-Pro-${TAG}.apk.sha256"
-          echo "sha256_lite=$(cut -d' ' -f1 "PrivacyCamera-Lite-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
-          echo "sha256_pro=$(cut -d' ' -f1 "PrivacyCamera-Pro-${TAG}.apk.sha256")" >> "$GITHUB_OUTPUT"
+          sha256sum "$APK_NAME" | tee "$APK_NAME.sha256"
+          echo "sha256=$(cut -d' ' -f1 "$APK_NAME.sha256")" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release with the APKs
+      # ★draft は固定（入力で変えられない）。公開はオーナーが GitHub の画面で押す（紙芝居 09-26 改1）。
+      # draft の間はタグも作られない＝旧手順のような「タグ一つで公開」の入口が無い。
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          draft: true
+          prerelease: false
+          tag_name: buscourse-v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: BusCourse ${{ inputs.version }}
           body: |
-            **SHA-256 (Lite APK)**: `${{ steps.stage.outputs.sha256_lite }}`
-            **SHA-256 (Pro APK)**: `${{ steps.stage.outputs.sha256_pro }}`
+            SHA-256: `${{ steps.stage.outputs.sha256 }}`
           files: |
-            PrivacyCamera-*.apk
-            PrivacyCamera-*.apk.sha256
+            BusCourse-${{ inputs.version }}.apk
+            BusCourse-${{ inputs.version }}.apk.sha256

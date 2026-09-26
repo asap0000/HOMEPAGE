@@ -53,9 +53,10 @@ class RouteTrackOverlay(
     }
 
     /**
-     * コースの`route_point`（C-1で確定した連続ポリライン、起点→終点でchainage順に並んだ`(lat, lon)`列）を
-     * 1本の連続線として描画する（フェーズC-2）。区間ごとの`showSegment`（`segment_track`個別描画）とは
-     * 別の専用source/layer（[ROUTE_LINE_SOURCE_ID] / [ROUTE_LINE_LAYER_ID]）を使うため、両者は競合しない。
+     * コースの連続ポリライン（記録セッションの`gps_point`、またはC-1で確定した`route_point`の
+     * 起点→終点順`(lat, lon)`列）を1本の連続線として描画する。区間ごとの`showSegment`
+     * （`segment_track`個別描画）とは別の専用source/layer（[ROUTE_LINE_SOURCE_ID] /
+     * [ROUTE_LINE_LAYER_ID]）を使うため、両者は競合しない。
      *
      * [points]が2点未満（`LineString`を構成できない）の場合は何もしない
      * （呼び出し側は`route_point`未確定コースとして`showSegment`へフォールバックする）。

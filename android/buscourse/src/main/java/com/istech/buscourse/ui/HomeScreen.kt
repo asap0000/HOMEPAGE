@@ -1,5 +1,6 @@
 package com.istech.buscourse.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,14 +9,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +30,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -47,6 +56,13 @@ import androidx.compose.ui.unit.dp
  * 【2026-07-14追加】S4「コース創設」（トップダウン、記録セッションから2軸マトリクス評価→承認→
  * 拠点分割→新規コース群を生成、[CourseCreateScreen]）への導線を追加。既存「コース編成」は
  * 「コース編集」に改称（ラベルのみ。既存の順列編成機能自体は変更しない）。
+ *
+ * 【2026-07-26追加】機種変更バックアップ（「出口を作ってみる」、[BackupScreen]）への導線を追加。
+ * 棚卸し→ZIP生成→SAF保存の一本のみ。復元・暗号化・分割は今回の増分に含まない
+ * （タスク指示書「機種変更バックアップ『出口を作ってみる』」§0）。
+ *
+ * 【2026-07-27追加】機種変更バックアップの「復元」（[RestoreScreen]、[BackupScreen]の鏡像）への
+ * 導線を追加。まっさらな端末専用（既にデータが入っている端末では復元できない）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,7 +74,14 @@ fun HomeScreen(
     onOpenCourseCreate: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
+    onOpenBackupRestore: () -> Unit,
 ) {
+    var showExportRun by remember { mutableStateOf(false) }
+    BackHandler(enabled = showExportRun) { showExportRun = false }
+    if (showExportRun) {
+        ExportRunScreen(onBack = { showExportRun = false })
+        return
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -75,14 +98,41 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(16.dp)
+                // 2026-07-26追加：「バックアップ」を足したことで実機（OPPO Reno3A実測）では
+                // 一覧が画面下に収まりきらず最下段が到達不能になったため、スクロール可能にする
+                // （既存6項目でも将来また増える前提。バックアップ機能自体のスコープではなく、
+                // 新規メニュー項目を実際に押せるようにするための最小修正）。
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // 並び順＝ワークフローの順（2026-08-02 オーナー指示）: 走って記録する →
+            // その走行からコースを創る → 創ったコースを直す → カードを整える。
+            // POC は操作性の調整段階だが、ワークフローの組み換え自体は v20 の鋳造を待たずとも
+            // 既定路線に乗っている、というオーナー判断による。
             HomeMenuCard(
                 icon = Icons.Filled.FiberManualRecord,
                 title = "運行記録",
                 description = "実際に走行しながら記録を開始・終了します（実機実測・実データ収集用）",
                 onClick = onOpenRecording,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.AddCircle,
+                // design-gate C-1 y×5（2026-08-04）: パイプライン上の役割へ題と案内を揃える。
+                title = "運行の洗浄",
+                // 2026-07-27 文言是正: 「2軸評価」は廃案（コース創設は2軸マトリクスから
+                // 3パス成熟モデルへ転換済み。istech `project_buscourse_course_creation_topdown`）。
+                description = "記録した運行から停留所マーカーを拾い、畳んで、コースの予約を作ります",
+                onClick = onOpenCourseCreate,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.Route,
+                title = "コースの成形",
+                // 2026-08-02 文言是正: 旧文言「区間軌跡を割り当てます（GPX取り込み）」は
+                // **どちらも既に存在しない機能を案内していた**（区間UIとGPX取込は S6a・2026-07-18 で
+                // 撤去済み、GPXエクスポートは 2026-07-26 に撤去）。実際にできることへ書き直す。
+                description = "予約や既存のコースを開いて、停留所マーカーの並べ替え・追加・削除・分割をし、ナビ用に送ります",
+                onClick = onOpenCourses,
             )
             HomeMenuCard(
                 icon = Icons.Filled.DirectionsBus,
@@ -91,21 +141,11 @@ fun HomeScreen(
                 onClick = onOpenStopCards,
             )
             HomeMenuCard(
-                icon = Icons.Filled.Route,
-                title = "コース編集",
-                description = "停留所の順列を編成し、区間軌跡を割り当てます（GPX入出力）",
-                onClick = onOpenCourses,
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.AddCircle,
-                title = "コース創設",
-                description = "記録セッションから2軸評価でコースを新規に創ります",
-                onClick = onOpenCourseCreate,
-            )
-            HomeMenuCard(
                 icon = Icons.AutoMirrored.Filled.ListAlt,
                 title = "作業進捗ログ",
-                description = "カード作成・編成確定・記録・抽出・エラーの操作履歴を確認します",
+                // 2026-08-02 文言是正: 旧文言の「編成確定」「抽出」は撤去済みの語彙だった。
+                // 個々の操作名を並べると実装の変化で古びるため、記録される対象（＝WorkLogCategory）で書く。
+                description = "カード・コース・記録・地図・バックアップ・エラーの操作履歴を確認します",
                 onClick = onOpenWorkLog,
             )
             HomeMenuCard(
@@ -113,6 +153,21 @@ fun HomeScreen(
                 title = "地図データ管理",
                 description = "オフライン地図パッケージ（.iscmap）を取り込み、使用するパッケージを切り替えます",
                 onClick = onOpenMapImport,
+            )
+            // 2026-07-27 統合（オーナー指示「バックアップと復元は1つのボタンで」）: 「退避」と「戻す」は
+            // 機種変更という1つの用事の往路と復路なので、入口を分けると探す場所が2箇所になる。
+            // 遷移先の [BackupRestoreScreen] で往路/復路を選ぶ。
+            HomeMenuCard(
+                icon = Icons.Filled.Backup,
+                title = "バックアップと復元",
+                description = "端末のデータを1つのZIPへ退避します。退避したZIPを別の端末へ戻すのもここです",
+                onClick = onOpenBackupRestore,
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.SaveAlt,
+                title = "EX用書き出し",
+                description = "選んだ走行を、EXで読める1つの.isrunファイルに書き出します",
+                onClick = { showExportRun = true },
             )
         }
     }

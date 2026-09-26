@@ -41,7 +41,16 @@ class GnssLocationSource(private val context: Context) {
      * GPS_PROVIDER からの位置更新購読を開始する。
      *
      * @param minIntervalMs 更新間隔の下限（ミリ秒）
-     * @param minDistanceM 更新間隔の下限（移動距離、メートル）
+     * @param minDistanceM 更新の下限（移動距離、メートル）。**既定 0＝距離で間引かない**。
+     *   **⚠ 0 以外にすると「停まっている間は位置が1点も来ない」**——`LocationManager` の
+     *   `minDistance` は**前回配信位置からその距離動くまで配信しない**フィルタであり、
+     *   時間ではなく距離で間引く。**停車＝移動0 は永久に閾値を満たさない**。
+     *   **実測（2026-08-01 POC実走・OPPO）**: 既定が `3f` だったため、
+     *   **GPS 記録の 33〜39% が欠測**（最大 68 秒の穴・精度は 3.8m 固定＝衛星は見えていた）。
+     *   停車検知が発火せず、`gps_raw.jsonl`＝GPX にも同じ穴が空いていた
+     *   （「停車の記録は GPX に任せる」という設計の前提が崩れていた）。
+     *   ⇒ **距離での間引きは行わない**。容量が問題になるなら [minIntervalMs] 側で絞る
+     *   （時間の間引きは停車を落とさない）。
      * @param onLocation 位置更新コールバック（`Looper.getMainLooper()` 上で呼ばれる）
      * @param onProviderDisabled GPSプロバイダが実行時に無効化された時のコールバック（S0-d、2026-07-16追加）
      * @param onProviderEnabled GPSプロバイダが再有効化された時のコールバック（S0-d、2026-07-16追加）
@@ -53,7 +62,7 @@ class GnssLocationSource(private val context: Context) {
     @SuppressLint("MissingPermission") // 呼び出し前にランタイム権限確認済み（§4.3）
     fun start(
         minIntervalMs: Long = 500L,
-        minDistanceM: Float = 3f,
+        minDistanceM: Float = 0f,
         onLocation: (Location) -> Unit,
         onProviderDisabled: () -> Unit = {},
         onProviderEnabled: () -> Unit = {},

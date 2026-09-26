@@ -1,10 +1,7 @@
 package com.istech.buscourse.ui
 
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,27 +11,29 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
-import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -42,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,16 +58,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
+import com.istech.buscourse.core.data.BusCourseStorage
+import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.course.CourseEditDetails
 import com.istech.buscourse.course.CourseStopEdit
+import com.istech.buscourse.course.UpdateIdentityResult
+import com.istech.buscourse.course.resolveUniqueCourseName
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.Locale
 
 /**
  * 編成中の停留所1行（並べ替え用ローカル状態、S6a「コース編集画面の刷新（土台）」で改訂）。
@@ -82,6 +92,11 @@ data class StopRow(
     val cardId: Long?,
     val displayName: String,
     val riderCount: Int,
+    val thumbRelPath: String?,
+    val capturedAt: Long?,
+    val errorSpaceM: Double?,
+    val latitude: Double,
+    val longitude: Double,
 ) {
     /** 状態ドット表示用: 映像（frame_id）を持つか（設計ドラフト§7.1「映像＝青」）。 */
     val hasFrame: Boolean get() = frameId != null
@@ -126,7 +141,9 @@ private val STATUS_DOT_CARD_COLOR = Color(0xFF43A047)
  *   frame_id/event_idを保持したまま書き換え、区間/route_pointを再構築）。
  * - 区間（CONFIRMED/PENDING）セクション・GPX取込（`importAsSegmentTrack`）は撤去した
  *   （ボトムアップ＝試走待ちの名残。FULL_RUN由来のトップダウン創設では発生しないため）。
- * - コース全体のGPXエクスポート・コース削除・地図表示（[RouteMapScreen]）への導線・定員警告表示は維持。
+ * - コース削除・地図表示（[RouteMapScreen]）への導線・定員警告表示は維持。
+ *   **コース全体のGPXエクスポートは 2026-07-26 に撤去した**（下の該当箇所のコメント参照。
+ *   2026-08-02 まで本KDocだけ「維持」と書かれたままで、同一ファイル内で記述が矛盾していた）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -135,6 +152,7 @@ fun CourseDetailScreen(
     courseId: Long,
     onBack: () -> Unit,
     onOpenMap: () -> Unit,
+    onOpenNavi: () -> Unit,
 ) {
     val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -147,9 +165,26 @@ fun CourseDetailScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showCutConfirm by remember { mutableStateOf(false) }
+    // 切断確認ダイアログの断片名プレビュー用（開く直前にロード。cutCourseAt と同じ重複回避を通すため）。
+    var existingCourseNames by remember { mutableStateOf<List<String>>(emptyList()) }
+    var cutIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    // identity（bus_id/course_no/year）設定ダイアログの状態（(e) コース identity設定UI、2026-07-24追加）
+    var showIdentityDialog by remember { mutableStateOf(false) }
+    var showIdentityChangeWarning by remember { mutableStateOf(false) }
+    var showSendDialog by remember { mutableStateOf(false) }
+    var sendBlocked by remember { mutableStateOf(false) }
+    var identityBusIdInput by remember { mutableStateOf("") }
+    var identityCourseNoInput by remember { mutableStateOf("") }
+    var identityYearInput by remember { mutableStateOf("") }
+    var identityError by remember { mutableStateOf<String?>(null) }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
     var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var unusedOnlyFilter by remember { mutableStateOf(false) }
+    // 詳細を開いた停留所を、閉じた後も行上で見失わないための表示専用state
+    // （design-gate C-2 y×5・2026-08-04）。
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    var detailDialogIndex by remember { mutableStateOf<Int?>(null) }
 
     // 永続化済み順序と未確定編集中の順序の差分（このLaunchedEffectの直前、＝再読込直前の状態で判定する
     // 必要があるため宣言をLaunchedEffectより前に置く）。dirty中はeditedStopsの再構築をスキップする
@@ -171,7 +206,11 @@ fun CourseDetailScreen(
                 // スナップショット保存すると、コース編成中に別画面でカードの乗車人数を変更しても
                 // 定員警告が古い値のまま表示され続けていた）。
                 val sourceSessionId = loaded?.course?.sourceSessionId
+                val loadedByPointers = loaded?.stops?.associateBy {
+                    CourseStopEdit(frameId = it.frameId, eventId = it.eventId, cardId = it.cardId)
+                }.orEmpty()
                 draftOrder.forEachIndexed { index, edit ->
+                    val loadedStop = loadedByPointers[edit]
                     if (edit.cardId != null) {
                         // getActiveStopCards()（未アーカイブのみ）だと、下書きに含まれるカードが後から
                         // 他画面でアーカイブされていた場合に一覧から消えてしまう（実機検証で発覚）ため、
@@ -184,6 +223,12 @@ fun CourseDetailScreen(
                                 cardId = edit.cardId,
                                 displayName = card?.name ?: "停留所#${edit.cardId}",
                                 riderCount = card?.riderCount ?: 0,
+                                thumbRelPath = card?.let { "stopcards/${it.id}/photo_thumb.jpg" }
+                                    ?: loadedStop?.thumbRelPath,
+                                capturedAt = loadedStop?.capturedAt,
+                                errorSpaceM = loadedStop?.errorSpaceM,
+                                latitude = loadedStop?.latitude ?: card?.latitude ?: 0.0,
+                                longitude = loadedStop?.longitude ?: card?.longitude ?: 0.0,
                             )
                         )
                     } else {
@@ -196,6 +241,11 @@ fun CourseDetailScreen(
                                 cardId = null,
                                 displayName = "S${sourceSessionId ?: "?"}-${index + 1}",
                                 riderCount = 0,
+                                thumbRelPath = loadedStop?.thumbRelPath,
+                                capturedAt = loadedStop?.capturedAt,
+                                errorSpaceM = loadedStop?.errorSpaceM,
+                                latitude = loadedStop?.latitude ?: 0.0,
+                                longitude = loadedStop?.longitude ?: 0.0,
                             )
                         )
                     }
@@ -209,6 +259,11 @@ fun CourseDetailScreen(
                             cardId = stop.cardId,
                             displayName = stop.displayName,
                             riderCount = stop.riderCount,
+                            thumbRelPath = stop.thumbRelPath,
+                            capturedAt = stop.capturedAt,
+                            errorSpaceM = stop.errorSpaceM,
+                            latitude = stop.latitude,
+                            longitude = stop.longitude,
                         )
                     )
                 }
@@ -226,6 +281,7 @@ fun CourseDetailScreen(
             val from = rawToStop(fromRaw)
             val to = rawToStop(toRaw)
             if (from in editedStops.indices && to in editedStops.indices) {
+                cutIndexes = emptySet()
                 editedStops.add(to, editedStops.removeAt(from))
                 persistDraft()
             }
@@ -237,29 +293,16 @@ fun CourseDetailScreen(
     fun moveStop(index: Int, delta: Int) {
         val target = index + delta
         if (index !in editedStops.indices || target !in editedStops.indices) return
+        cutIndexes = emptySet()
         editedStops.add(target, editedStops.removeAt(index))
         persistDraft()
     }
 
-    // --- GPXエクスポート（SAF ACTION_CREATE_DOCUMENT、§3.11.3） ---
-    var pendingExportFile by remember { mutableStateOf<File?>(null) }
-    val createDocLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/gpx+xml")
-    ) { uri: Uri? ->
-        val file = pendingExportFile
-        if (uri != null && file != null) {
-            scope.launch {
-                try {
-                    repository.copyExportToUri(file, uri)
-                    Toast.makeText(context, "GPXを書き出しました", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "書き出しに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-        } else if (file != null) {
-            Toast.makeText(context, "アプリ内 exports/ には保存済みです（${file.name}）", Toast.LENGTH_SHORT).show()
-        }
-    }
+    // GPXエクスポート（コース全体の書き出し）は 2026-07-26 に撤去した。
+    // 旧仕様＝プランナーEXへのデータ提供口として企画したものだが、全量バックアップという
+    // 受領経路ができたため役目を終えた（オーナー裁定「ボタンもデータも押しただけの残骸」）。
+    // ※GPX の**取り込み**（importAsSegmentTrack）と、区間軌跡の内部保存形式としての GPX
+    //   （GpxCodec.writeSegmentTrack / readTrack・地図の経路描画が読む）は現役なので撤去しない。
 
     fun saveArrangement() {
         busy = true
@@ -277,16 +320,34 @@ fun CourseDetailScreen(
         }
     }
 
-    fun exportCourse() {
-        busy = true
-        // 書き込みはViewModel（viewModelScope）経由に統一する（フェーズ2レビュー#13）
-        viewModel.exportCourse(courseId) { result ->
-            busy = false
-            result.onSuccess { file ->
-                pendingExportFile = file
-                createDocLauncher.launch(file.name)
-            }.onFailure { e ->
-                Toast.makeText(context, "エクスポートに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+    fun saveIdentity() {
+        val courseNo = identityCourseNoInput.toIntOrNull()
+        val year = identityYearInput.toIntOrNull()
+        if (courseNo == null || year == null) {
+            identityError = "バス識別子・コース番号・年度を正しく入力してください"
+            return
+        }
+        showIdentityChangeWarning = false
+        showIdentityDialog = true
+        viewModel.updateCourseIdentity(courseId, identityBusIdInput, courseNo, year) { result ->
+            when (result) {
+                UpdateIdentityResult.Success -> {
+                    showIdentityDialog = false
+                    showIdentityChangeWarning = false
+                    refreshKey++
+                    Toast.makeText(context, "識別情報を設定しました", Toast.LENGTH_SHORT).show()
+                }
+                UpdateIdentityResult.DuplicateIdentity -> {
+                    identityError = "同じバス・コース番号・年度の別コースが既にあります"
+                }
+                UpdateIdentityResult.InvalidInput -> {
+                    identityError = "バス識別子・コース番号・年度を正しく入力してください"
+                }
+                UpdateIdentityResult.CourseNotFound -> {
+                    showIdentityDialog = false
+                    showIdentityChangeWarning = false
+                    Toast.makeText(context, "コースが見つかりませんでした", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -303,6 +364,21 @@ fun CourseDetailScreen(
                 onBack()
             }.onFailure { e ->
                 Toast.makeText(context, "削除に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun cutCourse() {
+        busy = true
+        showCutConfirm = false
+        viewModel.cutCourse(courseId, cutIndexes) { result ->
+            busy = false
+            result.onSuccess { cut ->
+                viewModel.clearCourseStopDraft(courseId)
+                Toast.makeText(context, "${cut.createdCourseIds.size} 本に分けました", Toast.LENGTH_SHORT).show()
+                onBack()
+            }.onFailure { e ->
+                Toast.makeText(context, "コースを切れませんでした: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -329,8 +405,8 @@ fun CourseDetailScreen(
                     IconButton(onClick = onOpenMap) {
                         Icon(Icons.Filled.Map, contentDescription = "地図表示")
                     }
-                    IconButton(onClick = { exportCourse() }, enabled = !busy && details != null) {
-                        Icon(Icons.Filled.FileUpload, contentDescription = "GPXエクスポート")
+                    IconButton(onClick = onOpenNavi) {
+                        Icon(Icons.Filled.Explore, contentDescription = "ナビ確認")
                     }
                     IconButton(onClick = { showDeleteConfirm = true }, enabled = !busy && details != null) {
                         Icon(Icons.Filled.Delete, contentDescription = "コースを削除")
@@ -350,10 +426,42 @@ fun CourseDetailScreen(
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text("停留所の並び", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "長押しでドラッグするか、上下ボタンで順序を入れ替えられます。保存すると地図の経路も作り直します。",
+                        // 2026-07-27 文言是正: 旧文「保存すると地図の経路も作り直します」は、
+                        // ナビ用マップまで更新されると読めてしまう。実際に作り直されるのはコースの
+                        // 経路線（route_point）だけで、ナビ用マップは NaviScreen から手動生成する。
+                        "長押しでドラッグするか、上下ボタンで順序を入れ替えられます。" +
+                            "保存するとコースの経路線を作り直します（ナビ用マップは自動では更新されません）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    // identity（bus_id/course_no/year）表示・編集導線（(e) コース identity設定UI、
+                    // 2026-07-24追加）。ナビ用マップ生成には identity が必須のため、未設定コースを
+                    // ここから後付けで設定できるようにする（トップバーは変更しない）。
+                    val identity = details?.course?.identityOrNull()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            identity?.let { "識別情報: ${it.year}年 ${it.busId}${it.courseNo}コース" } ?: "識別情報: 未設定",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                identityBusIdInput = identity?.busId ?: ""
+                                identityCourseNoInput = identity?.courseNo?.toString() ?: ""
+                                identityYearInput = identity?.year?.toString() ?: ""
+                                identityError = null
+                                showIdentityDialog = true
+                            },
+                            enabled = !busy && details != null,
+                        ) {
+                            Text(if (identity != null) "編集" else "設定")
+                        }
+                    }
                 }
             }
 
@@ -368,13 +476,32 @@ fun CourseDetailScreen(
                     cumulativeRiders >= BUS_CAPACITY_WARNING -> Color(0xFFF9A825) // イエローシグナル
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
+                val selected = selectedIndex == index
+                val accentColor = MaterialTheme.colorScheme.primary
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 3.dp)
                         .zIndex(if (dragging) 1f else 0f)
                         .graphicsLayer { translationY = dragState.offsetYFor(rawIndex) }
-                        .then(if (dragging) Modifier.shadow(6.dp) else Modifier),
+                        .then(if (dragging) Modifier.shadow(6.dp) else Modifier)
+                        .then(
+                            if (selected) Modifier.drawBehind {
+                                drawLine(
+                                    color = accentColor,
+                                    start = androidx.compose.ui.geometry.Offset(1.5.dp.toPx(), 0f),
+                                    end = androidx.compose.ui.geometry.Offset(1.5.dp.toPx(), size.height),
+                                    strokeWidth = 3.dp.toPx(),
+                                )
+                            } else Modifier
+                        ),
+                    colors = if (selected) {
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        )
+                    } else {
+                        CardDefaults.cardColors()
+                    },
                 ) {
                     Row(
                         modifier = Modifier
@@ -391,52 +518,87 @@ fun CourseDetailScreen(
                                 .dragHandleModifier(dragState, rawIndex),
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(
-                            "${index + 1}.",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        StopStatusDots(hasFrame = stop.hasFrame, hasCard = stop.hasCard)
-                        Spacer(Modifier.width(8.dp))
-                        Column(Modifier.weight(1f)) {
+                        // ハンドルをタップ領域から外し、長押しドラッグとの競合を避ける。
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable(enabled = !busy) {
+                                    selectedIndex = index
+                                    detailDialogIndex = index
+                                }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text(
-                                stop.displayName,
-                                style = MaterialTheme.typography.bodyLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                "${index + 1}.",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
                             )
-                            if (stop.riderCount > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            StopThumbnail(
+                                file = stop.thumbRelPath?.let { BusCourseStorage.resolve(context, it) },
+                                sizeDp = 56,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            StopStatusDots(hasFrame = stop.hasFrame, hasCard = stop.hasCard)
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
                                 Text(
-                                    "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = capacityColor,
+                                    stop.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (stop.riderCount > 0) {
+                                    Text(
+                                        "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = capacityColor,
+                                    )
+                                }
+                                if (index in cutIndexes) {
+                                    Text(
+                                        "✂ ここで切る",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (index in cutIndexes) {
+                                        cutIndexes = cutIndexes - index
+                                    } else {
+                                        val invalid = index == 0 || index == editedStops.lastIndex ||
+                                            cutIndexes.any { kotlin.math.abs(it - index) == 1 }
+                                        if (invalid) {
+                                            Toast.makeText(
+                                                context,
+                                                "ここでは切れません（コースが空になります）",
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        } else {
+                                            cutIndexes = cutIndexes + index
+                                        }
+                                    }
+                                },
+                                enabled = !busy && !dirty,
+                            ) { Text(if (index in cutIndexes) "解除" else "✂") }
+                            // 繰り上げ・繰り下げ（ループコースの右回り/左回り入替、手動追加分の位置調整用）
+                            Column {
+                                StopMoveButton(
+                                    icon = Icons.Filled.KeyboardArrowUp,
+                                    contentDescription = "繰り上げ",
+                                    enabled = !busy && index > 0,
+                                    onClick = { moveStop(index, -1) },
+                                )
+                                StopMoveButton(
+                                    icon = Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = "繰り下げ",
+                                    enabled = !busy && index < editedStops.lastIndex,
+                                    onClick = { moveStop(index, 1) },
                                 )
                             }
-                        }
-                        // 繰り上げ・繰り下げ（ループコースの右回り/左回り入替、手動追加分の位置調整用）
-                        Column {
-                            StopMoveButton(
-                                icon = Icons.Filled.KeyboardArrowUp,
-                                contentDescription = "繰り上げ",
-                                enabled = !busy && index > 0,
-                                onClick = { moveStop(index, -1) },
-                            )
-                            StopMoveButton(
-                                icon = Icons.Filled.KeyboardArrowDown,
-                                contentDescription = "繰り下げ",
-                                enabled = !busy && index < editedStops.lastIndex,
-                                onClick = { moveStop(index, 1) },
-                            )
-                        }
-                        IconButton(
-                            onClick = {
-                                editedStops.removeAt(index)
-                                persistDraft()
-                            },
-                            enabled = !busy,
-                        ) {
-                            Icon(Icons.Filled.Close, contentDescription = "コースから除外")
                         }
                     }
                 }
@@ -467,39 +629,157 @@ fun CourseDetailScreen(
                 HorizontalDivider()
             }
 
-            // 追加・保存
             item {
-                Row(
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                // 確認ダイアログの断片名を実際に作られる名前と一致させる（独立レビュー
+                                // should-2＝プレビューだけ旧規則で組むと衝突時に表示が嘘をつく）。
+                                existingCourseNames = repository.getCourses()
+                                    .filter { it.id != courseId }
+                                    .map { it.name }
+                                showCutConfirm = true
+                            }
+                        },
+                        enabled = !busy && !dirty && cutIndexes.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("切る（${cutIndexes.size} か所）")
+                    }
+                    Text(
+                        when {
+                            dirty -> "先に保存してください"
+                            cutIndexes.isEmpty() -> "先に停留所を選んで「ここで切る」を付けてください"
+                            else -> "${cutIndexes.size + 1} 本に分けます"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (dirty) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // ナビ送信・保存・追加（design-gate B-3改 y×5・2026-08-04）。
+            item {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                activeCards = repository.getActiveStopCards()
-                                usageMap = repository.getStopCardUsage(courseId)
-                                showAddDialog = true
-                            }
-                        },
-                        enabled = !busy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("停留所を追加")
-                    }
                     Button(
-                        onClick = { saveArrangement() },
-                        enabled = !busy && (dirty || editedStops.isNotEmpty()),
-                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val identity = details?.course?.identityOrNull()
+                            identityBusIdInput = identity?.busId ?: ""
+                            identityCourseNoInput = identity?.courseNo?.toString() ?: ""
+                            identityYearInput = identity?.year?.toString() ?: ""
+                            identityError = null
+                            sendBlocked = false
+                            showSendDialog = true
+                        },
+                        enabled = !busy && !dirty && details != null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("ナビ用に送る") }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Text(if (busy) "処理中…" else if (dirty) "保存 *" else "保存")
+                        Button(
+                            onClick = { saveArrangement() },
+                            enabled = !busy && (dirty || editedStops.isNotEmpty()),
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (busy) "処理中…" else if (dirty) "保存 *" else "保存") }
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    activeCards = repository.getActiveStopCards()
+                                    usageMap = repository.getStopCardUsage(courseId)
+                                    showAddDialog = true
+                                }
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("停留所を追加")
+                        }
                     }
                 }
             }
         }
+    }
+
+    detailDialogIndex?.let { index ->
+        val stop = editedStops.getOrNull(index)
+        if (stop != null) {
+            StopDetailDialog(
+                stop = stop,
+                index = index,
+                courseName = details?.course?.name.orEmpty(),
+                sourceSessionId = details?.course?.sourceSessionId,
+                photoFile = stop.thumbRelPath?.let { BusCourseStorage.resolve(context, it) },
+                onDismiss = { detailDialogIndex = null },
+                onRemove = {
+                    detailDialogIndex = null
+                    cutIndexes = emptySet()
+                    editedStops.removeAt(index)
+                    persistDraft()
+                    val next = nextSelectionAfterRemoval(index, editedStops.size)
+                    selectedIndex = next
+                    if (next != null) {
+                        scope.launch {
+                            // index 0 のヘッダが先行するため、停留所indexへ1を足す。
+                            dragState.lazyListState.animateScrollToItem(next + stopRangeStart)
+                        }
+                    }
+                },
+                busy = busy,
+            )
+        }
+    }
+
+    if (showCutConfirm) {
+        val course = details?.course
+        val sortedCuts = cutIndexes.sorted()
+        val boundaries = listOf(0) + sortedCuts + editedStops.lastIndex
+        val fragments = boundaries.zipWithNext().map { (start, end) -> editedStops.subList(start, end + 1) }
+        AlertDialog(
+            onDismissRequest = { if (!busy) showCutConfirm = false },
+            title = { Text("コースを切りますか？") },
+            text = {
+                Column {
+                    Text("『${course?.name ?: "このコース"}』（${editedStops.size}停留所）を ${fragments.size} 本にします")
+                    Spacer(Modifier.height(10.dp))
+                    // 実装（cutCourseAt）と同じ重複回避を通す＝表示名と実際に作られる名前を一致させる。
+                    val taken = existingCourseNames.toMutableSet()
+                    fragments.forEachIndexed { index, fragment ->
+                        val desired = course?.sourceSessionId?.let { "S$it-${index + 1}" }
+                            ?: "${course?.name ?: "コース"}-${index + 1}"
+                        val name = resolveUniqueCourseName(desired, taken).also(taken::add)
+                        Text(
+                            "$name：${fragment.size}個（${fragment.first().displayName}〜${fragment.last().displayName}）",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    val cutNames = sortedCuts.map { editedStops[it].displayName }.joinToString("、")
+                    Text(
+                        "切った『$cutNames』は両方のコースに入ります（前の終点・後ろの始点）。" +
+                            "元の『${course?.name ?: "このコース"}』は無くなります。" +
+                            "やり直したいときは運行の洗浄からもう一度作れます。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = ::cutCourse, enabled = !busy) { Text("切る") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCutConfirm = false }, enabled = !busy) { Text("やめる") }
+            },
+        )
     }
 
     if (showAddDialog) {
@@ -542,8 +822,14 @@ fun CourseDetailScreen(
                                                     cardId = card.id,
                                                     displayName = card.name,
                                                     riderCount = card.riderCount,
+                                                    thumbRelPath = "stopcards/${card.id}/photo_thumb.jpg",
+                                                    capturedAt = null,
+                                                    errorSpaceM = null,
+                                                    latitude = card.latitude,
+                                                    longitude = card.longitude,
                                                 )
                                             )
+                                            cutIndexes = emptySet()
                                             persistDraft()
                                             showAddDialog = false
                                         }
@@ -596,6 +882,153 @@ fun CourseDetailScreen(
         )
     }
 
+    if (showIdentityDialog) {
+        AlertDialog(
+            onDismissRequest = { showIdentityDialog = false },
+            title = { Text("識別情報の設定") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = identityBusIdInput,
+                        onValueChange = { identityBusIdInput = it },
+                        label = { Text("バス識別子") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = identityCourseNoInput,
+                        onValueChange = { identityCourseNoInput = it },
+                        label = { Text("コース番号") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = identityYearInput,
+                        onValueChange = { identityYearInput = it },
+                        label = { Text("年度") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    val previewCourseNo = identityCourseNoInput.toIntOrNull()
+                    val previewYear = identityYearInput.toIntOrNull()
+                    if (identityBusIdInput.isNotBlank() && previewCourseNo != null && previewCourseNo > 0 && previewYear in 2000..2100) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("ナビでは「${previewYear}年 ${identityBusIdInput.trim()}${previewCourseNo}コース」として出ます")
+                    }
+                    val error = identityError
+                    if (error != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val courseNo = identityCourseNoInput.toIntOrNull()
+                    val year = identityYearInput.toIntOrNull()
+                    if (courseNo == null || year == null) {
+                        identityError = "バス識別子・コース番号・年度を正しく入力してください"
+                        return@TextButton
+                    }
+                    val current = details?.course?.identityOrNull()
+                    val changed = current == null || current.busId != identityBusIdInput.trim() ||
+                        current.courseNo != courseNo || current.year != year
+                    if (current != null && changed) {
+                        scope.launch {
+                            if (viewModel.naviMapRepository.activeMapFor(current.busId, current.courseNo, current.year) != null) {
+                                showIdentityDialog = false
+                                showIdentityChangeWarning = true
+                            } else {
+                                saveIdentity()
+                            }
+                        }
+                    } else {
+                        saveIdentity()
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showIdentityDialog = false }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    if (showIdentityChangeWarning) {
+        val current = details?.course?.identityOrNull()
+        if (current != null) {
+            AlertDialog(
+                onDismissRequest = {
+                    showIdentityChangeWarning = false
+                    showIdentityDialog = true
+                },
+                title = { Text("識別情報を変えますか？") },
+                text = {
+                    Text("このコースは「${current.year}年 ${current.busId}${current.courseNo}コース」としてナビへ送ってあります。識別情報を変えると、送ったものはナビから見えなくなります（消えはしません）。変えたあと、もう一度ナビへ送ってください。")
+                },
+                confirmButton = { TextButton(onClick = { saveIdentity() }) { Text("変える") } },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showIdentityChangeWarning = false
+                        showIdentityDialog = true
+                    }) { Text("やめる") }
+                },
+            )
+        }
+    }
+
+    if (showSendDialog) {
+        fun send() {
+            val courseNo = identityCourseNoInput.toIntOrNull()
+            val year = identityYearInput.toIntOrNull()
+            if (courseNo == null || year == null || identityBusIdInput.isBlank()) {
+                identityError = "バス識別子・コース番号・年度を正しく入力してください。"
+                return
+            }
+            busy = true
+            identityError = null
+            viewModel.sendCourseToNavi(courseId, identityBusIdInput, courseNo, year) { result ->
+                busy = false
+                when (result) {
+                    SendToNaviResult.Success -> {
+                        showSendDialog = false
+                        Toast.makeText(context, "ナビ用の地図を作りました", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    }
+                    is SendToNaviResult.Retryable -> identityError = result.message
+                    is SendToNaviResult.Blocked -> {
+                        sendBlocked = true
+                        identityError = "このコースは映像ナビを作れません（軌跡がありません）。停留所を直して保存すると、もう一度試せます。"
+                    }
+                }
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { if (!busy) showSendDialog = false },
+            title = { Text("ナビ用に送る") },
+            text = { Column {
+                OutlinedTextField(identityBusIdInput, { identityBusIdInput = it }, label = { Text("バス識別子") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(identityCourseNoInput, { identityCourseNoInput = it }, label = { Text("コース番号") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(identityYearInput, { identityYearInput = it }, label = { Text("年度") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                identityError?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            } },
+            confirmButton = {
+                if (!sendBlocked) TextButton(onClick = ::send, enabled = !busy) {
+                    Text(if (identityError == null) "送る" else "もう一度送る")
+                }
+            },
+            dismissButton = { TextButton(onClick = { showSendDialog = false }, enabled = !busy) { Text("やめて戻る") } },
+        )
+    }
+
     if (showLeaveConfirm) {
         AlertDialog(
             onDismissRequest = { showLeaveConfirm = false },
@@ -644,6 +1077,100 @@ fun CourseDetailScreen(
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("キャンセル") }
             },
+        )
+    }
+}
+
+/** 停留所の由来とカード状態を確認する読み取り専用詳細（design-gate C-2 y×5・2026-08-04）。 */
+@Composable
+private fun StopDetailDialog(
+    stop: StopRow,
+    index: Int,
+    courseName: String,
+    sourceSessionId: Long?,
+    photoFile: File?,
+    onDismiss: () -> Unit,
+    onRemove: () -> Unit,
+    busy: Boolean,
+) {
+    val outlineColor = MaterialTheme.colorScheme.outline
+    val blankCardBorder = if (!stop.hasCard) {
+        Modifier.drawBehind {
+            drawRoundRect(
+                color = outlineColor,
+                style = Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 5.dp.toPx())),
+                ),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
+            )
+        }
+    } else {
+        Modifier
+    }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("停留所の詳細") },
+        text = {
+            Column(
+                modifier = blankCardBorder.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StopThumbnail(file = photoFile, sizeDp = 96, modifier = Modifier.align(Alignment.CenterHorizontally))
+                if (stop.hasCard) {
+                    StopDetailLine("名前", stop.displayName)
+                } else {
+                    StopDetailLine("名前", "（まだ付いていません）", pending = true)
+                }
+                StopDetailLine(
+                    "座標",
+                    String.format(Locale.JAPAN, "%.5f, %.5f", stop.latitude, stop.longitude),
+                )
+                if (stop.hasCard) {
+                    StopDetailLine("乗車人数", "${stop.riderCount} 名")
+                } else {
+                    StopDetailLine("乗車人数", "（未定）", pending = true)
+                }
+                stop.capturedAt?.let {
+                    StopDetailLine("この運行", "#${sourceSessionId ?: "?"} ／ ${formatTimeOfDay(it)}")
+                }
+                if (stop.hasCard) {
+                    StopDetailLine("使用中", "$courseName・${index + 1}番目")
+                }
+                // 畳んだ点だけ error_space_m が入る（畳まなかった点は null＝CourseRepository:1905）。
+                // ⚠ 畳んだ「回数」は course_stop に列が無く保存されていないため出せない（広がりのみ）。
+                stop.errorSpaceM?.let {
+                    StopDetailLine("まとめた点", "広がり ${String.format(Locale.JAPAN, "%.1f", it)} m")
+                }
+                Text(
+                    "外しても、保存するまでは元に戻せます",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onRemove,
+                enabled = !busy,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("この停留所を外す") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("閉じる") }
+        },
+    )
+}
+
+@Composable
+private fun StopDetailLine(label: String, value: String, pending: Boolean = false) {
+    Row {
+        Text("$label: ", style = MaterialTheme.typography.labelMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (pending) MaterialTheme.colorScheme.onSurfaceVariant else Color.Unspecified,
+            fontStyle = if (pending) FontStyle.Italic else FontStyle.Normal,
         )
     }
 }

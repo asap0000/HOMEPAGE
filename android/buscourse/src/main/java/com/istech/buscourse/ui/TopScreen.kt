@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -22,19 +22,28 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.istech.buscourse.BuildConfig
 
 /**
- * 最上位トップ画面（依頼３ 2026-07-11）。「設計」と「ナビ」の2択に分岐する。
+ * 最上位トップ画面（依頼３ 2026-07-11）。
  *
- * - 設計: 既存のホーム（運行記録・停留所カード・コース編成・区間抽出・作業進捗ログ）へ。
- * - ナビ: フェーズ4（案内モード、設計書§6）で提供。それまでは
- *   「選択はできるが無効化（グレーアウト）」（2026-07-11オーナー指定）。
+ * **配置（2026-07-25 オーナー指示で見直し）**: フェーズ4の映像ナビ本画面（P4）到達により「ナビ」が
+ * 解禁されたため、**「ナビ」を最上位に全幅で置き、2段目に「設計」と「ナビ設定」を横並び（半分幅）**にする。
+ * 運行中に使う主機能がナビ、その準備・調整が設計とナビ設定、という主従を配置で表す。
+ * **説明文は置かない**（オーナー指示。タイトルとアイコンで足りる）。
+ *
+ * - ナビ: 確定済みコースの映像付き案内（操作は距離スライダーのみ）。[NaviMainScreen]。
+ * - 設計: 取材（運行記録・停留所カード）とコース編成・区間抽出。[HomeScreen]。
+ * - ナビ設定: ナビ画面の見え方（傾き・映像・自車位置・昼夜など）。[NaviSettingsScreen]。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TopScreen(
     onOpenDesign: () -> Unit,
+    onOpenNavi: () -> Unit,
+    onOpenNaviSettings: () -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("BusCourse") }) },
@@ -46,65 +55,93 @@ fun TopScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            TopMenuCard(
-                title = "設計",
-                description = "取材（運行記録・停留所カード）とコース編成・区間抽出を行います",
-                icon = { Icon(Icons.Filled.Architecture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                enabled = true,
-                onClick = onOpenDesign,
-            )
+            // 1段目＝主機能。全幅・大きめに取る。
             TopMenuCard(
                 title = "ナビ",
-                description = "確定済みコースの案内表示（フェーズ4で提供予定）",
-                icon = {
-                    Icon(
-                        Icons.Filled.Navigation,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    )
-                },
-                enabled = false,
-                onClick = {},
+                icon = { Icon(Icons.Filled.Navigation, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                onClick = onOpenNavi,
+                compact = false,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // 2段目＝準備・調整。横並びで半分幅ずつ。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                TopMenuCard(
+                    title = "設計",
+                    icon = { Icon(Icons.Filled.Architecture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    onClick = onOpenDesign,
+                    compact = true,
+                    modifier = Modifier.weight(1f),
+                )
+                TopMenuCard(
+                    title = "ナビ設定",
+                    icon = { Icon(Icons.Filled.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    onClick = onOpenNaviSettings,
+                    compact = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            // 版とビルド種別（2026-07-27 オーナー依頼）。
+            // **実機を見ただけでは開発版か記録用かが分からない**のが 2026-07-26 のデータ消失と
+            // 同じ構図なので、`applicationId` まで出して環境分離を画面上で判別できるようにする
+            // （debug は `com.istech.buscourse.debug` / field は suffix 無し）。
+            Text(
+                text = "${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = BuildConfig.APPLICATION_ID,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
             )
         }
     }
 }
 
+/**
+ * トップのメニューカード。[compact]=false は全幅・アイコン横並びの主カード（ナビ）、
+ * true は半分幅・アイコン上／タイトル下の従カード（設計・ナビ設定）。
+ */
 @Composable
 private fun TopMenuCard(
     title: String,
-    description: String,
     icon: @Composable () -> Unit,
-    enabled: Boolean,
     onClick: () -> Unit,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
 ) {
-    val contentAlpha = if (enabled) 1f else 0.4f
-    Card(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.fillMaxWidth(),
-        // 無効時もカード自体はグレーアウトで見せ続ける（隠さない。2026-07-11オーナー指定）
-        colors = CardDefaults.cardColors(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 28.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            icon()
-            Spacer(Modifier.width(16.dp))
-            Column {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
-                )
-                Text(
-                    description,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha),
-                )
+    Card(onClick = onClick, modifier = modifier) {
+        if (compact) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                icon()
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 36.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                icon()
+                Spacer(Modifier.width(16.dp))
+                Text(title, style = MaterialTheme.typography.headlineSmall, maxLines = 1)
             }
         }
     }

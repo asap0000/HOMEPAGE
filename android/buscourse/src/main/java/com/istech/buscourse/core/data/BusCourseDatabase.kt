@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *
  * version 1 はフェーズ1〜2（記録・編成）スコープのテーブルのみ:
  * - bus_stop_card は D5 の案内用3列（approach_radius_m 等）を含まない（フェーズ4で ALTER TABLE、§3.5）
- * - test_run_comparison 系（フェーズ5）・map_data_package（フェーズ3）は未作成
+ * - フェーズ5の試走比較系・map_data_package（フェーズ3）は未作成
  *
  * version 2（2026-07-10）: bus_stop_card に rider_count 列を追加（乗車人数・定員警告用）。
  * 実車実測で既に本番データが端末上に存在するため、破壊的マイグレーションではなく
@@ -77,6 +77,57 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 「frame_id・event_id・stop_card_idの少なくとも一つは非null」という拡張後の不変条件も、
  * 引き続きDBのCHECK制約ではなくコード層
  * （[com.istech.buscourse.course.CourseRepository.requireCoordinateSource]）で担保する。
+ *
+ * version 13（2026-07-19、フェーズ5 Step 5a）: bus_stop_card にD5の到着判定パラメータ3列を追加し、
+ * 試走比較のサマリ・停留所差分・逸脱区間テーブルを新設する（[MIGRATION_12_13]）。いずれも既存データを
+ * 保持するADD COLUMN／CREATE TABLEのみで、比較の子行は親比較行の削除時にCASCADEする。
+ *
+ * version 14（2026-07-22）: フェーズ5aの試走比較永続層を退役し、比較の子テーブルから親テーブルの順に
+ * 3テーブルを削除する（[MIGRATION_13_14]）。bus_stop_card のD5到着判定パラメータ3列は保持する。
+ *
+ * version 15（2026-07-22）: course に業務キー3列を nullable 追加＋部分ユニーク相当の unique index。
+ * 既存行は NULL 据え置き（案A）。
+ *
+ * version 16（2026-07-22）: ナビ用マップ消費の分離モデル6表を純増。既存テーブルは無変更。
+ *
+ * version 17（2026-07-23）: navi_map に app_settings_json（コース単位 app_settings・増分6契約 schema 1.1 相乗り）を
+ * nullable でない TEXT DEFAULT '{}' で追加（[MIGRATION_16_17]）。既存行は '{}' で埋まる。App Room 版は
+ * `.isnavi` schema（EX 主導）とは別軸（正典 §9・増分6 Q3-2）。zip リーダー増分の前提スキーマ。
+ *
+ * （スキーマ自体の変更ではない、2026-07-26）: バージョン番号のリテラルを [SCHEMA_VERSION] へ抽出した。
+ * 機種変更バックアップの `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
+ * 別途「17」を書き写して二重管理するのを避けるため。
+ *
+ * version 19（2026-07-30、**停留所マーカー欠落セッションのリカバリー**。★元は v18 として実装したが、
+ * 官房が 2026-07-27 に認可した別設計「旧データ救済（空間アンカリング・新テーブル `navi_frame_index`）」
+ * （`937e340`）が v18 を先に予約していたため、二重鋳造と判明し官房裁定〔未適用ゆえ (b) 採用〕で v19 へ
+ * リナンバー。**v18 の予約は `937e340` のまま**——実装時は本バージョンの前に挿し込まれる）: `course_stop` に
+ * 「**結合で生まれた点**」用の4列を純増（[MIGRATION_17_19]）＝座標2列（`resolved_latitude/longitude`）＋
+ * **出自** `provenance`（DEFAULT `'RECORDED'`）＋**空間誤差** `error_space_m`。
+ * 3ポインタ（frame/event/card）は「そのセッションに実体があること」を前提とするが、
+ * **別セッションから移植した点・軌跡の滞留だけを根拠に推定した点はどのポインタも指せない**ため、
+ * 座標を自分で持つ点を表現できるようにした（[CourseStopEntity] のコメント参照）。
+ * **出自と誤差は istech 正典 `docs/2026-07-30_制度定義_時空の分離と再統合.md` 条2 の要件**
+ * （復元・推定した値を実記録と同格に置かない／誤差は軸ごとに別列で持つ）。
+ * **実収録テーブル（`gps_point`/`timelapse_frame`/`stop_visit_event`）は一切変更しない**
+ * ——官房 v18 認可条件(b)（v19 へ引き継がれた条件）。既存行は無変更で通り、`provenance` は `'RECORDED'` が入る。
+ *
+ * version 20（2026-08-02、**押下イベントのカードなし記録**。官房認可・design-gate 通過済み〔改訂復唱 y×5〕）:
+ * `stop_visit_event.stop_card_id` を NOT NULL → NULL 許容へ（[MIGRATION_19_20]）。
+ * SQLite は NOT NULL 解除を ALTER でできないため**テーブル再作成＝データ移送**
+ * （[MIGRATION_10_11] と同じ手法）。FK・索引は不変。変更理由は [StopVisitEventEntity.stopCardId] の KDoc。
+ * ⚠ v19 が守った「実収録テーブル不変」を本版は破るが、これは**列制約の緩和のみ**で
+ * 既存行の値・列構成には触れない（[BusCourseDatabaseMigration20Test] が機械担保）。
+ *
+ * version 21（2026-08-03、**コースの成形状態**。官房認可・design-gate 通過済み〔復唱 y×6〕・DB列台帳 A-3）:
+ * `course` に nullable 列を2本追加する（[MIGRATION_20_21]。**軽量レーン第1号**＝テーブル再作成もデータ移送も無い）。
+ * - [CourseEntity.shapingStartedAt]: 成形（編集）に入った時刻。**保存した時点で立つ**。
+ * - [CourseEntity.naviBlockReason]: 直しようがない理由でナビ用マップを作れなかったこと。**機械可読の理由コード**。
+ *
+ * **なぜ列が要るか（他の状態はすべて導出できる）**: 送り済み・変更ありは `navi_map` の有無と `updated_at` の
+ * 前後で、予約は `kind='DRAFT'` と [CourseEntity.shapingStartedAt] で導出できる。**`navi_map` は生成に成功したときしか
+ * 行が無いため、「送ろうとして失敗した」事実だけはどこにも残らない**（官房が実射で裏取り）。
+ * この列が無いと一覧の印が「成形中」のままになり、**利用者が同じ失敗をしに戻ってくる**（オーナー指摘）。
  */
 @Database(
     entities = [
@@ -93,8 +144,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ShockEventEntity::class,
         WorkLogEntity::class,
         MapDataPackageEntity::class,
+        NaviMapEntity::class,
+        NaviBranchEntity::class,
+        NaviSegmentEntity::class,
+        NaviTrackPointEntity::class,
+        NaviEventEntity::class,
+        NaviEventOutputEntity::class,
     ],
-    version = 12,
+    version = BusCourseDatabase.SCHEMA_VERSION,
     exportSchema = false,
 )
 abstract class BusCourseDatabase : RoomDatabase() {
@@ -111,8 +168,16 @@ abstract class BusCourseDatabase : RoomDatabase() {
     abstract fun shockEventDao(): ShockEventDao
     abstract fun workLogDao(): WorkLogDao
     abstract fun mapDataPackageDao(): MapDataPackageDao
+    abstract fun naviMapDao(): NaviMapDao
 
     companion object {
+        /**
+         * Room スキーマ版（`@Database(version = ...)` と同一の値）。機種変更バックアップの
+         * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
+         * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
+         */
+        const val SCHEMA_VERSION = 23
+
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
             Room.databaseBuilder(
@@ -131,6 +196,16 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 MIGRATION_9_10,
                 MIGRATION_10_11,
                 MIGRATION_11_12,
+                MIGRATION_12_13,
+                MIGRATION_13_14,
+                MIGRATION_14_15,
+                MIGRATION_15_16,
+                MIGRATION_16_17,
+                MIGRATION_17_19,
+                MIGRATION_19_20,
+                MIGRATION_20_21,
+                MIGRATION_21_22,
+                MIGRATION_22_23,
             ).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
@@ -344,6 +419,174 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_course_stop_course_id ON course_stop (course_id)")
                 db.execSQL("CREATE INDEX index_course_stop_frame_id ON course_stop (frame_id)")
                 db.execSQL("CREATE INDEX index_course_stop_event_id ON course_stop (event_id)")
+            }
+        }
+
+        /** D5案内半径3列と、フェーズ5試走比較結果テーブルを追加する（既存データは保持）。 */
+        val MIGRATION_12_13 = object : androidx.room.migration.Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN approach_radius_m REAL NOT NULL DEFAULT 300")
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN arrival_radius_m REAL NOT NULL DEFAULT 50")
+                db.execSQL("ALTER TABLE bus_stop_card ADD COLUMN heading_tolerance_deg REAL NOT NULL DEFAULT 70")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, course_id INTEGER NOT NULL, baseline_source TEXT NOT NULL, candidate_session_id INTEGER NOT NULL, computed_at_epoch_ms INTEGER NOT NULL, schema_version INTEGER NOT NULL, params_json TEXT NOT NULL, FOREIGN KEY(course_id) REFERENCES course(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(candidate_session_id) REFERENCES recording_session(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_course_id ON test_run_comparison (course_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_candidate_session_id ON test_run_comparison (candidate_session_id)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison_stop_diff (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, comparison_id INTEGER NOT NULL, stop_card_id INTEGER, sequence_index INTEGER NOT NULL, status TEXT NOT NULL, position_error_m REAL, matched_point_seq INTEGER, nearest_approach_m REAL, cause TEXT NOT NULL DEFAULT 'UNSET', FOREIGN KEY(comparison_id) REFERENCES test_run_comparison(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_stop_diff_comparison_id ON test_run_comparison_stop_diff (comparison_id)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS test_run_comparison_deviation_segment (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, comparison_id INTEGER NOT NULL, start_chainage_m REAL NOT NULL, end_chainage_m REAL NOT NULL, start_point_seq INTEGER NOT NULL, end_point_seq INTEGER NOT NULL, max_lateral_offset_m REAL NOT NULL, mean_lateral_offset_m REAL NOT NULL, duration_sec INTEGER NOT NULL, FOREIGN KEY(comparison_id) REFERENCES test_run_comparison(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_test_run_comparison_deviation_segment_comparison_id ON test_run_comparison_deviation_segment (comparison_id)")
+            }
+        }
+
+        /** フェーズ5a試走比較の永続層を退役する。D5案内半径3列は保持する。 */
+        val MIGRATION_13_14 = object : androidx.room.migration.Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison_stop_diff")
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison_deviation_segment")
+                db.execSQL("DROP TABLE IF EXISTS test_run_comparison")
+            }
+        }
+
+        /** course に nullable な業務キー3列と、その完全一致を制約する unique index を追加する。 */
+        val MIGRATION_14_15 = object : androidx.room.migration.Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE course ADD COLUMN bus_id TEXT")
+                db.execSQL("ALTER TABLE course ADD COLUMN course_no INTEGER")
+                db.execSQL("ALTER TABLE course ADD COLUMN year INTEGER")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_course_identity ON course (bus_id, course_no, year)")
+            }
+        }
+
+        /** ナビ用マップ消費の分離モデル6表を純増する。既存テーブルは変更しない。 */
+        val MIGRATION_15_16 = object : androidx.room.migration.Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_map` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `schema_version` TEXT NOT NULL, `profile` TEXT NOT NULL, `bus_id` TEXT NOT NULL, `course_no` INTEGER NOT NULL, `year` INTEGER NOT NULL, `title` TEXT NOT NULL, `chainage_step_m` INTEGER NOT NULL DEFAULT 6, `display_orientation` TEXT NOT NULL, `display_pitch_deg` REAL NOT NULL, `media_mode` TEXT NOT NULL, `media_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `archived_at` INTEGER DEFAULT NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_map_bus_id_course_no_year` ON `navi_map` (`bus_id`, `course_no`, `year`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_branch` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `parent_chainage_m` REAL NOT NULL, `label` TEXT NOT NULL, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_branch_navi_map_id` ON `navi_branch` (`navi_map_id`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_segment` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `seq` INTEGER NOT NULL, `kind` TEXT NOT NULL, `gap_kind` TEXT, `chainage_start_m` REAL NOT NULL, `chainage_end_m` REAL NOT NULL, `session_id` INTEGER, `base_epoch_ms` INTEGER, `branch_id` INTEGER, `clip_in_m` REAL, `clip_out_m` REAL, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_segment_navi_map_id` ON `navi_segment` (`navi_map_id`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_navi_segment_navi_map_id_seq` ON `navi_segment` (`navi_map_id`, `seq`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_track_point` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `segment_id` INTEGER NOT NULL, `seq` INTEGER NOT NULL, `chainage_m` REAL NOT NULL, `t_rel_s` REAL NOT NULL, `lat` REAL NOT NULL, `lon` REAL NOT NULL, FOREIGN KEY(`segment_id`) REFERENCES `navi_segment`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_track_point_segment_id` ON `navi_track_point` (`segment_id`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_navi_track_point_segment_id_seq` ON `navi_track_point` (`segment_id`, `seq`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_event` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `template_id` TEXT NOT NULL, `category` TEXT NOT NULL, `anchor_type` TEXT NOT NULL, `scope` TEXT NOT NULL, `priority` TEXT NOT NULL, `chainage_start_m` REAL, `chainage_end_m` REAL, `stop_card_id` INTEGER, `branch_id` INTEGER, `condition` TEXT, `variables_json` TEXT NOT NULL DEFAULT '{}', `valid_from` INTEGER, `valid_until` INTEGER, `repeat_policy` TEXT, FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_navi_map_id` ON `navi_event` (`navi_map_id`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_event_output` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event_id` INTEGER NOT NULL, `output_kind` TEXT NOT NULL, `payload_json` TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(`event_id`) REFERENCES `navi_event`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_navi_event_output_event_id` ON `navi_event_output` (`event_id`)")
+            }
+        }
+
+        /** navi_map にコース単位 app_settings（増分6 schema 1.1 相乗り）の保存列を追加する。既存行は '{}'。 */
+        val MIGRATION_16_17 = object : androidx.room.migration.Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `navi_map` ADD COLUMN `app_settings_json` TEXT NOT NULL DEFAULT '{}'")
+            }
+        }
+
+        /**
+         * `course_stop` に「結合で生まれた点」の4列を足す（version 19、2026-07-30。
+         * ★元は version 18 として実装したが、`937e340`（旧データ救済＝新テーブル `navi_frame_index`）が
+         * v18 を先に予約していた二重鋳造と判明し、官房裁定〔未適用ゆえ (b)〕で v19 へリナンバー。
+         * マイグレーション番号のみの変更で、中身（列定義・不変条件）は無変更）。
+         *
+         * **背景**: 停留所マーカー欠落セッションのリカバリーで、**3ポインタ（frame/event/card）の
+         * どれも指せない点**を作る必要が出た（移植・滞留推定）。詳細は [CourseStopEntity] のコメント。
+         *
+         * **★実収録テーブルは一切変更しない**（官房 v18 認可条件(b)・2026-07-27。v19 へ引き継ぎ）:
+         * `gps_point` / `timelapse_frame` / `stop_visit_event` へは **ALTER も UPDATE も行わない**。
+         * 触るのは `course_stop`（＝派生・編成側）だけ。**派生値を実収録に書き戻すと結合の産物が実測に混ざる**
+         * （戸籍化で確認済みの病）。この不変条件は selftest で機械担保する（同条件(b)）。
+         *
+         * **既存行の扱い**: 4列すべて nullable ないし DEFAULT 付きなので、**既存行は無変更で通る**。
+         * `provenance` は DEFAULT `'RECORDED'` が入る＝**従来の点はすべて「実測」として扱われる**
+         * （正典 条2「復元・推定した値を実記録と同格に置かない」の裏返しで、**実記録は実記録のまま残る**）。
+         *
+         * **索引を張らない理由**（官房認可条件(c)＝索引は再生成可能な派生物である旨を明記）:
+         * この4列は**1コースあたり数十行の絞り込み後に読む列**で、検索キーにならない。
+         * 将来 `provenance` で全コース横断のフィルタが要るなら索引を足すが、**索引は実収録から作り直せる派生物**
+         * であり、壊れても再生成すれば足りる（＝スキーマの本質ではない）。
+         */
+        val MIGRATION_17_19 = object : androidx.room.migration.Migration(17, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `resolved_latitude` REAL DEFAULT NULL")
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `resolved_longitude` REAL DEFAULT NULL")
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `provenance` TEXT NOT NULL DEFAULT 'RECORDED'")
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `error_space_m` REAL DEFAULT NULL")
+            }
+        }
+
+        /**
+         * v20（2026-08-02）: `stop_visit_event.stop_card_id` の NOT NULL 解除（NULL 許容化）。
+         *
+         * SQLite は列の NOT NULL 解除を ALTER でできないため、[MIGRATION_10_11] と同じ
+         * テーブル再作成＝データ移送で行う。**列構成・FK 3本（session=CASCADE／stop_card=RESTRICT／
+         * hires_frame=SET_NULL）・索引2本は不変**。変わるのは `stop_card_id` の制約だけ。
+         * 既存行はすべて有効なまま移送される（制約の緩和なので値の変換は一切ない）。
+         */
+        val MIGRATION_19_20 = object : androidx.room.migration.Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 新スキーマ（stop_card_id が NULL 許容）のテーブルを別名で作成。
+                //    Room の期待スキーマ（entity 定義から生成される形）と FK・索引まで一致させる。
+                db.execSQL(
+                    "CREATE TABLE stop_visit_event_new (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "session_id INTEGER NOT NULL, " +
+                        "stop_card_id INTEGER, " +
+                        "event_type TEXT NOT NULL, " +
+                        "trigger_type TEXT, " +
+                        "event_ts INTEGER NOT NULL, " +
+                        "lat REAL, " +
+                        "lon REAL, " +
+                        "distance_at_event_m REAL, " +
+                        "position_error_m REAL, " +
+                        "hires_frame_id INTEGER, " +
+                        "FOREIGN KEY(session_id) REFERENCES recording_session(id) ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(stop_card_id) REFERENCES bus_stop_card(id) ON UPDATE NO ACTION ON DELETE RESTRICT, " +
+                        "FOREIGN KEY(hires_frame_id) REFERENCES timelapse_frame(id) ON UPDATE NO ACTION ON DELETE SET NULL)"
+                )
+                // 2. 既存データを全列そのままコピー（値の変換なし＝制約の緩和のみ）。
+                db.execSQL(
+                    "INSERT INTO stop_visit_event_new (id, session_id, stop_card_id, event_type, trigger_type, " +
+                        "event_ts, lat, lon, distance_at_event_m, position_error_m, hires_frame_id) " +
+                        "SELECT id, session_id, stop_card_id, event_type, trigger_type, " +
+                        "event_ts, lat, lon, distance_at_event_m, position_error_m, hires_frame_id FROM stop_visit_event"
+                )
+                // 3. 旧テーブルを削除して新テーブルへリネーム。
+                db.execSQL("DROP TABLE stop_visit_event")
+                db.execSQL("ALTER TABLE stop_visit_event_new RENAME TO stop_visit_event")
+                // 4. 索引を再作成（entity の indices = [session_id, stop_card_id] と同一）。
+                db.execSQL("CREATE INDEX index_stop_visit_event_session_id ON stop_visit_event (session_id)")
+                db.execSQL("CREATE INDEX index_stop_visit_event_stop_card_id ON stop_visit_event (stop_card_id)")
+            }
+        }
+
+        /**
+         * course に成形状態の2列を追加（2026-08-03・DB列台帳 A-3・**軽量レーン第1号**）。
+         *
+         * **nullable の ADD COLUMN のみ**＝テーブル再作成もデータ移送も無い（v20 と対照的）。既存行は
+         * 両列とも NULL で通り、意味は「まだ成形していない／送信に失敗していない」＝現行の振る舞いと一致する。
+         * FK・索引・既存列には一切触れない。
+         */
+        val MIGRATION_20_21 = object : androidx.room.migration.Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `course` ADD COLUMN `shaping_started_at` INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE `course` ADD COLUMN `navi_block_reason` TEXT DEFAULT NULL")
+            }
+        }
+
+        /** EX用書き出しの目印と、後続の洗浄増分が使う畳み回数を追加する軽量レーン。 */
+        val MIGRATION_21_22 = object : androidx.room.migration.Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `course_stop` ADD COLUMN `folded_press_count` INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE `recording_session` ADD COLUMN `exported_at` INTEGER DEFAULT NULL")
+            }
+        }
+
+        /** 走行を端末をまたいで一意に識別する UUID 列を追加する軽量レーン。 */
+        val MIGRATION_22_23 = object : androidx.room.migration.Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `recording_session` ADD COLUMN `run_uid` TEXT DEFAULT NULL")
             }
         }
     }

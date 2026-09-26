@@ -22,6 +22,8 @@ class MapDataPackageRepository(database: BusCourseDatabase) {
      */
     val selectedPackage: Flow<MapDataPackageEntity?> = dao.observeSelected()
 
+    suspend fun getSelected(): MapDataPackageEntity? = dao.getSelected()
+
     suspend fun getAll(): List<MapDataPackageEntity> = dao.getAll()
 
     suspend fun getByRegionId(regionId: String): MapDataPackageEntity? = dao.getByRegionId(regionId)

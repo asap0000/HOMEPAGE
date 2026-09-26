@@ -38,13 +38,83 @@ android {
         versionName = System.getenv("VERSION_NAME") ?: "0.0-dev"
     }
 
+    signingConfigs {
+        create("release") {
+            val keystorePath = System.getenv("BUSCOURSE_KEYSTORE_PATH")
+            val storePasswordValue = System.getenv("BUSCOURSE_STORE_PASSWORD")
+            val keyAliasValue = System.getenv("BUSCOURSE_KEY_ALIAS")
+            val keyPasswordValue = System.getenv("BUSCOURSE_KEY_PASSWORD")
+            if (!keystorePath.isNullOrBlank() && !storePasswordValue.isNullOrBlank() &&
+                !keyAliasValue.isNullOrBlank() && !keyPasswordValue.isNullOrBlank()
+            ) {
+                storeFile = file(keystorePath)
+                storePassword = storePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // 環境分離（官房 2026-07-26 裁定「再発防止4点」の 1＝構造的免疫。2026-07-27 実装）
+    //
+    // 事故: 開発中の `adb uninstall` で実機の内部ストレージが消え、実車走行のタイムラプス映像
+    // 約14,600枚を失った。禁止リストは言い換え（`adb -s <serial> uninstall` 等）で抜けるため
+    // 負け筋であり、**アプリ ID を分けて物理的に届かなくする**のが本命の対策。
+    //
+    //   debug  … com.istech.buscourse.debug  ← 日常の開発・検証はすべてこちら。消してよい
+    //   field  … com.istech.buscourse        ← 記録用実機に入れる。**二度と uninstall しない**
+    //   release… com.istech.buscourse        ← 配布用（keystore 未設定のため現状は未使用）
+    //
+    // field を設ける理由: release 署名の keystore が未設定（CLAUDE.local.md）なので、
+    // 「suffix 無し × debug 署名」の枠が別に要る。これなら keystore 未設定のまま今日から効く。
+    //
+    // ⚠ 運用上の罠（手順書に必ず書くこと）
+    //   (a) 救出データ・実車データの復元先は **field 側**（suffix 無し）。debug 側へ置くと
+    //       保護対象外の場所に本番データを載せることになり、この分離の意味が消える。
+    //   (b) 既存の検証環境（エミュレータ等）の既存データは suffix 無し ID の下にあるため、
+    //       debug ビルドからは見えなくなる。検証を続けるなら field ビルドを入れること。
+    // ------------------------------------------------------------------------------------------
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = false
+            val releaseSigningValues = listOf(
+                "BUSCOURSE_KEYSTORE_PATH",
+                "BUSCOURSE_STORE_PASSWORD",
+                "BUSCOURSE_KEY_ALIAS",
+                "BUSCOURSE_KEY_PASSWORD"
+            ).map { System.getenv(it) }
+            if (releaseSigningValues.all { !it.isNullOrBlank() }) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("field") {
+            // applicationIdSuffix は付けない＝com.istech.buscourse（実データを持つ側）
+            isDebuggable = true
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+            versionNameSuffix = "-field"
+        }
+        // 検査場（kensa 席）が使う検査専用ビルド（2026-09-09追加）。applicationIdSuffix = ".kensa" を必ず付ける。
+        // field/release は suffix 無し＝実データ側なので、suffix を外すと上のコメントにある14,600枚の事故の再演になる。
+        // initWith(release) の理由：検査は実際に配る形に近いビルド（非 debuggable）で行う。PrivacyCamera の kensa と同じ設計思想。
+        // ★署名が PrivacyCamera と違う理由：あちらは専用 keystore が無ければ unsigned にして「インストールできない」を望む失敗にしている。
+        //   これは配布鍵で検査ビルドに署名してしまう混同を防ぐため。BusCourse には配布鍵（release keystore）がそもそも無いので、
+        //   その混同は起き得ず、debug 署名で足りる。⚠ 将来 release keystore を用意したら、この行を PrivacyCamera 型（専用 kensa keystore・無ければ unsigned）へ見直すこと。
+        // isMinifyEnabled は release を写すので現状 false（R8 は効かない）。検査場へは「PrivacyCamera 型の R8 前提はそのまま成立しない」と伝え済み。
+        create("kensa") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".kensa"
+            versionNameSuffix = "-kensa"
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -59,6 +129,11 @@ android {
 
     buildFeatures {
         compose = true
+        // 2026-07-27追加: トップ画面に版とビルド種別を出すため（[com.istech.buscourse.ui.TopScreen]）。
+        // AGP 8 系では既定 false なので明示が要る（:app は既に有効化済み）。
+        // **どのビルド種別のアプリを今触っているかが実機で判別できないと、開発版と記録用を取り違える**
+        // ——2026-07-26 のデータ消失と同じ構図なので、環境分離を画面上でも見えるようにする。
+        buildConfig = true
     }
 
     packaging {

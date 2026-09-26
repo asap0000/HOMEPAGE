@@ -30,14 +30,24 @@ import java.io.IOException
 import java.io.OutputStreamWriter
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.UUID
 
 /** `timelapse_frame.kind` の許容値（設計書§3.5、D6）。 */
 enum class FrameKind { LORES, HIRES }
 
-/** `stop_visit_event.event_type` の許容値（設計書§3.5・§3.6）。StopDetectorはARRIVEDのみ発火させる（§4.8.2）。 */
+/**
+ * `stop_visit_event.event_type` の許容値（設計書§3.5・§3.6）。
+ * **現在アプリが書くのは ARRIVED のみ**（他の3値は設計書由来で、書き手は存在しない）。
+ */
 enum class StopVisitEventType { APPROACHING, ARRIVED, PASSED, MISSED }
 
-/** `stop_visit_event.trigger_type` の許容値（設計書§4.8.1）。ARRIVED時のみ意味を持つ。 */
+/**
+ * `stop_visit_event.trigger_type` の許容値（設計書§4.8.1）。ARRIVED時のみ意味を持つ。
+ *
+ * **⚠ [AUTO] の書き手は 2026-08-02 に撤去済み**（停留所自動検知＝`StopDetector`。退役はオーナー確定済みだったが
+ * 実装が残存し、実走 #35 で2回発火してカメラを奪っていた）。**値は既存データが持つため残す**
+ * （過去セッションの `trigger_type='AUTO'` 行を読めなくしない）。**新規に書かれることはない。**
+ */
 enum class StopVisitTriggerType { AUTO, MANUAL }
 
 /** `recording_session.status` の許容値（設計書§4.4）。 */
@@ -61,6 +71,8 @@ enum class RecordingSessionStatus { RECORDING, COMPLETED, DISCARDED, INTERRUPTED
 class RecordingSessionRepository(
     private val context: Context,
     database: BusCourseDatabase,
+    private val now: () -> Long = System::currentTimeMillis,
+    private val runUid: () -> String = { UUID.randomUUID().toString() },
 ) {
     private val recordingSessionDao = database.recordingSessionDao()
     private val timelapseFrameDao = database.timelapseFrameDao()
@@ -102,7 +114,7 @@ class RecordingSessionRepository(
         targetToStopCardId: Long? = null,
         baseFrameIntervalMs: Long = 1_000L,
     ): RecordingSessionEntity = withContext(writeDispatcher) {
-        val now = System.currentTimeMillis()
+        val startedAt = now()
         val draft = RecordingSessionEntity(
             courseId = courseId,
             type = type.name,
@@ -111,7 +123,7 @@ class RecordingSessionRepository(
             vehicleId = vehicleId,
             driverId = driverId,
             deviceModel = Build.MODEL,
-            startedAt = now,
+            startedAt = startedAt,
             endedAt = null,
             gpsRawLogRelPath = "",
             frameDirRelPath = "",
@@ -119,6 +131,7 @@ class RecordingSessionRepository(
             frameCount = 0,
             totalDistanceM = null,
             status = RecordingSessionStatus.RECORDING.name,
+            runUid = runUid(),
         )
         val id = recordingSessionDao.insert(draft)
 
@@ -213,6 +226,33 @@ class RecordingSessionRepository(
             if (gpsAppendCount.incrementAndGet() % META_SNAPSHOT_EVERY_N_GPS_POINTS == 0) {
                 val fresh = recordingSessionDao.getById(current.id) ?: current
                 writeMetaSnapshotBlocking(fresh)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // POC押下ログ（poc_press_log.jsonl・玄関再設計POC段階1の計測装置。2026-07-31）
+    // ------------------------------------------------------------------
+
+    /**
+     * POC段階1の押下計測を `sessions/<id>/poc_press_log.jsonl` へ1行追記する。
+     * `gps_raw.jsonl` と同じ「追記＋行ごと flush」でクラッシュ耐性を確保する。頻度が低い
+     * （人がボタンを押した回数だけ）ため、常設 writer は持たず毎回開いて閉じる。
+     * セッションフォルダ内に置くので機種変更バックアップ（sessions 配下ごと同梱）に自動で載る。
+     * **DBスキーマには一切触れない**（v20 鋳造＝官房マターを POC の後ろに置く＝測ってから鋳造する）。
+     */
+    fun appendPocPressLog(json: JSONObject) {
+        repositoryScope.launch {
+            val current = session ?: return@launch
+            val file = File(sessionDir(current.id), "poc_press_log.jsonl")
+            try {
+                OutputStreamWriter(FileOutputStream(file, true), Charsets.UTF_8).use { w ->
+                    w.write(json.toString())
+                    w.write("\n")
+                    w.flush()
+                }
+            } catch (e: IOException) {
+                Log.e(TAG, "poc_press_log.jsonl 追記に失敗しました", e)
             }
         }
     }
@@ -377,15 +417,21 @@ class RecordingSessionRepository(
     // 停留所通過イベント・衝撃検知イベント
     // ------------------------------------------------------------------
 
-    /** `stop_visit_event` を記録する（設計書§4.8）。 */
+    /**
+     * `stop_visit_event` を記録する（設計書§4.8）。
+     *
+     * v20（2026-08-02）: [stopCardId] は NULL 可（カードなし押下＝押下の事実と測位だけを残す形。
+     * [StopVisitEventEntity.stopCardId] の KDoc 参照）。既存呼び出し元は従来どおり非 null を渡す。
+     */
     suspend fun recordStopVisitEvent(
-        stopCardId: Long,
+        stopCardId: Long?,
         eventType: StopVisitEventType,
         triggerType: StopVisitTriggerType?,
         location: Location?,
         distanceAtEventM: Double?,
         positionErrorM: Double?,
         hiresFrameId: Long?,
+        eventTs: Long = System.currentTimeMillis(),
     ): Long = withContext(writeDispatcher) {
         val current = session ?: error("RecordingSessionRepository: セッションが開始されていません")
         val event = StopVisitEventEntity(
@@ -393,7 +439,7 @@ class RecordingSessionRepository(
             stopCardId = stopCardId,
             eventType = eventType.name,
             triggerType = triggerType?.name,
-            eventTs = System.currentTimeMillis(),
+            eventTs = eventTs,
             lat = location?.latitude,
             lon = location?.longitude,
             distanceAtEventM = distanceAtEventM,
@@ -404,6 +450,17 @@ class RecordingSessionRepository(
         val fresh = recordingSessionDao.getById(current.id) ?: current
         writeMetaSnapshotBlocking(fresh)
         id
+    }
+
+    /**
+     * 押下イベントへ HIRES フレームの参照を結ぶ（v20・2026-08-02）。
+     *
+     * 玄関の③（撮影完了コールバック）から呼ばれる。**筆頭写真はこの参照からの正選択のみ**で決まる
+     * （design-gate 条件「AUTO を判定する組み込みコードを書かない」＝時刻順の探索や出自の判定はしない）。
+     * 押下経路（②の insert）はブロックしない——撮影完了後の別コルーチンで走る UPDATE 1行。
+     */
+    suspend fun linkHiresFrameToEvent(eventId: Long, frameId: Long) = withContext(writeDispatcher) {
+        stopVisitEventDao.updateHiresFrameId(eventId, frameId)
     }
 
     /** `shock_event` を記録する（設計書§4.9.1）。バースト終端フレームは未確定のままnullで挿入できる。 */
@@ -441,8 +498,14 @@ class RecordingSessionRepository(
     // ストレージローテーション（§4.10.3、StorageRotationWorkerから呼ばれる）
     // ------------------------------------------------------------------
 
-    /** 保持日数を超えたセッションを削除する。個々の削除失敗（FK制約）はスキップして継続する。 */
+    /**
+     * 保持日数を超えたセッションを削除する。個々の削除失敗（FK制約）はスキップして継続する。
+     *
+     * **[days] が 0 以下なら1件も削除しない**（[RecordingConfigRepository.RETENTION_UNLIMITED]＝既定）。
+     * ガードを呼び出し元でなくここに置くのは、**呼び出し元が増えても無期限の約束が破れないようにする**ため。
+     */
     suspend fun deleteSessionsOlderThan(days: Int) {
+        if (days <= 0) return
         val cutoffMs = System.currentTimeMillis() - days * MILLIS_PER_DAY
         val old = recordingSessionDao.getStartedBefore(cutoffMs)
         for (s in old) {

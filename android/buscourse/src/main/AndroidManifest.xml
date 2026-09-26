@@ -62,9 +62,14 @@
         <!-- 画面回転で撮影・録音中の未保存状態（MediaRecorder/CameraX一時ファイル参照）が
              Activity再生成により無警告で失われる不具合の対策として縦向き固定にする
              （2026-07-11レビュー指摘。本アプリはどの画面も横向きレイアウトを持たない）。 -->
+        <!-- configChanges: 既定は上記のとおり縦固定だが、映像ナビ本画面・ナビ設定画面だけは
+             滞在中に実行時 requestedOrientation で回転を解放する（ui/RotationEffect.kt）。
+             そのとき Activity を再生成させないため回転系の設定変更を自前処理にする
+             （MapView の SurfaceView 再確保・状態消失を防ぐ。設計 §2-2・§7-3 横向き対応 2026-07-25）。 -->
         <activity
             android:name=".MainActivity"
             android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

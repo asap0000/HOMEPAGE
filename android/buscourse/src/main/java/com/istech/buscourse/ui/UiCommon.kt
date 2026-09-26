@@ -2,9 +2,11 @@ package com.istech.buscourse.ui
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DirectionsBus
@@ -19,6 +21,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
+import com.istech.buscourse.core.photo.ExifAwareBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -41,6 +45,61 @@ fun StopCardThumbnail(file: File?, modifier: Modifier = Modifier) {
         }
     }
     val shaped = modifier.clip(RoundedCornerShape(8.dp))
+    val bmp = bitmap
+    if (bmp != null) {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = shaped,
+        )
+    } else {
+        Box(
+            modifier = shaped.background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.DirectionsBus,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 成形画面用の縮小読み込みサムネイル（design-gate C-2 y×5・2026-08-04）。
+ * 元画像をそのまま展開せず、表示寸法に収まるまで間引いて読み込む。
+ *
+ * **★EXIF 回転を必ず通す**（[ExifAwareBitmap]）。`BitmapFactory` は EXIF を見ないため、
+ * 素朴にデコードすると走行中のコマが横倒しで並ぶ（実機実射で再現・2026-08-04。
+ * 同じ罠は 2026-07-10 の実車テストと POC 実走3回目でも記録済み＝**画像は必ず EXIF を通す**）。
+ */
+@Composable
+fun StopThumbnail(file: File?, sizeDp: Int, modifier: Modifier = Modifier) {
+    val targetPx = with(LocalDensity.current) { sizeDp.dp.roundToPx() }.coerceAtLeast(1)
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = file?.path, key2 = file?.lastModified()) {
+        value = if (file != null && file.exists()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    ExifAwareBitmap.decode(file.absolutePath, maxLongEdgePx = targetPx).also { decoded ->
+                        if (decoded == null) Log.w("StopThumbnail", "画像をデコードできません: ${file.path}")
+                    }
+                } catch (error: OutOfMemoryError) {
+                    Log.w("StopThumbnail", "画像のデコードでメモリ不足: ${file.path}")
+                    null
+                } catch (error: Exception) {
+                    Log.w("StopThumbnail", "画像をデコードできません: ${file.path}", error)
+                    null
+                }
+            }
+        } else {
+            null
+        }
+    }
+    val shaped = modifier
+        .size(sizeDp.dp)
+        .clip(RoundedCornerShape(8.dp))
     val bmp = bitmap
     if (bmp != null) {
         Image(

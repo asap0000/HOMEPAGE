@@ -18,18 +18,19 @@ import org.maplibre.android.plugins.annotation.SymbolOptions
 import org.maplibre.android.style.layers.Property
 
 /**
- * タップされた停留所ピンから復元した情報（設計書§5.7.2の`data`スキーマ`stopCardId, name,
- * sequenceIndex, note`にマップする）。UI層（`StopCardBottomSheetFragment`相当、本タスクの対象外）が
- * この値を受け取ってボトムシート表示する想定。
+ * タップされた停留所ピンから復元した情報。地図確認画面では[sequenceIndex]だけを使い、
+ * 停留所名・メモなどのPIIはMapLibreのSymbol dataへ載せない。
  *
  * [sequenceIndex]は[StopSymbolOverlay.showAllActiveStops]呼び出し側が渡した
  * `sequenceIndexByCardId`に無いカードでは`null`（下記クラスKDoc参照）。
  */
 data class StopSymbolInfo(
     val stopCardId: Long?,
-    val name: String,
-    val sequenceIndex: Int?,
-    val note: String?,
+    /** 互換用の予約フィールド。Symbol dataには保存しない。 */
+    val name: String = "",
+    val sequenceIndex: Int? = null,
+    /** 互換用の予約フィールド。Symbol dataには保存しない。 */
+    val note: String? = null,
 )
 
 /**
@@ -39,7 +40,8 @@ data class StopSymbolInfo(
  */
 data class StopSymbolPoint(
     val stopCardId: Long?,
-    val name: String,
+    /** 地図確認画面では描画・Symbol dataへの保存をしない互換用フィールド。 */
+    val name: String = "",
     val latitude: Double,
     val longitude: Double,
     val sequenceIndex: Int? = null,
@@ -138,9 +140,7 @@ class StopSymbolOverlay(
     private fun buildSymbolOptions(point: StopSymbolPoint): SymbolOptions {
         val data = JsonObject().apply {
             if (point.stopCardId != null) addProperty("stopCardId", point.stopCardId) else add("stopCardId", JsonNull.INSTANCE)
-            addProperty("name", point.name)
             if (point.sequenceIndex != null) addProperty("sequenceIndex", point.sequenceIndex) else add("sequenceIndex", JsonNull.INSTANCE)
-            if (point.note != null) addProperty("note", point.note) else add("note", JsonNull.INSTANCE)
         }
         return SymbolOptions()
             .withLatLng(LatLng(point.latitude, point.longitude))
@@ -152,10 +152,8 @@ class StopSymbolOverlay(
     private fun parseData(symbol: Symbol): StopSymbolInfo? {
         val data = symbol.data as? JsonObject ?: return null
         val stopCardId = data.get("stopCardId")?.takeIf { !it.isJsonNull }?.asLong
-        val name = data.get("name")?.takeIf { !it.isJsonNull }?.asString ?: return null
         val sequenceIndex = data.get("sequenceIndex")?.takeIf { !it.isJsonNull }?.asInt
-        val note = data.get("note")?.takeIf { !it.isJsonNull }?.asString
-        return StopSymbolInfo(stopCardId, name, sequenceIndex, note)
+        return StopSymbolInfo(stopCardId = stopCardId, sequenceIndex = sequenceIndex)
     }
 
     /** 画面破棄時の後始末（`SymbolManager`が保持するリソースの解放）。 */

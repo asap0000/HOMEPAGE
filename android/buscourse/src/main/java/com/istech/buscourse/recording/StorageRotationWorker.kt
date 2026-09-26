@@ -38,8 +38,7 @@ class StorageRotationWorker(
             val minFreeBytes = configRepository.minFreeBytes
             sessionRepository.deleteSessionsOlderThan(retentionDays)
 
-            // ★feasibilityレビュー反映（設計書1249行目、重大4）：test_run_comparisonからのFK参照は
-            // ON DELETE SET NULLへ変更済み（§3.5）。だが未知のFK・将来追加テーブルに対する防御的
+            // 試走比較テーブルからのFK参照はv14で廃止済み。未知のFK・将来追加テーブルに対する防御的
             // フォールバックとして、削除失敗時は例外を握りつぶさず「次の候補へスキップ」し、
             // 同一セッションの再取得による無限ループを防ぐ。
             val skipped = mutableSetOf<Long>()

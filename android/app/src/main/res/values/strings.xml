@@ -1,6 +1,0 @@
-<resources>
-    <!-- app_name is provided per product flavor via resValue in app/build.gradle.kts
-         (プライバシーカメラ Lite / プライバシーカメラ Pro). -->
-    <string name="camera_permission_rationale">写真を撮影するためにカメラへのアクセスが必要です。撮影した画像は暗号化され、この端末の外には一切送信されません。</string>
-    <string name="grant_permission">カメラを許可</string>
-</resources>

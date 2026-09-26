@@ -1,6 +1,7 @@
 package com.istech.buscourse.core.geo
 
 import android.location.Location
+import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -12,7 +13,7 @@ import kotlin.math.sqrt
  *
  * `core.geo` は基盤レイヤーであり、`recording` パッケージの型（`StopMaster`等）には依存しない。
  * 設計書§4.8.2の擬似コードは `haversineM(loc: Location, stop: StopMaster): Double` という
- * シグネチャだが、`StopMaster` は `recording.StopDetector` 側の値オブジェクトのため、
+ * シグネチャだが、`StopMaster` は `recording` パッケージ側の値オブジェクトのため、
  * ここでは緯度経度のプリミティブ値を受け取る形に一般化した（呼び出し側で
  * `GeoMath.haversineM(loc.latitude, loc.longitude, stop.latitude, stop.longitude)` のように使う）。
  */
@@ -33,6 +34,30 @@ object GeoMath {
         return EARTH_RADIUS_M * c
     }
 
+    /**
+     * 2点間の forward azimuth（初期方位）。北=0・時計回り・範囲 [0, 360)。
+     * EX（designer playback.bearing_deg）と同一式で両系統の見え方を一致させる。
+     * 平面近似は使わないため、高緯度・経度180度またぎでも正しい方位を返す。
+     *
+     * θ = atan2(sinΔλ * cosφ2, cosφ1 * sinφ2 − sinφ1 * cosφ2 * cosΔλ)
+     *
+     * 同一座標では方位は定義できないため [Double.NaN] を返す。
+     */
+    fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        if (lat1 == lat2 && lon1 == lon2) return Double.NaN
+
+        val radiansPerDegree = PI / 180.0
+        val phi1 = lat1 * radiansPerDegree
+        val phi2 = lat2 * radiansPerDegree
+        val deltaLambda = (lon2 - lon1) * radiansPerDegree
+        val theta = atan2(
+            sin(deltaLambda) * cos(phi2),
+            cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(deltaLambda),
+        )
+        val degrees = theta / radiansPerDegree
+        return (degrees % 360.0 + 360.0) % 360.0
+    }
+
     /** [Location] と緯度経度の組との距離（メートル）。 */
     fun haversineM(loc: Location, lat: Double, lon: Double): Double =
         haversineM(loc.latitude, loc.longitude, lat, lon)
@@ -50,5 +75,15 @@ object GeoMath {
         val results = FloatArray(1)
         Location.distanceBetween(lat1, lon1, lat2, lon2, results)
         return results[0]
+    }
+
+    /** 基準点からの東・北方向の局所平面座標。短い線分への投影だけに使用する近似。 */
+    data class LocalEnu(val eastM: Double, val northM: Double)
+
+    fun toLocalEnu(lat: Double, lon: Double, refLat: Double, refLon: Double): LocalEnu {
+        val radius = EARTH_RADIUS_M
+        val east = Math.toRadians(lon - refLon) * radius * cos(Math.toRadians(refLat))
+        val north = Math.toRadians(lat - refLat) * radius
+        return LocalEnu(east, north)
     }
 }

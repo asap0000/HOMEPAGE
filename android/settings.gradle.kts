@@ -20,6 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PrivacyCamera"
-include(":app")
+rootProject.name = "BusCourse"
 include(":buscourse")

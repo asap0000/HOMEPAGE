@@ -53,6 +53,22 @@ data class RecordingSessionEntity(
      * セッション一覧から編集する。
      */
     val memo: String? = null,
+    /**
+     * EX用書き出しを一度でも選んだ時刻（version 22）。
+     *
+     * **列は日時を持つが、画面に出すのは印だけ**（日時も回数も表示しない）。オーナー指示
+     * 「書き出し選択を一度はしたことだけわかるようにするだけの目印」。
+     * **後任がここを見て「日時があるなら出そう」と拡張しないこと。**
+     */
+    @ColumnInfo(name = "exported_at") val exportedAt: Long? = null,
+    /**
+     * 走行を端末をまたいで一意に指す識別子（version 23）。UUID。
+     * 新規の走行は記録開始時に生成し、既存の走行は初回の EX用書き出し時に生成して保存する（`exported_at` と同型の遅延書き込み）。
+     * 一度書いたら不変——`recording_session.id` は端末内の連番で DB を作り直すと振り直されるため、
+     * EX 側の出所（source_id）にはこちらを使う（Windows 実測で id は176本の走行に対し30種類しかなく14件が衝突していた）。
+     * 画面には出さない。
+     */
+    @ColumnInfo(name = "run_uid") val runUid: String? = null,
 )
 
 /**
@@ -153,7 +169,18 @@ data class GpsPointEntity(
 data class StopVisitEventEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     @ColumnInfo(name = "session_id") val sessionId: Long,
-    @ColumnInfo(name = "stop_card_id") val stopCardId: Long,
+    /**
+     * 訪問イベントの停留所カード参照。**v20（2026-08-02）で NULL 許容化**（官房認可・design-gate 通過済み）。
+     *
+     * NOT NULL は「押下時点でカードが未定なら書けない」を強制し、**嘘のカード id を入れる（誤吸着）か
+     * 何も残さないかの二択**を生んでいた（実車 #17＝24件中21件が誤吸着）。v20 以降の玄関は
+     * **`stop_card_id = NULL`＋押下時の実測 lat/lon** で押下を必ず記録し、カードの判定はコース創設に委ねる。
+     * FK（実在カードのみ参照可・RESTRICT）と索引は維持（SQLite は NULL を FK 違反にしない）。
+     *
+     * ⚠ 同名フィールドが3エンティティにある（本テーブル／`timelapse_frame`／`navi_event`）。
+     * grep では同じに見えるが別物（2026-08-02 に官房・当チーム双方が実際に取り違えた罠）。
+     */
+    @ColumnInfo(name = "stop_card_id") val stopCardId: Long?,
     /** APPROACHING | ARRIVED | PASSED | MISSED */
     @ColumnInfo(name = "event_type") val eventType: String,
     /** AUTO | MANUAL（ARRIVED時のみ意味を持つ） */

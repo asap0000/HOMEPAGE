@@ -45,6 +45,42 @@ class RecordingStateStore(private val context: Context) {
     val gnssWarningFlow: Flow<Boolean> =
         context.recordingStateDataStore.data.map { it[KEY_GNSS_WARNING] ?: false }
 
+    /**
+     * 停車開始時刻（epoch ms）。null＝走行中。UI改善（停車ストップウォッチ、2026-07-31）用。
+     * 5km/h 境界をまたいだ**遷移時のみ**書き込まれる（毎秒ではない＝DataStore への 1Hz 書き込みを避ける。
+     * 経過秒の計算は UI 側が既存の1秒ティッカーで行う）。表示のみで、どのテーブル・ログにも記録しない
+     * （停車の記録そのものは GPX＝gps_raw が既に持っている）。
+     */
+    val stationarySinceFlow: Flow<Long?> =
+        context.recordingStateDataStore.data.map { it[KEY_STATIONARY_SINCE] }
+
+    /** よーいドン式（2026-08-01）: 現在の記録でカメラの最初のフレームが撮れたか。既定false（準備中）。 */
+    val cameraReadyFlow: Flow<Boolean> =
+        context.recordingStateDataStore.data.map { it[KEY_CAMERA_READY] ?: false }
+
+    /** よーいドン式: このセッションが「映像なしで開始する」を選んだセッションか。既定false。 */
+    val noCameraModeFlow: Flow<Boolean> =
+        context.recordingStateDataStore.data.map { it[KEY_NO_CAMERA_MODE] ?: false }
+
+    /**
+     * よーいドン式: 記録中画面が「緑シグナル（記録中）」を出してよいか＝
+     * [cameraReadyFlow] が true、または [noCameraModeFlow]（映像を諦めて開始した）が true。
+     * どちらか片方を UI 側で combine するのではなく、同じ DataStore ドキュメントの1回の読み取りで
+     * ここに1つの Flow としてまとめる（UI 側に合成ロジックを持たせない）。
+     */
+    val readyToRecordFlow: Flow<Boolean> =
+        context.recordingStateDataStore.data.map { prefs ->
+            (prefs[KEY_CAMERA_READY] ?: false) || (prefs[KEY_NO_CAMERA_MODE] ?: false)
+        }
+
+    /**
+     * よーいドン式: 直近の「カメラが上がらず開始を諦めた」イベントの発生時刻（epoch ms）。null＝未発生。
+     * 失敗のたびに新しい時刻を書く（同じ理由の連続でも UI 側の Flow コレクタが値の変化として検知できる
+     * よう、値そのものを毎回変える）。[clear] で null に戻る。
+     */
+    val startupFailedAtFlow: Flow<Long?> =
+        context.recordingStateDataStore.data.map { it[KEY_STARTUP_FAILED_AT] }
+
     suspend fun markRecording(sessionId: Long) {
         context.recordingStateDataStore.edit { prefs ->
             prefs[KEY_IS_RECORDING] = true
@@ -62,6 +98,30 @@ class RecordingStateStore(private val context: Context) {
         context.recordingStateDataStore.edit { prefs -> prefs[KEY_GNSS_WARNING] = active }
     }
 
+    /** 停車開始時刻を反映する（`BusRecordingService`が5km/h境界の遷移時のみ呼ぶ）。null＝走行再開。 */
+    suspend fun setStationarySince(sinceEpochMs: Long?) {
+        context.recordingStateDataStore.edit { prefs ->
+            if (sinceEpochMs == null) prefs.remove(KEY_STATIONARY_SINCE)
+            else prefs[KEY_STATIONARY_SINCE] = sinceEpochMs
+        }
+    }
+
+    suspend fun setCameraReady(ready: Boolean) {
+        context.recordingStateDataStore.edit { it[KEY_CAMERA_READY] = ready }
+    }
+
+    suspend fun setNoCameraMode(active: Boolean) {
+        context.recordingStateDataStore.edit { it[KEY_NO_CAMERA_MODE] = active }
+    }
+
+    /**
+     * [startupFailedAtFlow] へ失敗イベントを書く。呼び出し側（`BusRecordingService.stopRecording`）が
+     * [clear] の**後**に呼ぶこと（[clear] は全キーを消すため、先に呼ぶと消えてしまう）。
+     */
+    suspend fun setStartupFailedAt(epochMs: Long) {
+        context.recordingStateDataStore.edit { it[KEY_STARTUP_FAILED_AT] = epochMs }
+    }
+
     suspend fun clear() {
         context.recordingStateDataStore.edit { it.clear() }
     }
@@ -73,5 +133,9 @@ class RecordingStateStore(private val context: Context) {
         private val KEY_SESSION_ID = longPreferencesKey("session_id")
         private val KEY_CAMERA_WARNING = booleanPreferencesKey("camera_warning")
         private val KEY_GNSS_WARNING = booleanPreferencesKey("gnss_warning")
+        private val KEY_STATIONARY_SINCE = longPreferencesKey("stationary_since")
+        private val KEY_CAMERA_READY = booleanPreferencesKey("camera_ready")
+        private val KEY_NO_CAMERA_MODE = booleanPreferencesKey("no_camera_mode")
+        private val KEY_STARTUP_FAILED_AT = longPreferencesKey("startup_failed_at")
     }
 }

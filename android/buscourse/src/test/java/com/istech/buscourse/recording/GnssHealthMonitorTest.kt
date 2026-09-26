@@ -127,4 +127,67 @@ class GnssHealthMonitorTest {
         assertThat(changed).isTrue()
         assertThat(monitor.isWarning).isTrue()
     }
+
+    // ------------------------------------------------------------------
+    // 位置の途絶検知（2026-08-01 追加）。POC実走で「衛星は捕捉・精度3.8mを報告しているのに
+    // 位置は36秒来ない」が実測され、衛星数だけを見る旧実装では画面が「測位中」と嘘をついていた。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun 衛星が見えていても位置が15秒来なければ警告する() {
+        val monitor = GnssHealthMonitor()
+        monitor.onLocationReceived(nowElapsedMs = 0L)
+        // 衛星は常に見えている（旧実装ならこの間ずっと「正常」だった）
+        assertThat(monitor.onSatelliteStatusChanged(usedInFixCount = 8, nowElapsedMs = 14_000L)).isFalse()
+        assertThat(monitor.isWarning).isFalse()
+
+        val changed = monitor.onSatelliteStatusChanged(usedInFixCount = 8, nowElapsedMs = 15_000L)
+        assertThat(changed).isTrue()
+        assertThat(monitor.isWarning).isTrue()
+    }
+
+    @Test
+    fun 位置が届けば途絶の警告は解除される() {
+        val monitor = GnssHealthMonitor()
+        monitor.onLocationReceived(nowElapsedMs = 0L)
+        monitor.onSatelliteStatusChanged(usedInFixCount = 8, nowElapsedMs = 20_000L)
+        assertThat(monitor.isWarning).isTrue()
+
+        val changed = monitor.onLocationReceived(nowElapsedMs = 21_000L)
+        assertThat(changed).isTrue()
+        assertThat(monitor.isWarning).isFalse()
+    }
+
+    @Test
+    fun 初回fix待ちの間は位置未達でも警告しない() {
+        // 記録開始直後は位置を1点も受け取っていない。ここで途絶扱いにすると毎回起動時に鳴る。
+        val monitor = GnssHealthMonitor()
+        assertThat(monitor.onSatelliteStatusChanged(usedInFixCount = 8, nowElapsedMs = 60_000L)).isFalse()
+        assertThat(monitor.isWarning).isFalse()
+    }
+
+    @Test
+    fun 停車していても位置は届くので誤警報しない() {
+        // minDistanceM=0f 撤廃後の想定：停車中も約1秒間隔で位置が届く（速度0でも配信される）。
+        // 旧実装は minDistanceM=3f のため「停車＝位置が来ない」が正常で、この判定は誤警報の元だった。
+        // 距離フィルタを外したことで、位置の到達を健全性の指標として安全に使えるようになった。
+        val monitor = GnssHealthMonitor()
+        var t = 0L
+        repeat(60) { // 60秒ぶん、1秒ごとに停車中の位置が届く
+            monitor.onLocationReceived(nowElapsedMs = t)
+            monitor.onSatelliteStatusChanged(usedInFixCount = 7, nowElapsedMs = t)
+            t += 1_000L
+        }
+        assertThat(monitor.isWarning).isFalse()
+    }
+
+    @Test
+    fun resetで位置の到達履歴も消える() {
+        val monitor = GnssHealthMonitor()
+        monitor.onLocationReceived(nowElapsedMs = 0L)
+        monitor.reset()
+        // 履歴が残っていれば「15秒経過」で警告するが、resetされていれば初回fix待ち扱いで警告しない。
+        assertThat(monitor.onSatelliteStatusChanged(usedInFixCount = 8, nowElapsedMs = 60_000L)).isFalse()
+        assertThat(monitor.isWarning).isFalse()
+    }
 }

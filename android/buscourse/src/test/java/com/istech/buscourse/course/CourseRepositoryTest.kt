@@ -5,6 +5,11 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.CourseStopEntity
+import com.istech.buscourse.core.data.CourseEntity
+import com.istech.buscourse.core.data.NaviBlockReason
+import com.istech.buscourse.core.data.NaviMapEntity
+import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.core.data.RoutePointEntity
@@ -46,6 +51,31 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35], application = android.app.Application::class)
 class CourseRepositoryTest {
 
+    private fun courseForState(
+        kind: CourseKind = CourseKind.STANDARD,
+        updatedAt: Long = 100,
+        shapingStartedAt: Long? = null,
+        blockReason: String? = null,
+    ) = CourseEntity(
+        id = 1, name = "テスト", description = null, kind = kind.name, baseCourseId = null,
+        createdAt = 1, updatedAt = updatedAt, shapingStartedAt = shapingStartedAt,
+        naviBlockReason = blockReason,
+    )
+
+    @Test
+    fun resolveShapingState_resolvesFiveStatesInPriorityOrder() {
+        assertThat(resolveShapingState(courseForState(kind = CourseKind.DRAFT), null))
+            .isEqualTo(CourseShapingState.RESERVED)
+        assertThat(resolveShapingState(courseForState(shapingStartedAt = 1), null))
+            .isEqualTo(CourseShapingState.SHAPING)
+        assertThat(resolveShapingState(courseForState(updatedAt = 100), 100))
+            .isEqualTo(CourseShapingState.SENT)
+        assertThat(resolveShapingState(courseForState(updatedAt = 101), 100))
+            .isEqualTo(CourseShapingState.CHANGED)
+        assertThat(resolveShapingState(courseForState(updatedAt = 101, blockReason = NaviBlockReason.NO_TRACK.name), 100))
+            .isEqualTo(CourseShapingState.BLOCKED)
+    }
+
     /**
      * 緯度1度あたりのおおよその距離（m、球体近似）。70m/180m等の半径しきい値をまたぐ
      * 小さなオフセットを作るためだけに使う近似値で、[GeoMath.haversineM]の実測はGeoMathTestで別途検証済み。
@@ -77,8 +107,8 @@ class CourseRepositoryTest {
     // seedヘルパー
     // ------------------------------------------------------------------
 
-    private suspend fun createCard(name: String, lat: Double, lon: Double, isHub: Boolean = false): Long {
-        val id = repository.createStopCard(
+    private suspend fun createCard(name: String, lat: Double, lon: Double): Long =
+        repository.createStopCard(
             name = name,
             latitude = lat,
             longitude = lon,
@@ -87,8 +117,12 @@ class CourseRepositoryTest {
             riderCount = 0,
             photoTempFile = null,
         )
-        if (isHub) repository.applyHubFlags(listOf(id), hub = true)
-        return id
+
+    /** 写真の実体を1つ置く（写真は実在するものだけを採る仕様のため・2026-08-04）。 */
+    private fun seedPhoto(relPath: String) {
+        val f = com.istech.buscourse.core.data.BusCourseStorage.resolve(context, relPath)
+        f.parentFile?.mkdirs()
+        f.writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte()))
     }
 
     private suspend fun insertSession(): Long {
@@ -145,9 +179,9 @@ class CourseRepositoryTest {
      */
     private suspend fun insertManualEvent(
         sessionId: Long,
-        stopCardId: Long,
-        lat: Double,
-        lon: Double,
+        stopCardId: Long?,
+        lat: Double?,
+        lon: Double?,
         eventTs: Long,
     ): Long = db.stopVisitEventDao().insert(
         StopVisitEventEntity(
@@ -163,6 +197,183 @@ class CourseRepositoryTest {
             hiresFrameId = null,
         )
     )
+
+    @Test
+    fun previewWash_countsAndFolding() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(100.0), 139.0, t + 2_000)
+        insertManualEvent(sessionId, null, null, null, t + 3_000)
+
+        val preview = repository.previewWash(sessionId)
+
+        assertThat(preview.pressCount).isEqualTo(4)
+        assertThat(preview.foldedPressCount).isEqualTo(1)
+        assertThat(preview.noCoordPressCount).isEqualTo(1)
+        assertThat(preview.stops).hasSize(2)
+    }
+
+    @Test
+    fun previewWash_stayDepartM_changesGrouping() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+
+        assertThat(repository.previewWash(sessionId, 20.0).stops).hasSize(1)
+        assertThat(repository.previewWash(sessionId, 0.5).stops).hasSize(2)
+    }
+
+    @Test
+    fun previewWash_gpsGapPct() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        db.gpsPointDao().insertAll(
+            listOf(0L, 1_000L, 6_000L).mapIndexed { index, offset ->
+                GpsPointEntity(
+                    sessionId = sessionId,
+                    seq = index,
+                    tsEpochMs = t + offset,
+                    elapsedRealtimeNanos = offset * 1_000_000,
+                    lat = 35.0,
+                    lon = 139.0,
+                    altM = null,
+                    speedMps = null,
+                    bearingDeg = null,
+                    accuracyM = null,
+                )
+            }
+        )
+
+        assertThat(repository.previewWash(sessionId).gpsGapPct).isWithin(0.01).of(5_000.0 / 6_000.0 * 100.0)
+        assertThat(repository.previewWash(insertSession()).gpsGapPct).isNull()
+    }
+
+    /** is_hub=1 のマークが前後にあっても、route_point の窓はコース停留所クラスタから延伸しない。 */
+    @Test
+    fun confirmCourseRoute_hubMarksOutsideCluster_doesNotExpandWindow() = runTest {
+        val hubCardId = createCard("拠点", lat = 35.000, lon = 139.000)
+        repository.applyHubFlags(listOf(hubCardId), hub = true)
+        val cardA = createCard("A", lat = 35.001, lon = 139.000)
+        val cardB = createCard("B", lat = 35.002, lon = 139.000)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStops(courseId, listOf(cardA, cardB))
+        val sessionId = insertSession()
+        val baseTs = 1_700_000_000_000L
+        insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, capturedAt = baseTs, stopCardId = hubCardId)
+        insertFrame(sessionId, seq = 1, lat = 35.001, lon = 139.000, capturedAt = baseTs + 1_000, stopCardId = cardA)
+        insertFrame(sessionId, seq = 2, lat = 35.002, lon = 139.000, capturedAt = baseTs + 2_000, stopCardId = cardB)
+        insertFrame(sessionId, seq = 3, lat = 35.003, lon = 139.000, capturedAt = baseTs + 3_000, stopCardId = hubCardId)
+        db.gpsPointDao().insertAll(
+            (0..3).map { index ->
+                GpsPointEntity(
+                    sessionId = sessionId,
+                    seq = index,
+                    tsEpochMs = baseTs + index * 1_000L,
+                    elapsedRealtimeNanos = index * 1_000_000_000L,
+                    lat = 35.000 + index * 0.001,
+                    lon = 139.000,
+                    altM = null,
+                    speedMps = null,
+                    bearingDeg = null,
+                    accuracyM = null,
+                )
+            }
+        )
+
+        val count = repository.confirmCourseRouteFromSession(courseId, sessionId)
+
+        assertThat(count).isEqualTo(2)
+        assertThat(db.routePointDao().getOrdered(courseId).map { it.lat })
+            .containsExactly(35.001, 35.002).inOrder()
+    }
+
+    @Test
+    fun washAndReserve_createsDraftAndReplaces() = runTest {
+        val sessionId = insertSession()
+        val standardId = repository.createCourse("既存正規", CourseKind.STANDARD)
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.0 + latOffsetForMeters(1.0), 139.0, t + 1_000)
+
+        val first = repository.washAndReserve(sessionId, 20.0)
+        assertThat(db.courseDao().getById(first.courseId)?.kind).isEqualTo(CourseKind.DRAFT.name)
+        assertThat(db.courseStopDao().getOrderedStops(first.courseId)).hasSize(first.stopCount)
+
+        val second = repository.washAndReserve(sessionId, 0.5)
+        assertThat(second.courseId).isNotEqualTo(first.courseId)
+        assertThat(db.courseDao().getById(first.courseId)).isNull()
+        assertThat(db.courseDao().getById(standardId)).isNotNull()
+        assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(1)
+        assertThat(db.courseStopDao().getOrderedStops(second.courseId)).hasSize(second.stopCount)
+    }
+
+    @Test
+    fun washAndReserve_doesNotReplaceShapedDraft() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        insertManualEvent(sessionId, null, 35.001, 139.0, t + 1_000)
+        val first = repository.washAndReserve(sessionId, 20.0)
+        val firstCourse = db.courseDao().getById(first.courseId)!!
+        db.courseDao().upsert(firstCourse.copy(shapingStartedAt = t))
+
+        val second = repository.washAndReserve(sessionId, 20.0)
+
+        assertThat(db.courseDao().getById(first.courseId)).isNotNull()
+        assertThat(db.courseDao().getById(second.courseId)?.name).isEqualTo("#${sessionId} の予約(1)")
+        assertThat(db.courseDao().getBySourceSession(sessionId).filter { it.kind == CourseKind.DRAFT.name }).hasSize(2)
+    }
+
+    /**
+     * ★送信に成功したら、送れなかった理由が消える（消さないと一覧が「送れません」と嘘をつき続ける）。
+     * 独立レビューが実射で再現した欠陥の回帰テスト（2026-08-03）。
+     */
+    @Test
+    fun markCourseSentToNavi_clearsBlockReasonAndKeepsUpdatedAt() = runTest {
+        val courseId = repository.createCourse("送れなかったコース", CourseKind.STANDARD)
+        repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+        val before = db.courseDao().getById(courseId)!!
+
+        repository.markCourseSentToNavi(courseId)
+
+        val after = db.courseDao().getById(courseId)!!
+        assertThat(after.naviBlockReason).isNull()
+        assertThat(after.shapingStartedAt).isNotNull()
+        // updated_at を進めない＝生成直後に「変更あり」と嘘をつかない
+        assertThat(after.updatedAt).isEqualTo(before.updatedAt)
+    }
+
+    /**
+     * ★一度も保存せずにナビへ送った予約が、洗浄し直しで消えない
+     * （送信時に成形済みとして扱うため）。独立レビューが実射で再現した欠陥の回帰テスト。
+     */
+    @Test
+    fun washAndReserve_doesNotReplaceDraftAlreadySentToNavi() = runTest {
+        val sessionId = insertSession()
+        val t = 1_700_000_000_000L
+        insertManualEvent(sessionId, null, 35.0, 139.0, t)
+        val sent = repository.washAndReserve(sessionId, 20.0)
+        // 保存（setCourseStopsPreservingPointers）は通さず、送信成功の後始末だけを通す
+        repository.markCourseSentToNavi(sent.courseId)
+
+        repository.washAndReserve(sessionId, 20.0)
+
+        assertThat(db.courseDao().getById(sent.courseId)).isNotNull()
+    }
+
+    /** ★identity が同じなら書き直さない（書くと updated_at が進み「変更あり」に化ける）。 */
+    @Test
+    fun hasSameIdentity_detectsUnchangedIdentity() = runTest {
+        val courseId = repository.createCourse("B1", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+
+        assertThat(repository.hasSameIdentity(courseId, "B", 1, 2026)).isTrue()
+        assertThat(repository.hasSameIdentity(courseId, " B ", 1, 2026)).isTrue() // 前後の空白は無視
+        assertThat(repository.hasSameIdentity(courseId, "B", 2, 2026)).isFalse()
+    }
 
     /** [sessionId] に緯度方向へ直進する軌跡(seq0〜9、走行速度扱いの5.0m/s)を投入する。 */
     private suspend fun insertGpsTrack(sessionId: Long, baseLat: Double, baseLon: Double) {
@@ -250,37 +461,6 @@ class CourseRepositoryTest {
         assertThat(candidates).isEmpty()
     }
 
-    @Test
-    fun findOrCreate_hubCard_within180m_isNotCandidate() = runTest {
-        // 拠点カードは半径180m。通常カードなら70m超で候補になる100mでも、拠点なら候補にならない。
-        val cardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
-        val sessionId = insertSession()
-        insertFrame(
-            sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000,
-            stopCardId = cardId,
-        )
-
-        val candidates = repository.analyzeFindOrCreateCandidates(sessionId)
-
-        assertThat(candidates).isEmpty()
-    }
-
-    @Test
-    fun findOrCreate_hubCard_beyond180m_isCandidate() = runTest {
-        val cardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
-        val sessionId = insertSession()
-        val frameId = insertFrame(
-            sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(200.0), lon = 139.000,
-            stopCardId = cardId,
-        )
-
-        val candidates = repository.analyzeFindOrCreateCandidates(sessionId)
-
-        assertThat(candidates.map { it.frameId }).contains(frameId)
-    }
-
     // ------------------------------------------------------------------
     // S2: analyzeSessionCoverage（軌跡コリドー内外判定、コース非依存）
     // ------------------------------------------------------------------
@@ -336,7 +516,7 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         val frameId = insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = farCardId)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.createdCourseIds).hasSize(1)
         assertThat(result.totalStopCount).isEqualTo(1)
@@ -370,7 +550,7 @@ class CourseRepositoryTest {
         val eventB = insertManualEvent(sessionId, stopCardId = cardB, lat = 35.010, lon = 139.010, eventTs = 1_700_000_060_000L)
         val eventC = insertManualEvent(sessionId, stopCardId = cardC, lat = 35.020, lon = 139.020, eventTs = 1_700_000_120_000L)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.createdCourseIds).hasSize(1)
         assertThat(result.totalStopCount).isEqualTo(3)
@@ -415,7 +595,7 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(trueLat) // 位置はイベントの真の座標（誤吸着カードの座標=36.000ではない）
         assertThat(stop.longitude).isEqualTo(trueLon)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val stops = db.courseStopDao().getOrderedStops(result.createdCourseIds.single())
         assertThat(stops.single().eventId).isEqualTo(eventId)
         assertThat(stops.single().stopCardId).isNull()
@@ -438,7 +618,7 @@ class CourseRepositoryTest {
             eventTs = 1_700_000_000_000L,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -460,7 +640,7 @@ class CourseRepositoryTest {
         // 実運用では両者の時刻はほぼ同時刻になる
         insertManualEvent(sessionId, stopCardId = cardId, lat = 35.000, lon = 139.000, eventTs = markTs + 500)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.totalStopCount).isEqualTo(1) // 2点にならない
     }
@@ -476,7 +656,7 @@ class CourseRepositoryTest {
             stopCardId = cardId,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -501,7 +681,7 @@ class CourseRepositoryTest {
             stopCardId = farCardId, // onManualStopMarkの「距離不問の最近傍仮吸着」を模す
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.frameOnlyStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -524,7 +704,7 @@ class CourseRepositoryTest {
             stopCardId = nearCardId,
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         assertThat(result.cardAttachedStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
@@ -532,45 +712,23 @@ class CourseRepositoryTest {
         assertThat(stop.stopCardId).isNotEqualTo(farCardId)
     }
 
-    /** パス2: 拠点カードは通常より広い半径（180m）で判定される。 */
+    /** パス2: is_hub=1 のカードも通常半径70mで判定される。 */
     @Test
-    fun pass2_hubCard_isAttachedWithWiderRadius() = runTest {
-        val hubCardId = createCard("拠点カード", lat = 35.000, lon = 139.000, isHub = true)
+    fun pass2_hubCardBeyondNormalRadius_isNotAttached() = runTest {
+        val hubCardId = createCard("拠点カード", lat = 35.000, lon = 139.000)
+        repository.applyHubFlags(listOf(hubCardId), hub = true)
         val sessionId = insertSession()
         insertFrame(
             sessionId, seq = 0,
-            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000, // 通常70mは超えるが拠点180m以内
+            lat = 35.000 + latOffsetForMeters(100.0), lon = 139.000, // 通常半径70mを超える
             stopCardId = hubCardId, // マーク済みフレームとして拾われるために必要（getMarkedFramesの絞り込み条件）
         )
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
-        assertThat(result.cardAttachedStopCount).isEqualTo(1)
+        assertThat(result.frameOnlyStopCount).isEqualTo(1)
         val stop = db.courseStopDao().getOrderedStops(result.createdCourseIds.single()).single()
-        assertThat(stop.stopCardId).isEqualTo(hubCardId)
-    }
-
-    /** 拠点分割: 選択拠点を境に断片化され、断片ごとに1コースが作られる（[splitByHubs]と同じ挙動）。 */
-    @Test
-    fun createCoursesFromSession_splitsAtSelectedHub_createsMultipleCourses() = runTest {
-        val hubCardId = createCard("拠点", lat = 35.000, lon = 139.000, isHub = true)
-        val cardA = createCard("A", lat = 35.001, lon = 139.001)
-        val cardB = createCard("B", lat = 35.002, lon = 139.002)
-        val sessionId = insertSession()
-        // 順序: A(往路) -> 拠点 -> B(復路)
-        insertFrame(sessionId, seq = 0, lat = 35.001, lon = 139.001, capturedAt = 1000, stopCardId = cardA)
-        insertFrame(sessionId, seq = 1, lat = 35.000, lon = 139.000, capturedAt = 2000, stopCardId = hubCardId)
-        insertFrame(sessionId, seq = 2, lat = 35.002, lon = 139.002, capturedAt = 3000, stopCardId = cardB)
-
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = setOf(hubCardId))
-
-        assertThat(result.createdCourseIds).hasSize(2) // 拠点前後で2断片
-        assertThat(result.totalStopCount).isEqualTo(2) // 拠点自身の点はどちらの断片にも含まれない
-
-        val allStopCardIds = result.createdCourseIds.flatMap { courseId ->
-            db.courseStopDao().getOrderedStops(courseId).map { it.stopCardId }
-        }
-        assertThat(allStopCardIds).containsExactly(cardA, cardB)
+        assertThat(stop.stopCardId).isNull()
     }
 
     // ------------------------------------------------------------------
@@ -759,7 +917,7 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
 
         val existing = repository.findExistingCoursesFromSession(sessionId)
 
@@ -772,7 +930,7 @@ class CourseRepositoryTest {
         val cardId = createCard("A", lat = 35.000, lon = 139.000)
         val sessionA = insertSession()
         insertFrame(sessionA, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
-        repository.createCoursesFromSession(sessionA, hubStopCardIds = emptySet())
+        repository.createCoursesFromSession(sessionA)
 
         val sessionB = insertSession() // 別セッション、まだ創設していない
 
@@ -792,8 +950,8 @@ class CourseRepositoryTest {
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
 
-        val first = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
-        val second = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val first = repository.createCoursesFromSession(sessionId)
+        val second = repository.createCoursesFromSession(sessionId)
 
         val existing = repository.findExistingCoursesFromSession(sessionId)
 
@@ -880,7 +1038,7 @@ class CourseRepositoryTest {
         val farCardId = createCard("遠いカード", lat = 36.000, lon = 140.000) // コリドー外、吸着させない
         val sessionId = insertSession()
         insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = farCardId)
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
 
         val details = repository.getCourseEditDetails(courseId)
@@ -894,6 +1052,11 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
         assertThat(stop.riderCount).isEqualTo(0)
+        // 写真は**実在するものだけ**を採る（2026-08-04）。実体が無い間は null。
+        assertThat(stop.thumbRelPath).isNull()
+        seedPhoto("sessions/$sessionId/frames/f0.jpg")
+        assertThat(repository.getCourseEditDetails(courseId)!!.stops.single().thumbRelPath)
+            .isEqualTo("sessions/$sessionId/frames/f0.jpg")
     }
 
     /**
@@ -908,7 +1071,7 @@ class CourseRepositoryTest {
             sessionId, stopCardId = misattachedFarCardId,
             lat = 35.000, lon = 139.000, eventTs = 1_700_000_000_000L,
         )
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
 
         val details = repository.getCourseEditDetails(courseId)
@@ -919,6 +1082,7 @@ class CourseRepositoryTest {
         assertThat(stop.latitude).isEqualTo(35.000) // イベントの実測座標（誤吸着カードの座標=36.000ではない）
         assertThat(stop.longitude).isEqualTo(139.000)
         assertThat(stop.displayName).isEqualTo("S$sessionId-1")
+        assertThat(stop.thumbRelPath).isNull()
     }
 
     /** カードを持つ点は、従来どおりカード名・乗車人数を表示名/riderCountに使う。 */
@@ -940,6 +1104,33 @@ class CourseRepositoryTest {
         assertThat(stop.riderCount).isEqualTo(5)
         assertThat(stop.latitude).isEqualTo(35.000)
         assertThat(stop.longitude).isEqualTo(139.000)
+        // カードは orig を使う（thumb は生成時に EXIF が落ち、横倒しのまま直せないため・2026-08-04）。
+        // かつ**実在するものだけ**を採るので、実体を置くまでは null。
+        assertThat(stop.thumbRelPath).isNull()
+        seedPhoto("stopcards/$cardId/photo_orig.jpg")
+        assertThat(repository.getCourseEditDetails(courseId)!!.stops.single().thumbRelPath)
+            .isEqualTo("stopcards/$cardId/photo_orig.jpg")
+    }
+
+    /**
+     * カード写真の実体が無いときは映像コマへ落ちる（2026-08-04・SHG12 実機で判明）。
+     * 7/26 事故でカード写真だけを失った点が実在し、パスの有無で採ると**写真があるのに出ない**。
+     */
+    @Test
+    fun getCourseEditDetails_cardPhotoMissing_fallsBackToFramePhoto() = runTest {
+        val cardId = createCard("写真なしカード", lat = 35.000, lon = 139.000)
+        val sessionId = insertSession()
+        val frameId = insertFrame(sessionId, seq = 0, lat = 35.000, lon = 139.000, stopCardId = cardId)
+        val courseId = repository.createCourse("フォールバック", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(CourseStopEdit(frameId = frameId, eventId = null, cardId = cardId)),
+        )
+        seedPhoto("sessions/$sessionId/frames/f0.jpg") // カード写真は置かない
+
+        val stop = repository.getCourseEditDetails(courseId)!!.stops.single()
+
+        assertThat(stop.thumbRelPath).isEqualTo("sessions/$sessionId/frames/f0.jpg")
     }
 
     /** 存在しないcourseIdはnullを返す（例外にしない）。 */
@@ -951,6 +1142,27 @@ class CourseRepositoryTest {
     // ------------------------------------------------------------------
     // setCourseStopsPreservingPointers（S6a、2026-07-18追加）
     // ------------------------------------------------------------------
+
+    @Test
+    fun setCourseStopsPreservingPointers_setsShapingStartedAtOnce() = runTest {
+        val cardId = createCard("A", 35.0, 139.0)
+        val courseId = repository.createCourse("予約", CourseKind.DRAFT)
+        val edit = listOf(CourseStopEdit(null, null, cardId))
+        repository.setCourseStopsPreservingPointers(courseId, edit)
+        val first = db.courseDao().getById(courseId)!!.shapingStartedAt
+        repository.setCourseStopsPreservingPointers(courseId, edit)
+        assertThat(first).isNotNull()
+        assertThat(db.courseDao().getById(courseId)!!.shapingStartedAt).isEqualTo(first)
+    }
+
+    @Test
+    fun setCourseStopsPreservingPointers_clearsNaviBlockReason() = runTest {
+        val cardId = createCard("A", 35.0, 139.0)
+        val courseId = repository.createCourse("成形中", CourseKind.STANDARD)
+        repository.setNaviBlockReason(courseId, NaviBlockReason.NO_TRACK)
+        repository.setCourseStopsPreservingPointers(courseId, listOf(CourseStopEdit(null, null, cardId)))
+        assertThat(db.courseDao().getById(courseId)!!.naviBlockReason).isNull()
+    }
 
     /**
      * 並べ替え後も frame_id/event_id/stop_card_id はそのまま保持される（[CourseRepository.setCourseStops]
@@ -987,6 +1199,76 @@ class CourseRepositoryTest {
         assertThat(stops.map { it.stopCardId }).containsExactly(cardId, null, null).inOrder()
         assertThat(stops.map { it.eventId }).containsExactly(null, eventId, null).inOrder()
         assertThat(stops.map { it.frameId }).containsExactly(null, null, frameId).inOrder()
+    }
+
+    /**
+     * ★編集画面で保存しても、出自(provenance)・誤差(error_space_m)・解決済み座標が失われない
+     * （2026-08-03 修正。従来は全削除→再挿入で既定値に戻り、**洗浄で畳んだ広がりが編集1回で消えていた**）。
+     * 編集画面にこれらの入力欄は無い＝人が入れ直せないため、消えると復元できない。
+     */
+    @Test
+    fun setCourseStopsPreservingPointers_reorder_preservesProvenanceAndErrorSpace() = runTest {
+        val sessionId = insertSession()
+        val cardId = createCard("A", lat = 35.000, lon = 139.000)
+        val eventId = insertManualEvent(sessionId, stopCardId = null, lat = 35.010, lon = 139.010, eventTs = 1_700_000_000_000L)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        // 洗浄の産物（畳んだ広がり・出自）を持つ点を直接置く＝創設パス1の出力に相当する状態
+        db.courseStopDao().insertAll(
+            listOf(
+                CourseStopEntity(
+                    courseId = courseId, stopCardId = null, frameId = null, eventId = eventId,
+                    sequenceIndex = 0, expectedChainageM = null,
+                    resolvedLatitude = 35.010, resolvedLongitude = 139.010,
+                    provenance = CourseStopProvenance.GEOFENCE_MATCHED.name, errorSpaceM = 12.5,
+                ),
+                CourseStopEntity(
+                    courseId = courseId, stopCardId = cardId, frameId = null, eventId = null,
+                    sequenceIndex = 1, expectedChainageM = null,
+                ),
+            )
+        )
+
+        // 編集画面で順序を入れ替えて保存する
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardId),
+                CourseStopEdit(frameId = null, eventId = eventId, cardId = null),
+            ),
+        )
+
+        val stops = db.courseStopDao().getOrderedStops(courseId).sortedBy { it.sequenceIndex }
+        val moved = stops.single { it.eventId == eventId }
+        assertThat(moved.provenance).isEqualTo(CourseStopProvenance.GEOFENCE_MATCHED.name)
+        assertThat(moved.errorSpaceM).isEqualTo(12.5)
+        assertThat(moved.resolvedLatitude).isEqualTo(35.010)
+        assertThat(moved.resolvedLongitude).isEqualTo(139.010)
+        assertThat(moved.sequenceIndex).isEqualTo(1)
+    }
+
+    /** 編集画面で新しく足した点には前身が無いので既定値（RECORDED・誤差なし）で入る。 */
+    @Test
+    fun setCourseStopsPreservingPointers_newlyAddedStop_getsDefaults() = runTest {
+        val cardA = createCard("A", lat = 35.000, lon = 139.000)
+        val cardB = createCard("B", lat = 35.010, lon = 139.010)
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.setCourseStopsPreservingPointers(
+            courseId, listOf(CourseStopEdit(frameId = null, eventId = null, cardId = cardA)),
+        )
+
+        repository.setCourseStopsPreservingPointers(
+            courseId,
+            listOf(
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardA),
+                CourseStopEdit(frameId = null, eventId = null, cardId = cardB),
+            ),
+        )
+
+        val added = db.courseStopDao().getOrderedStops(courseId).single { it.stopCardId == cardB }
+        assertThat(added.provenance).isEqualTo(CourseStopProvenance.RECORDED.name)
+        assertThat(added.errorSpaceM).isNull()
+        assertThat(added.resolvedLatitude).isNull()
     }
 
     /** 削除も反映される（渡さなかった行はcourse_stopから消える）。 */
@@ -1026,7 +1308,7 @@ class CourseRepositoryTest {
         insertFrame(sessionId, seq = 1, lat = 35.0005, lon = 139.000, capturedAt = 1_700_000_005_000L, stopCardId = cardB)
         insertGpsTrack(sessionId, baseLat = 35.000, baseLon = 139.000) // 0〜9秒分の実測軌跡
 
-        val result = repository.createCoursesFromSession(sessionId, hubStopCardIds = emptySet())
+        val result = repository.createCoursesFromSession(sessionId)
         val courseId = result.createdCourseIds.single()
         assertThat(db.routePointDao().getOrdered(courseId)).isNotEmpty() // 創設時点で生成済みという前提の確認
 
@@ -1054,4 +1336,269 @@ class CourseRepositoryTest {
         assertThat(db.courseDao().getById(courseId)?.sourceSessionId).isNull()
         assertThat(db.courseStopDao().getOrderedStops(courseId)).hasSize(1)
     }
+
+    // ------------------------------------------------------------------
+    // updateCourseIdentity（(e) コース identity設定UI、2026-07-24追加）
+    // ------------------------------------------------------------------
+
+    /** 未設定コースへの正常設定はSuccessを返し、DBに反映される。 */
+    @Test
+    fun updateCourseIdentity_setsOnUnsetCourse_returnsSuccessAndPersists() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.Success)
+        val course = db.courseDao().getById(courseId)
+        assertThat(course?.busId).isEqualTo("バスA")
+        assertThat(course?.courseNo).isEqualTo(1)
+        assertThat(course?.year).isEqualTo(2026)
+    }
+
+    /** 別コースが同一identityを既に持つ場合はDuplicateIdentityを返し、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_duplicateOnAnotherCourse_returnsDuplicateAndDoesNotChangeDb() = runTest {
+        val courseA = repository.createCourse("コースA", CourseKind.STANDARD)
+        val courseB = repository.createCourse("コースB", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseA, busId = "バスA", courseNo = 1, year = 2026)
+
+        val result = repository.updateCourseIdentity(courseB, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.DuplicateIdentity)
+        val course = db.courseDao().getById(courseB)
+        assertThat(course?.busId).isNull()
+        assertThat(course?.courseNo).isNull()
+        assertThat(course?.year).isNull()
+    }
+
+    /** 同じコースへ同じidentityを再設定するのは自己重複として扱わず、Successになる。 */
+    @Test
+    fun updateCourseIdentity_reapplySameIdentityOnSameCourse_returnsSuccess() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+        repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.Success)
+        val course = db.courseDao().getById(courseId)
+        assertThat(course?.busId).isEqualTo("バスA")
+    }
+
+    /** busIdが空白のみ→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_blankBusId_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "   ", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.busId).isNull()
+    }
+
+    /** courseNo<=0→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_courseNoZero_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 0, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.courseNo).isNull()
+    }
+
+    /** yearが範囲外（1999）→InvalidInput、DBは変更されない。 */
+    @Test
+    fun updateCourseIdentity_yearOutOfRange_returnsInvalidInput() = runTest {
+        val courseId = repository.createCourse("テストコース", CourseKind.STANDARD)
+
+        val result = repository.updateCourseIdentity(courseId, busId = "バスA", courseNo = 1, year = 1999)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.InvalidInput)
+        assertThat(db.courseDao().getById(courseId)?.year).isNull()
+    }
+
+    /** 存在しないcourseIdを渡すとCourseNotFoundを返す。 */
+    @Test
+    fun updateCourseIdentity_nonexistentCourse_returnsCourseNotFound() = runTest {
+        val result = repository.updateCourseIdentity(courseId = 999_999L, busId = "バスA", courseNo = 1, year = 2026)
+
+        assertThat(result).isEqualTo(UpdateIdentityResult.CourseNotFound)
+    }
+
+    private suspend fun seedCourseForCut(count: Int, sourceSessionId: Long? = null): Pair<Long, List<Long>> {
+        val courseId = repository.createCourse("切るテスト", CourseKind.DRAFT)
+        val cardIds = (0 until count).map { index ->
+            repository.createStopCard(
+                name = "停留所$index",
+                latitude = 35.0 + index * 0.001,
+                longitude = 139.0,
+                altitudeM = null,
+                notes = null,
+                riderCount = 0,
+                photoTempFile = null,
+            )
+        }
+        repository.setCourseStops(courseId, cardIds)
+        if (sourceSessionId != null) {
+            val course = requireNotNull(db.courseDao().getById(courseId))
+            db.courseDao().upsert(course.copy(sourceSessionId = sourceSessionId))
+        }
+        return courseId to cardIds
+    }
+
+    @Test
+    fun cutCourseAt_splitsIntoFragmentsWithSharedBoundary() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(5)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(result.createdCourseIds).hasSize(2)
+        val fragments = result.createdCourseIds.map { id ->
+            db.courseStopDao().getOrderedStops(id).map { it.stopCardId }
+        }
+        assertThat(fragments[0]).containsExactlyElementsIn(cardIds.subList(0, 3)).inOrder()
+        assertThat(fragments[1]).containsExactlyElementsIn(cardIds.subList(2, 5)).inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_preservesProvenanceAndPointers() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(5)
+        val original = db.courseStopDao().getOrderedStops(courseId)
+        db.courseStopDao().deleteAllForCourse(courseId)
+        db.courseStopDao().insertAll(
+            original.mapIndexed { index, stop ->
+                stop.copy(
+                    id = 0,
+                    provenance = if (index == 2) CourseStopProvenance.GEOFENCE_MATCHED.name else stop.provenance,
+                    errorSpaceM = if (index == 2) 12.5 else null,
+                    resolvedLatitude = if (index == 2) 35.5 else null,
+                    resolvedLongitude = if (index == 2) 139.5 else null,
+                )
+            }
+        )
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        result.createdCourseIds.forEach { id ->
+            val boundary = db.courseStopDao().getOrderedStops(id).firstOrNull { it.stopCardId == cardIds[2] }
+            assertThat(boundary?.provenance).isEqualTo(CourseStopProvenance.GEOFENCE_MATCHED.name)
+            assertThat(boundary?.errorSpaceM).isEqualTo(12.5)
+            assertThat(boundary?.resolvedLatitude).isEqualTo(35.5)
+            assertThat(boundary?.resolvedLongitude).isEqualTo(139.5)
+        }
+    }
+
+    @Test
+    fun cutCourseAt_newCoursesAreShapingDrafts() = runTest {
+        val sessionId = insertSession()
+        val (courseId, _) = seedCourseForCut(5, sourceSessionId = sessionId)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        result.createdCourseIds.forEach { id ->
+            val course = db.courseDao().getById(id)
+            assertThat(course?.kind).isEqualTo(CourseKind.DRAFT.name)
+            assertThat(course?.shapingStartedAt).isNotNull()
+            assertThat(course?.sourceSessionId).isEqualTo(sessionId)
+        }
+        assertThat(result.names).containsExactly("S$sessionId-1", "S$sessionId-2").inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_avoidsExistingFragmentName() = runTest {
+        val sessionId = insertSession()
+        val (courseId, _) = seedCourseForCut(5, sourceSessionId = sessionId)
+        repository.createCourse("S$sessionId-2", CourseKind.STANDARD)
+
+        val result = repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(result.names).containsExactly("S$sessionId-1", "S$sessionId-2(1)").inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_multipleCuts() = runTest {
+        val (courseId, cardIds) = seedCourseForCut(7)
+
+        val result = repository.cutCourseAt(courseId, setOf(2, 4))
+
+        val fragments = result.createdCourseIds.map { id ->
+            db.courseStopDao().getOrderedStops(id).map { it.stopCardId }
+        }
+        assertThat(fragments).containsExactly(
+            cardIds.subList(0, 3), cardIds.subList(2, 5), cardIds.subList(4, 7),
+        ).inOrder()
+    }
+
+    @Test
+    fun cutCourseAt_rejectsEdgeAndAdjacentCuts() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(0)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(4)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { repository.cutCourseAt(courseId, setOf(2, 3)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun cutCourseAt_deletesOriginalAndArchivesActiveMap() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "旧地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.cutCourseAt(courseId, setOf(2))
+
+        assertThat(db.courseDao().getById(courseId)).isNull()
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNotNull()
+    }
+
+    /**
+     * コース削除でも現役ナビ用マップをアーカイブする（[CourseRepository.cutCourseAt] と同じ扱い。
+     * 官房裁定 2026-08-03＋オーナー承認 2026-08-04）。残すと同じ identity で作り直した瞬間に
+     * 「送り済み」に見える（B-1 の状態モデルは navi_map の実在で判定するため）。
+     */
+    @Test
+    fun deleteCourse_archivesActiveMapOfSameIdentity() = runTest {
+        val (courseId, _) = seedCourseForCut(5)
+        repository.updateCourseIdentity(courseId, "B", 1, 2026)
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "旧地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.deleteCourse(courseId)
+
+        assertThat(db.courseDao().getById(courseId)).isNull()
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNotNull()
+        // 同じ identity で作り直しても「送り済み」に見えない＝現役マップが残っていない
+        assertThat(db.naviMapDao().getActiveMapsByIdentity("B", 1, 2026)).isEmpty()
+    }
+
+    /** identity を持たないコースの削除では何もアーカイブしない（別コースの地図を巻き込まない）。 */
+    @Test
+    fun deleteCourse_withoutIdentity_keepsOtherMapsActive() = runTest {
+        val (courseId, _) = seedCourseForCut(5) // identity 未設定のまま
+        val mapId = db.naviMapDao().insertMap(
+            NaviMapEntity(
+                schemaVersion = "1.1", profile = "app_simple", busId = "B", courseNo = 1, year = 2026,
+                title = "別コースの地図", displayOrientation = "portrait", displayPitchDeg = 0.0,
+                mediaMode = "none", mediaCount = 0, createdAt = 1, updatedAt = 1,
+            )
+        )
+
+        repository.deleteCourse(courseId)
+
+        assertThat(db.naviMapDao().getMapById(mapId)?.archivedAt).isNull()
+    }
+
 }

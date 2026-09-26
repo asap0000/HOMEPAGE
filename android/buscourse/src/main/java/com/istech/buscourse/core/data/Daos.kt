@@ -31,6 +31,14 @@ interface BusStopCardDao {
      */
     @Query("UPDATE bus_stop_card SET is_hub = :hub, updated_at = :t WHERE id = :id")
     suspend fun setHub(id: Long, hub: Boolean, t: Long)
+
+    /**
+     * 総行数（is_archivedを問わない全件）。機種変更バックアップの復元前「データなし」判定
+     * （タスク指示書§3・[com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     * [getAllActive]と違いアーカイブ済み行も数える＝「主要テーブルが全て空」の文字どおりの判定のため。
+     */
+    @Query("SELECT COUNT(*) FROM bus_stop_card")
+    suspend fun count(): Int
 }
 
 /**
@@ -80,8 +88,29 @@ interface CourseDao {
     @Upsert
     suspend fun upsert(course: CourseEntity): Long
 
+    /**
+     * 新規コースの作成専用。`@Insert`（既定 onConflict = ABORT）のため、`(bus_id, course_no, year)` の
+     * unique index に反する重複 identity は**例外（SQLiteConstraintException）で弾く**。
+     * `upsert`（@Upsert）は新規行(PK=0)の unique 衝突を IGNORE→PK不一致UPDATE空振りで**無言の -1 返却**にしてしまい、
+     * 業務キーの機械的担保が主要書込経路で成立しない（v15 敵対的レビュー F-01）。createCourse はこちらを使う。
+     */
+    @Insert
+    suspend fun insert(course: CourseEntity): Long
+
     @Query("SELECT * FROM course WHERE id = :id")
     suspend fun getById(id: Long): CourseEntity?
+
+    @Query("SELECT * FROM course WHERE bus_id = :busId AND course_no = :courseNo AND year = :year LIMIT 1")
+    suspend fun findByIdentity(busId: String, courseNo: Int, year: Int): CourseEntity?
+
+    @Query("UPDATE course SET bus_id = :busId, course_no = :courseNo, year = :year, updated_at = :updatedAt WHERE id = :courseId")
+    suspend fun updateIdentity(
+        courseId: Long,
+        busId: String?,
+        courseNo: Int?,
+        year: Int?,
+        updatedAt: Long,
+    )
 
     @Query("SELECT * FROM course ORDER BY name")
     suspend fun getAll(): List<CourseEntity>
@@ -107,6 +136,12 @@ interface CourseDao {
     @Query("SELECT * FROM course WHERE source_session_id = :sessionId ORDER BY created_at")
     suspend fun getBySourceSession(sessionId: Long): List<CourseEntity>
 
+    @Query("SELECT source_session_id FROM course WHERE kind = 'DRAFT' AND source_session_id IS NOT NULL")
+    suspend fun getDraftSourceSessionIds(): List<Long>
+
+    @Query("SELECT id FROM course WHERE kind = 'DRAFT' AND source_session_id = :sessionId")
+    suspend fun getDraftIdsBySourceSession(sessionId: Long): List<Long>
+
     /**
      * コース削除（コース削除機能、2026-07-14追加、
      * [com.istech.buscourse.course.CourseRepository.deleteCourse]が使用）。
@@ -116,6 +151,13 @@ interface CourseDao {
      */
     @Query("DELETE FROM course WHERE id = :courseId")
     suspend fun deleteById(courseId: Long)
+
+    /**
+     * 総行数。機種変更バックアップの復元前「データなし」判定（タスク指示書§3・
+     * [com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     */
+    @Query("SELECT COUNT(*) FROM course")
+    suspend fun count(): Int
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */
@@ -254,6 +296,9 @@ interface RecordingSessionDao {
     @Query("SELECT * FROM recording_session WHERE id = :id")
     suspend fun getById(id: Long): RecordingSessionEntity?
 
+    @Query("SELECT * FROM recording_session")
+    suspend fun getAll(): List<RecordingSessionEntity>
+
     @Query("SELECT * FROM recording_session WHERE status = :status ORDER BY started_at DESC")
     suspend fun getByStatus(status: String): List<RecordingSessionEntity>
 
@@ -276,6 +321,13 @@ interface RecordingSessionDao {
     /** セッションメモの更新（区間抽出画面、2026-07-11追加）。 */
     @Query("UPDATE recording_session SET memo = :memo WHERE id = :id")
     suspend fun updateMemo(id: Long, memo: String?)
+
+    /**
+     * 総行数。機種変更バックアップの復元前「データなし」判定（タスク指示書§3・
+     * [com.istech.buscourse.backup.RestoreCompatibility.isDeviceEmpty]）専用。
+     */
+    @Query("SELECT COUNT(*) FROM recording_session")
+    suspend fun count(): Int
 }
 
 /** `timelapse_frame`（LORES連写／HIRES単写メタデータ）の操作（設計書§3.5、D6）。 */
@@ -286,6 +338,9 @@ interface TimelapseFrameDao {
 
     @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
+
+    @Query("SELECT COUNT(*) FROM timelapse_frame WHERE session_id = :sessionId AND kind = :kind")
+    suspend fun countBySessionAndKind(sessionId: Long, kind: String): Int
 
     /**
      * 単一フレームの取得（②「コース編成(抽出)」フェーズB(c)、2026-07-14追加）。find-or-create適用の
@@ -341,6 +396,13 @@ interface GpsPointDao {
 
     @Query("SELECT * FROM gps_point WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<GpsPointEntity>
+
+    /** コース編集地図用。コースの停留所時刻に含まれる記録GPSだけをseq順で返す。 */
+    @Query(
+        "SELECT * FROM gps_point WHERE session_id = :sessionId " +
+            "AND ts_epoch_ms BETWEEN :startMs AND :endMs ORDER BY seq"
+    )
+    suspend fun getBySessionInRange(sessionId: Long, startMs: Long, endMs: Long): List<GpsPointEntity>
 }
 
 /** `stop_visit_event`（停留所通過イベント）の操作（設計書§3.5）。 */
@@ -351,6 +413,13 @@ interface StopVisitEventDao {
 
     @Query("SELECT * FROM stop_visit_event WHERE session_id = :sessionId ORDER BY event_ts")
     suspend fun getBySession(sessionId: Long): List<StopVisitEventEntity>
+
+    /**
+     * 押下イベント → HIRES フレームの参照を結ぶ（v20、2026-08-02）。撮影完了コールバックからの
+     * UPDATE 1行。筆頭写真の唯一の正選択経路（[com.istech.buscourse.recording.RecordingSessionRepository.linkHiresFrameToEvent]）。
+     */
+    @Query("UPDATE stop_visit_event SET hires_frame_id = :frameId WHERE id = :eventId")
+    suspend fun updateHiresFrameId(eventId: Long, frameId: Long)
 
     /**
      * 単一イベントの取得（S6a「コース編集画面の刷新」、2026-07-18追加）。編集画面のロード
@@ -395,6 +464,9 @@ interface MapDataPackageDao {
     @Query("SELECT * FROM map_data_package WHERE is_selected = 1 LIMIT 1")
     fun observeSelected(): Flow<MapDataPackageEntity?>
 
+    @Query("SELECT * FROM map_data_package WHERE is_selected = 1 LIMIT 1")
+    suspend fun getSelected(): MapDataPackageEntity?
+
     /**
      * 選択状態を単一に保つ（`bus_stop_card.is_archived` と同様の単一選択パターン）。
      * 全解除→対象のみ選択、の2段をトランザクションで実行する。
@@ -431,4 +503,78 @@ interface WorkLogDao {
             "(SELECT id FROM work_log ORDER BY ts_epoch_ms DESC, id DESC LIMIT :keep)"
     )
     suspend fun pruneOld(keep: Int = 2000)
+}
+
+/** `.isnavi` から取り込むナビ用マップ分離モデル6表の操作。 */
+@Dao
+interface NaviMapDao {
+    @Insert suspend fun insertMap(map: NaviMapEntity): Long
+    // `.isnavi` のファイル内IDを Room の自動採番IDへ翻訳するインポータ用。
+    @Insert suspend fun insertBranch(branch: NaviBranchEntity): Long
+    @Insert suspend fun insertSegment(segment: NaviSegmentEntity): Long
+    @Insert suspend fun insertTrackPoint(point: NaviTrackPointEntity): Long
+    @Insert suspend fun insertEvent(event: NaviEventEntity): Long
+    @Insert suspend fun insertOutput(output: NaviEventOutputEntity): Long
+    @Insert suspend fun insertBranches(branches: List<NaviBranchEntity>)
+    @Insert suspend fun insertSegments(segments: List<NaviSegmentEntity>)
+    @Insert suspend fun insertTrackPoints(points: List<NaviTrackPointEntity>)
+    @Insert suspend fun insertEvents(events: List<NaviEventEntity>)
+    @Insert suspend fun insertOutputs(outputs: List<NaviEventOutputEntity>)
+
+    @Query("SELECT * FROM navi_map WHERE id = :id")
+    suspend fun getMapById(id: Long): NaviMapEntity?
+
+    @Query("SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year ORDER BY id")
+    suspend fun findMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    /** 非アーカイブのみ・ex_full優先・新しいid優先で返す。 */
+    @Query(
+        "SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year " +
+            "AND archived_at IS NULL ORDER BY (profile = 'ex_full') DESC, id DESC"
+    )
+    suspend fun getActiveMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    /** 一覧状態を N+1 クエリなしで解決するため、全 identity のアクティブ行をまとめて返す。 */
+    @Query("SELECT * FROM navi_map WHERE archived_at IS NULL ORDER BY id DESC")
+    suspend fun getAllActiveMaps(): List<NaviMapEntity>
+
+    /** 同一identityのアクティブなapp_simpleだけをアーカイブする。 */
+    @Query(
+        "UPDATE navi_map SET archived_at = :archivedAt WHERE bus_id = :busId AND course_no = :courseNo " +
+            "AND year = :year AND profile = 'app_simple' AND archived_at IS NULL"
+    )
+    suspend fun archiveSupersededAppSimple(
+        busId: String,
+        courseNo: Int,
+        year: Int,
+        archivedAt: Long,
+    ): Int
+
+    /** 保管退避された同一identityのマップを古い順に返す。 */
+    @Query(
+        "SELECT * FROM navi_map WHERE bus_id = :busId AND course_no = :courseNo AND year = :year " +
+            "AND archived_at IS NOT NULL ORDER BY id"
+    )
+    suspend fun getArchivedMapsByIdentity(busId: String, courseNo: Int, year: Int): List<NaviMapEntity>
+
+    @Query("SELECT * FROM navi_segment WHERE navi_map_id = :mapId ORDER BY seq")
+    suspend fun getSegments(mapId: Long): List<NaviSegmentEntity>
+
+    @Query("SELECT * FROM navi_event WHERE navi_map_id = :mapId ORDER BY id")
+    suspend fun getEvents(mapId: Long): List<NaviEventEntity>
+
+    @Query("SELECT * FROM navi_branch WHERE navi_map_id = :mapId ORDER BY id")
+    suspend fun getBranches(mapId: Long): List<NaviBranchEntity>
+
+    @Query("SELECT * FROM navi_track_point WHERE segment_id = :segmentId ORDER BY seq")
+    suspend fun getTrackPoints(segmentId: Long): List<NaviTrackPointEntity>
+
+    @Query("SELECT * FROM navi_event_output WHERE event_id = :eventId ORDER BY id")
+    suspend fun getOutputs(eventId: Long): List<NaviEventOutputEntity>
+
+    @Query("UPDATE navi_map SET archived_at = :archivedAt WHERE id = :id")
+    suspend fun archiveMap(id: Long, archivedAt: Long)
+
+    @Query("DELETE FROM navi_map WHERE id = :id")
+    suspend fun deleteMap(id: Long)
 }

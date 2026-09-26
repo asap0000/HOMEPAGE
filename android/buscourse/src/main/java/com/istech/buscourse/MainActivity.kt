@@ -12,12 +12,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.istech.buscourse.ui.AllowRotationWhileVisible
+import com.istech.buscourse.ui.BackupRestoreScreen
 import com.istech.buscourse.ui.BusCourseViewModel
 import com.istech.buscourse.ui.CourseCreateScreen
 import com.istech.buscourse.ui.CourseDetailScreen
 import com.istech.buscourse.ui.CourseListScreen
 import com.istech.buscourse.ui.HomeScreen
 import com.istech.buscourse.ui.MapImportScreen
+import com.istech.buscourse.ui.NaviMainScreen
+import com.istech.buscourse.ui.NaviCoursePickScreen
+import com.istech.buscourse.ui.NaviScreen
+import com.istech.buscourse.ui.NaviSettingsScreen
 import com.istech.buscourse.ui.RecordingScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
@@ -66,10 +72,24 @@ private object Routes {
     const val COURSES = "courses"
     const val COURSE_DETAIL = "courses/{id}"
     const val COURSE_MAP = "courses/{id}/map"
+    // ナビ確認（(c2-b)、実.iscmap上でナビ用マップのchainageスライダー検証、2026-07-24追加）
+    const val COURSE_NAVI = "courses/{id}/navi"
+    // 映像ナビ（2026-07-25追加。オーナー仕様＝メインメニュー「ナビ」専用の本画面と設定画面。
+    // 上の COURSE_NAVI「ナビ確認」とは別物＝あちらは設計側の検証用。設計は istech
+    // docs/2026-07-25_設計ドラフト_映像ナビ画面と簡易版ナビ用マップ.md §1 の三画面表を参照）。
+    // NAVI_PICK: 識別情報を中心に、どのコースをナビするか選ぶ専用一覧。
+    const val NAVI_PICK = "navi_pick"
+    const val NAVI_MAIN = "navi/{id}"
+    const val NAVI_SETTINGS = "navi_settings"
     // コース創設（トップダウン、S4、2026-07-14追加。設計書は docs/00_ファクトブック_バス運行実態.md 参照）
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
     const val MAP_IMPORT = "map_import"
+    // 機種変更バックアップ（退避＝「出口」2026-07-26追加／復元＝「戻す」2026-07-27追加。
+    // istech docs/2026-07-26_設計ドラフト_機種変更バックアップ.md）。
+    // 2026-07-27 統合: 往路(backup)と復路(restore)で別ルートだったものを1つの入口へ
+    // （オーナー指示「バックアップと復元は1つのボタンで」）。分岐は BackupRestoreScreen が持つ。
+    const val BACKUP_RESTORE = "backup_restore"
     // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
     // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
     const val SPEED_MAP = "sessions/{sessionId}/speedmap"
@@ -77,6 +97,7 @@ private object Routes {
     fun stopCardRetake(id: Long) = "stopcards/$id/retake"
     fun courseDetail(id: Long) = "courses/$id"
     fun courseMap(id: Long) = "courses/$id/map"
+    fun courseNavi(id: Long) = "courses/$id/navi"
     fun speedMap(sessionId: Long) = "sessions/$sessionId/speedmap"
 }
 
@@ -90,6 +111,8 @@ private fun AppNavHost() {
         composable(Routes.TOP) {
             TopScreen(
                 onOpenDesign = { navController.navigate(Routes.HOME) },
+                onOpenNavi = { navController.navigate(Routes.NAVI_PICK) },
+                onOpenNaviSettings = { navController.navigate(Routes.NAVI_SETTINGS) },
             )
         }
         composable(Routes.HOME) {
@@ -101,7 +124,11 @@ private fun AppNavHost() {
                 onOpenCourseCreate = { navController.navigate(Routes.COURSE_CREATE) },
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+                onOpenBackupRestore = { navController.navigate(Routes.BACKUP_RESTORE) },
             )
+        }
+        composable(Routes.BACKUP_RESTORE) {
+            BackupRestoreScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.WORK_LOG) {
             WorkLogScreen(
@@ -167,6 +194,7 @@ private fun AppNavHost() {
                     courseId = id,
                     onBack = { navController.popBackStack() },
                     onOpenMap = { navController.navigate(Routes.courseMap(id)) },
+                    onOpenNavi = { navController.navigate(Routes.courseNavi(id)) },
                 )
             }
         }
@@ -180,6 +208,42 @@ private fun AppNavHost() {
                     onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
                 )
             }
+        }
+        composable(Routes.COURSE_NAVI) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                NaviScreen(
+                    viewModel = viewModel,
+                    courseId = id,
+                    onBack = { navController.popBackStack() },
+                    onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+                )
+            }
+        }
+        // ===== 映像ナビ（P3/P4・2026-07-25追加）=====
+        // メインメニュー「ナビ」→ コース選択（NAVI_PICK）→ 本画面（NAVI_MAIN）。設定はメニューから直接。
+        // 上の COURSE_NAVI「ナビ確認」（設計側の検証用）とは別物（設計 §1 の三画面表）。
+        composable(Routes.NAVI_PICK) {
+            NaviCoursePickScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() },
+                onOpen = { id -> navController.navigate("navi/$id") },
+            )
+        }
+        composable(Routes.NAVI_MAIN) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                // 横向き対応（設計 §7-3 オーナー確定）。この画面に居る間だけ回転を解放する。
+                AllowRotationWhileVisible()
+                NaviMainScreen(
+                    courseId = id,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable(Routes.NAVI_SETTINGS) {
+            AllowRotationWhileVisible()
+            NaviSettingsScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.COURSE_CREATE) {
             CourseCreateScreen(
