@@ -38,6 +38,23 @@ android {
         versionName = System.getenv("VERSION_NAME") ?: "0.0-dev"
     }
 
+    signingConfigs {
+        create("release") {
+            val keystorePath = System.getenv("BUSCOURSE_KEYSTORE_PATH")
+            val storePasswordValue = System.getenv("BUSCOURSE_STORE_PASSWORD")
+            val keyAliasValue = System.getenv("BUSCOURSE_KEY_ALIAS")
+            val keyPasswordValue = System.getenv("BUSCOURSE_KEY_PASSWORD")
+            if (!keystorePath.isNullOrBlank() && !storePasswordValue.isNullOrBlank() &&
+                !keyAliasValue.isNullOrBlank() && !keyPasswordValue.isNullOrBlank()
+            ) {
+                storeFile = file(keystorePath)
+                storePassword = storePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------------------------
     // 環境分離（官房 2026-07-26 裁定「再発防止4点」の 1＝構造的免疫。2026-07-27 実装）
     //
@@ -65,6 +82,15 @@ android {
         }
         release {
             isMinifyEnabled = false
+            val releaseSigningValues = listOf(
+                "BUSCOURSE_KEYSTORE_PATH",
+                "BUSCOURSE_STORE_PASSWORD",
+                "BUSCOURSE_KEY_ALIAS",
+                "BUSCOURSE_KEY_PASSWORD"
+            ).map { System.getenv(it) }
+            if (releaseSigningValues.all { !it.isNullOrBlank() }) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -1,4 +1,4 @@
-# HOMEPAGE — istech Android 系統（PrivacyCamera）
+# HOMEPAGE — istech Android 系統（BusCourse）
 
 > 開発方針は `.istech` サブモジュール（asap0000/istech）から取り込む。
 >
