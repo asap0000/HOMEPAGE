@@ -9,7 +9,7 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** debug ビルドの先読み調査記録。座標は記録しない。 */
+/** debug ビルドの先読み調査記録（2026-09-26 から処理時間の列も）。座標は記録しない。 */
 internal object NaviLeadDiagnostic {
     suspend fun append(
         context: Context,
@@ -23,6 +23,8 @@ internal object NaviLeadDiagnostic {
         reset: Boolean,
         cue: NaviFrameCue?,
         frameFile: File?,
+        /** 計測の列（cueUs・camUs・findUs・lastDecodeUs・decodeCount・firstFrameMs・thinningOn）。 */
+        perf: List<Any> = emptyList(),
     ) {
         if (!BuildConfig.DEBUG) return
         withContext(Dispatchers.IO) {
@@ -33,7 +35,7 @@ internal object NaviLeadDiagnostic {
                 elapsedRealtimeMs, chainageM, onCourse, searchAll, speedMps ?: "", leadSec,
                 lookupChainageM, if (reset) 1 else 0, cue?.sessionId ?: "", cue?.capturedAtMs ?: "",
                 frameFile?.name ?: "",
-            ).joinToString("\t") + "\n"
+            ).plus(perf).joinToString("\t") + "\n"
             File(directory, "navi_lead_$day.tsv").appendText(row)
         }
     }

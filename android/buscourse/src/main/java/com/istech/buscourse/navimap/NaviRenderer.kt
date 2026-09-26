@@ -2535,19 +2535,33 @@ private fun NaviVideoOverlay(
             freshnessTick++
         }
     }
+    // ★debug 限定の計測（2026-09-26・1.0m 除去法の標準化の前後比較）。SHG12 で「改める前／後」を同じ列で比べる。
+    val perf = remember(routeData) { NaviVideoPerf(openedAtMs = SystemClock.elapsedRealtime()) }
     LaunchedEffect(leadFix, chainageM, routeData, leadMaxSec, freshnessTick, thinningOn, keptFramesBySession) {
         val lookup = if (leadFix == null) NaviVideoLead.Lookup(chainageM.toDouble(), true) else
             NaviVideoLead.lookup(previousLookupM, previousChainageM, chainageM.toDouble(), leadDistanceM, routeData.maxChainageM.toDouble())
         val lookupChainageM = lookup.chainageM
         val lastDrawn = previousLookupM
         previousChainageM = chainageM.toDouble()
+        val cueStartNs = System.nanoTime()
         val cue = NaviFrameResolver.frameCueAtChainageM(
             routeData.segments, routeData.trackPointsBySegmentId, lookupChainageM,
         )
+        val cueUs = (System.nanoTime() - cueStartNs) / 1000
+        // 地図側（自車位置）も測位ごとに同じ並べ替えをしている。その代表として1回ぶんを測る（debug だけ）。
+        val camUs = if (BuildConfig.DEBUG && leadFix != null) {
+            val camStartNs = System.nanoTime()
+            NaviCamera.positionAtChainageM(routeData.segments, routeData.trackPointsBySegmentId, chainageM.toDouble())
+            (System.nanoTime() - camStartNs) / 1000
+        } else {
+            -1L
+        }
+        var findUs = -1L
         val redraw = lookup.reset || NaviVideoLead.shouldDraw(lastDrawn, lookupChainageM)
         if (redraw) {
             previousLookupM = lookupChainageM
             val kept = keptFramesBySession
+            val findStartNs = System.nanoTime()
             videoFrameFile = when {
                 cue == null -> null
                 // 間引き入: 残したコマの中から「引く時刻以前でいちばん新しい1枚」（時刻の軸はずらさない）。
@@ -2558,6 +2572,7 @@ private fun NaviVideoOverlay(
                     .findClosestLoresAtOrBefore(cue.sessionId, cue.capturedAtMs)
                     ?.let { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) }
             }
+            findUs = (System.nanoTime() - findStartNs) / 1000
         }
         // ★調査記録は引き直しを決めた後に書く（前のコマを書くと①の突き合わせに使えない）。GPS 追従中だけ。
         if (leadFix != null) {
@@ -2566,6 +2581,7 @@ private fun NaviVideoOverlay(
                 NaviLeadDiagnostic.append(
                     context, leadFix.elapsedRealtimeMs, chainageM.toDouble(),
                     onCourse, searchAll, leadFix.speedMps, leadSeconds, lookupChainageM, lookup.reset, cue, shownFile,
+                    perf = listOf(cueUs, camUs, findUs, perf.lastDecodeUs, perf.decodeCount, perf.firstFrameMs, thinningOn),
                 )
             }
         }
@@ -2573,7 +2589,13 @@ private fun NaviVideoOverlay(
 
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = videoFrameFile?.path) {
         val file = videoFrameFile
+        val decodeStartNs = System.nanoTime()
         value = if (file != null && file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
+        if (value != null) {
+            perf.lastDecodeUs = (System.nanoTime() - decodeStartNs) / 1000
+            perf.decodeCount++
+            if (perf.firstFrameMs < 0) perf.firstFrameMs = SystemClock.elapsedRealtime() - perf.openedAtMs
+        }
     }
 
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
@@ -2607,6 +2629,13 @@ private fun NaviVideoOverlay(
             )
         }
     }
+}
+
+/** debug 計測の置き場（写真の読み込み時間・回数・開いてから最初の1枚まで）。Compose の状態にはしない（再描画を起こさない）。 */
+private class NaviVideoPerf(val openedAtMs: Long) {
+    var lastDecodeUs: Long = -1
+    var decodeCount: Int = 0
+    var firstFrameMs: Long = -1
 }
 
 /**
