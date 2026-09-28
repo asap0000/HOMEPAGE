@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-09-28 オーナー選定 debug_B を元画像からベクター化。外周リングを省略。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ★図柄が右下へ寄っていたので中央へ戻す。線は縮めた後も全部入り版と同じ太さ。
+         アダプティブアイコンは端末ごとに丸・角丸で切り抜かれる。どの形でも欠けない「中央の直径66の円」に収めるため、
+         図柄全体を縮めて中央へ寄せる（2026-09-28・OPPO の実機で端の丸が欠けたのを見て直した）。 -->
+    <group android:pivotX="54" android:pivotY="54" android:scaleX="0.9" android:scaleY="0.9"
+        android:translateX="-4.05" android:translateY="-3.15">
+        <path
+            android:fillColor="#00000000" android:pathData="M36,66 C43,66 47,66 48,71 C49,77 54,79 61,79 L65,79 C71,79 75,76 75,69 L75,61 C75,56 72,54 67,54 C61,54 59,51 59,47 C59,43 63,40 68,40 L70,40" android:strokeColor="#FF8A32" android:strokeWidth="5.4" android:strokeLineCap="round" android:strokeLineJoin="round"/>
+        <path
+            android:fillColor="#FF8A32" android:pathData="M36,66 m-3.3,0 a3.3,3.3 0 1 1 6.6,0 a3.3,3.3 0 1 1 -6.6,0"/>
+        <path
+            android:fillColor="#FF8A32" android:pathData="M78,40 m-6.2,0 a6.2,6.2 0 1 1 12.4,0 a6.2,6.2 0 1 1 -12.4,0"/>
+    </group>
+</vector>
