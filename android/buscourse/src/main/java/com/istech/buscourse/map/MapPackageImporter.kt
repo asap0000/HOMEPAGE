@@ -25,25 +25,19 @@ class MapPackageImportException(message: String, cause: Throwable? = null) : Exc
  *    （実物`.iscmap`は`mapkit-pack`により常にmanifest.jsonが先頭に置かれる。先頭でなければ即座に
  *    エラーとし、大きなtiles/glyphsを無駄に読み進めない）。
  * 2. `manifest.json`をパース・schemaVersion検証してから、残りの全エントリを
- *    `context.filesDir/buscourse/maps/<regionId>/`配下へ展開する。ZIPエントリ名はZip Slip対策で
+ *    同じ親の一時ディレクトリへ展開する。ZIPエントリ名はZip Slip対策で
  *    検査する（SAF経由で選択された外部ファイルは信頼できない入力として扱う）。
  * 3. 展開済み`region.mbtiles`/`style.json`のSHA-256をmanifest記載値と突合する
  *    （[MapPackageValidator]。グリフは`ZipInputStream`自体のCRC-32検証に委ねる）。
  * 4. `style.json`を読み込み、[StyleJsonResolver]でプレースホルダ解決＋外部スキーム再検査を行い、
  *    `style/style.resolved.json`として保存する。
- * 5. いずれかの検証に失敗した場合はfail-closedとし、展開済みディレクトリを丸ごと削除して
- *    インポート全体を中止する（当該フィールドのみを無効化する部分適用はしない）。
+ * 5. 検証後に一時ディレクトリを正式ディレクトリへ入れ替え、失敗時は旧ディレクトリを戻す。
  * 6. 成功時は[MapDataPackageRepository]経由で`map_data_package`へ登録する。
  *
  * `tracks`/`stops`の既存データパイプライン（`segment_track`/`bus_stop_card`）への合流
  * （設計書§5.6.3手順7）は本タスクの対象外。DBの受け皿（[MapDataPackageEntity]）と
  * [MapDataPackage]によるmanifest.jsonパース結果の提供までとする。
  *
- * ★既知の制約（未対応、要検討）：同一`regionId`を再インポートした場合、展開は直接
- * `maps/<regionId>/`へ行うため、検証失敗によるロールバックは新規展開分を削除するだけでなく、
- * 展開開始前に存在した旧`regionId`のデータも展開途中で上書きされた範囲は失われうる
- * （ステージングディレクトリ経由のアトミックな置き換えは実装していない。設計書§5.6.3も
- * この観点には言及していないため、本タスクでは対象外とした）。
  */
 class MapPackageImporter(
     private val context: Context,
@@ -63,7 +57,9 @@ class MapPackageImporter(
     }
 
     private suspend fun importFromZipStream(rawInput: InputStream): MapDataPackageEntity {
-        var regionDir: File? = null
+        val mapsRoot = BusCourseStorage.resolve(context, BusCourseStorage.DIR_MAPS)
+        MapDirectorySwap.removeStagingDirectories(mapsRoot)
+        var stagingDir: File? = null
         try {
             return ZipInputStream(rawInput.buffered()).use { zis ->
                 val firstEntry = zis.nextEntry
@@ -82,8 +78,9 @@ class MapPackageImporter(
                     "regionId の形式が不正です（英数字・ハイフン・アンダースコアのみ許容）: ${pkg.regionId}"
                 }
 
-                val dir = File(BusCourseStorage.resolve(context, BusCourseStorage.DIR_MAPS), pkg.regionId)
-                regionDir = dir
+                val destinationDir = File(mapsRoot, pkg.regionId)
+                val dir = File(mapsRoot, ".staging-${pkg.regionId}-${System.currentTimeMillis()}")
+                stagingDir = dir
                 dir.mkdirs()
                 File(dir, MANIFEST_ENTRY_NAME).writeBytes(manifestBytes)
 
@@ -107,12 +104,13 @@ class MapPackageImporter(
                 MapPackageValidator.verifySha256(mbtilesFile, pkg.mbtiles.sha256, "region.mbtiles")
                 MapPackageValidator.verifySha256(styleFile, pkg.style.sha256, "style.json")
 
-                val glyphsDir = File(dir, pkg.glyphs.dirRelPath)
+                val finalMbtiles = File(destinationDir, pkg.mbtiles.relPath)
+                val finalGlyphs = File(destinationDir, pkg.glyphs.dirRelPath)
                 val rawStyle = JSONObject(styleFile.readText(Charsets.UTF_8))
                 val resolved = StyleJsonResolver.resolveAndValidate(
                     rawStyleJson = rawStyle,
-                    mbtilesAbsPath = mbtilesFile.absolutePath,
-                    glyphsAbsDirPath = glyphsDir.absolutePath,
+                    mbtilesAbsPath = finalMbtiles.absolutePath,
+                    glyphsAbsDirPath = finalGlyphs.absolutePath,
                 )
                 val resolvedStyleFile = File(styleFile.parentFile, RESOLVED_STYLE_FILE_NAME)
                 resolvedStyleFile.writeText(resolved.toString(), Charsets.UTF_8)
@@ -124,7 +122,7 @@ class MapPackageImporter(
                     preparedBy = pkg.preparedBy,
                     attribution = pkg.attribution,
                     schemaVersion = pkg.schemaVersion,
-                    mbtilesRelPath = relPathOf(mbtilesFile),
+                    mbtilesRelPath = relPathOf(pkg.regionId, pkg.mbtiles.relPath),
                     mbtilesSha256 = pkg.mbtiles.sha256,
                     minzoom = pkg.mbtiles.minzoom,
                     maxzoom = pkg.mbtiles.maxzoom,
@@ -132,18 +130,29 @@ class MapPackageImporter(
                     boundsSouth = pkg.mbtiles.boundsSouth,
                     boundsEast = pkg.mbtiles.boundsEast,
                     boundsNorth = pkg.mbtiles.boundsNorth,
-                    styleRelPath = relPathOf(resolvedStyleFile),
+                    styleRelPath = relPathOf(pkg.regionId, "${pkg.style.relPath.substringBeforeLast('/', "")}/$RESOLVED_STYLE_FILE_NAME".trimStart('/')),
                     styleSha256 = pkg.style.sha256,
-                    glyphsDirRelPath = relPathOf(glyphsDir),
+                    glyphsDirRelPath = relPathOf(pkg.regionId, pkg.glyphs.dirRelPath),
                     glyphFontstacksCsv = pkg.glyphs.fontstacks.joinToString(","),
                     importedAt = System.currentTimeMillis(),
-                    isSelected = false,
+                    isSelected = MapDirectorySwap.preserveSelection(repository.getByRegionId(pkg.regionId)?.isSelected),
                 )
-                repository.upsert(entity)
+                var metadataFailure: Exception? = null
+                val replaced = MapDirectorySwap.replace(dir, destinationDir) {
+                    try {
+                        repository.upsert(entity)
+                    } catch (e: Exception) {
+                        metadataFailure = e
+                        throw e
+                    }
+                }
+                if (!replaced) {
+                    throw MapPackageImportException("地図データを入れ替えられませんでした", metadataFailure)
+                }
                 entity
             }
         } catch (e: Exception) {
-            regionDir?.let { rollback(it) }
+            stagingDir?.let { rollback(it) }
             throw when (e) {
                 is MapPackageImportException, is MapPackageValidationException, is StyleJsonSchemeViolationException -> e
                 else -> MapPackageImportException("`.iscmap`の取り込みに失敗しました: ${e.message}", e)
@@ -172,8 +181,8 @@ class MapPackageImporter(
         }
     }
 
-    private fun relPathOf(file: File): String =
-        file.relativeTo(BusCourseStorage.root(context)).path.replace(File.separatorChar, '/')
+    private fun relPathOf(regionId: String, relative: String): String =
+        "maps/$regionId/${relative.replace('\\', '/').trimStart('/')}"
 
     companion object {
         private const val TAG = "MapPackageImporter"

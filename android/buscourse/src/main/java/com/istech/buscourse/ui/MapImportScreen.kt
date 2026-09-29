@@ -1,6 +1,7 @@
 package com.istech.buscourse.ui
 
 import android.content.Context
+import android.util.Log
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -44,6 +45,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.core.data.MapDataPackageEntity
+import com.istech.buscourse.core.data.BusCourseStorage
+import com.istech.buscourse.map.MapDirectorySwap
+import com.istech.buscourse.map.mapImportFailureMessage
 
 /**
  * `.iscmap`（オフライン地図パッケージ）のインポート・管理画面（フェーズ3、設計書§5.6.3・§9次工程）。
@@ -88,6 +92,7 @@ fun MapImportScreen(
     var importing by remember { mutableStateOf(false) }
 
     LaunchedEffect(refreshKey) {
+        MapDirectorySwap.removeStagingDirectories(BusCourseStorage.resolve(context, BusCourseStorage.DIR_MAPS))
         packages = mapRepository.getAll()
         loaded = true
     }
@@ -113,7 +118,8 @@ fun MapImportScreen(
                     ).show()
                     refreshKey++
                 }.onFailure { e ->
-                    Toast.makeText(context, "取り込みに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+                    Log.e("MapPackageImporter", "地図パッケージの取り込みに失敗しました", e)
+                    Toast.makeText(context, mapImportFailureMessage(e), Toast.LENGTH_LONG).show()
                 }
             }
         }

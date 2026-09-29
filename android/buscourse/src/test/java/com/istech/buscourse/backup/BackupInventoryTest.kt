@@ -66,6 +66,13 @@ class BackupInventoryTest {
     }
 
     @Test
+    fun `every included datastore inventory item is supported by the zip writer`() {
+        assertThat(BackupWriteTargets.datastorePathsFromInventory(BackupInventory.INCLUDED_CATEGORIES))
+            .containsExactlyElementsIn(BackupWriteTargets.DATASTORE_PATHS)
+            .inOrder()
+    }
+
+    @Test
     fun `datastore backup_state is excluded to avoid carrying identity across devices`() {
         val decision = BackupInventory.classifyDataStoreFileName("backup_state.preferences_pb")
         assertThat(decision.include).isFalse()

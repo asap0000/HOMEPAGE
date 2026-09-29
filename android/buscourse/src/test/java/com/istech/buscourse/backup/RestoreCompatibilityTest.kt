@@ -10,18 +10,39 @@ import org.junit.Test
 class RestoreCompatibilityTest {
 
     @Test
-    fun `schema check accepts an equal version`() {
-        assertThat(RestoreCompatibility.isSchemaAcceptable(17, 17)).isTrue()
+    fun `schema compatibility follows registered migration edges`() {
+        val edges = listOf(17 to 19, 19 to 20, 20 to 21, 21 to 22, 22 to 23)
+        assertThat(RestoreCompatibility.isSchemaAcceptable(17, 23, edges)).isTrue()
+        assertThat(RestoreCompatibility.isSchemaAcceptable(18, 23, edges)).isFalse()
+        assertThat(RestoreCompatibility.isSchemaAcceptable(23, 23, edges)).isTrue()
+        assertThat(RestoreCompatibility.isSchemaAcceptable(24, 23, edges)).isFalse()
     }
 
     @Test
-    fun `schema check accepts an older backup version (migration runs on next launch)`() {
-        assertThat(RestoreCompatibility.isSchemaAcceptable(12, 17)).isTrue()
+    fun `required restore space includes 256 MiB reserve`() {
+        val total = 3L * 1024 * 1024 * 1024
+        assertThat(RestoreCompatibility.requiredFreeBytes(total)).isEqualTo(total + 256L * 1024 * 1024)
+        val check = RestoreCompatibility.checkStorage(total, total)
+        assertThat(check.enough).isFalse()
+        assertThat(check.shortageBytes).isEqualTo(256L * 1024 * 1024)
+        assertThat(RestoreCompatibility.storageMessage(check)).contains("空きが ")
+        assertThat(RestoreCompatibility.storageMessage(check)).contains("必要 ")
+        assertThat(RestoreCompatibility.storageMessage(check)).contains(" GB・空き ")
     }
 
     @Test
-    fun `schema check rejects a backup newer than the app (復唱3行目)`() {
-        assertThat(RestoreCompatibility.isSchemaAcceptable(18, 17)).isFalse()
+    fun `failure messages distinguish restore phases`() {
+        assertThat(RestoreCompatibility.restoreFailureMessage(false, true))
+            .isEqualTo("端末の状態は変更されていません。もう一度お試しください。")
+        assertThat(RestoreCompatibility.restoreFailureMessage(true, true))
+            .contains("書き戻す前の状態に戻しました")
+        assertThat(RestoreCompatibility.restoreFailureMessage(true, false))
+            .contains("データが半端な状態です")
+    }
+
+    @Test fun `corrupt zip has a fixed localized message`() {
+        assertThat(RestoreCompatibility.CORRUPT_ZIP_MESSAGE)
+            .isEqualTo("ファイルが途中で切れているか、壊れています。別の ZIP を選んでください。")
     }
 
     @Test

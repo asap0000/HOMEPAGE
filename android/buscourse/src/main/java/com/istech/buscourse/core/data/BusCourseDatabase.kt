@@ -184,29 +184,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 context.applicationContext,
                 BusCourseDatabase::class.java,
                 BusCourseStorage.DATABASE_NAME,
-            ).addMigrations(
-                MIGRATION_1_2,
-                MIGRATION_2_3,
-                MIGRATION_3_4,
-                MIGRATION_4_5,
-                MIGRATION_5_6,
-                MIGRATION_6_7,
-                MIGRATION_7_8,
-                MIGRATION_8_9,
-                MIGRATION_9_10,
-                MIGRATION_10_11,
-                MIGRATION_11_12,
-                MIGRATION_12_13,
-                MIGRATION_13_14,
-                MIGRATION_14_15,
-                MIGRATION_15_16,
-                MIGRATION_16_17,
-                MIGRATION_17_19,
-                MIGRATION_19_20,
-                MIGRATION_20_21,
-                MIGRATION_21_22,
-                MIGRATION_22_23,
-            ).build()
+            ).addMigrations(*MIGRATIONS.toTypedArray()).build()
 
         /** bus_stop_card.rider_count 追加（乗車人数・定員警告、2026-07-10）。既存データは保持する。 */
         val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -589,5 +567,14 @@ abstract class BusCourseDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `recording_session` ADD COLUMN `run_uid` TEXT DEFAULT NULL")
             }
         }
+
+        /** Registered migration edges, exposed for backup compatibility checks. */
+        val MIGRATIONS: List<androidx.room.migration.Migration> = listOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+            MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+            MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
+            MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_19, MIGRATION_19_20,
+            MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23,
+        )
     }
 }

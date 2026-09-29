@@ -115,7 +115,7 @@ class BackupExporter(
             val gathered = gatherFiles()
             val manifest = BackupManifest(
                 originId = originId,
-                sourceOriginId = null,
+                sourceOriginId = BackupWriteTargets.sourceOriginId(backupStateStore.sourceOriginIdFlow.first()),
                 gen = newGen,
                 createdAtEpochMs = System.currentTimeMillis(),
                 createdAtLocal = now.toString(),
@@ -186,8 +186,14 @@ class BackupExporter(
             entries += "files/buscourse/$relPath" to f
         }
 
-        val naviSettingsFile = context.preferencesDataStoreFile("navi_settings")
-        if (naviSettingsFile.isFile) entries += "files/datastore/navi_settings.preferences_pb" to naviSettingsFile
+        for (relativePath in BackupWriteTargets.DATASTORE_PATHS) {
+            val file = when (relativePath) {
+                "navi_settings.preferences_pb" -> context.preferencesDataStoreFile("navi_settings")
+                "navi_course_visibility.preferences_pb" -> context.preferencesDataStoreFile("navi_course_visibility")
+                else -> continue
+            }
+            if (file.isFile) entries += "files/datastore/$relativePath" to file
+        }
 
         return GatheredFiles(entries, entries.size, entries.sumOf { it.second.length() })
     }

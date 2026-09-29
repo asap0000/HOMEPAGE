@@ -45,6 +45,8 @@ import com.istech.buscourse.backup.RestoreImporter
 import com.istech.buscourse.backup.RestorePreview
 import com.istech.buscourse.backup.RestoreProgress
 import com.istech.buscourse.backup.RestoreResult
+import com.istech.buscourse.backup.RestoreImportException
+import com.istech.buscourse.backup.RestoreCompatibility
 import com.istech.buscourse.recording.RecordingStateStore
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -88,6 +90,9 @@ fun RestoreScreen(onBack: () -> Unit) {
     var progress by remember { mutableStateOf<RestoreProgress?>(null) }
     var result by remember { mutableStateOf<RestoreResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    // ★DB を閉じた後の失敗では、この画面のまま「やり直す」と閉じた DB に触れて落ちる。アプリを終了させ、
+    // 次に開いたとき DB を開き直す（2026-09-30 検分で発見）。
+    var mustExitAfterFailure by remember { mutableStateOf(false) }
 
     // 画面の生存期間に紐づくスコープ（BackupScreenと同じ理由でviewModelScopeを使わない）。
     val scope = rememberCoroutineScope()
@@ -107,7 +112,7 @@ fun RestoreScreen(onBack: () -> Unit) {
                     preview = importer.peekManifest(uri)
                     step = RestoreStep.PREVIEW
                 } catch (e: Exception) {
-                    errorMessage = e.message ?: "manifest.jsonの読み取りに失敗しました"
+                    errorMessage = (e as? RestoreImportException)?.message ?: "manifest.jsonの読み取りに失敗しました"
                     step = RestoreStep.FAILED
                 }
             }
@@ -163,7 +168,19 @@ fun RestoreScreen(onBack: () -> Unit) {
                                         result = r
                                         step = RestoreStep.DONE
                                     } catch (e: Exception) {
-                                        errorMessage = e.message ?: "不明なエラーで失敗しました"
+                                        val restoreError = e as? RestoreImportException
+                                        mustExitAfterFailure = restoreError?.afterDatabaseClosed == true
+                                        errorMessage = when {
+                                            restoreError == null -> RestoreCompatibility.restoreFailureMessage(false, true)
+                                            restoreError.storageShortage -> restoreError.message
+                                            // 見出しと同じ「復元に失敗しました」を本文で繰り返さない。
+                                            else -> listOfNotNull(
+                                                restoreError.message?.takeUnless { it == "復元に失敗しました" },
+                                                RestoreCompatibility.restoreFailureMessage(
+                                                    restoreError.afterDatabaseClosed, restoreError.rollbackSucceeded,
+                                                ),
+                                            ).joinToString("\n")
+                                        }
                                         step = RestoreStep.FAILED
                                     }
                                 }
@@ -177,6 +194,8 @@ fun RestoreScreen(onBack: () -> Unit) {
                 }
                 RestoreStep.FAILED -> FailedContent(
                     message = errorMessage,
+                    mustExit = mustExitAfterFailure,
+                    onExit = { RestoreImporter.terminateProcessAfterRestore() },
                     onRetry = {
                         step = RestoreStep.CONFIRM
                         preview = null
@@ -241,6 +260,8 @@ private fun PreviewContent(
     onCancel: () -> Unit,
     onStart: () -> Unit,
 ) {
+    val enoughSpace = preview.storageCheck.enough
+    if (!enoughSpace) GuardCard(RestoreCompatibility.storageMessage(preview.storageCheck))
     Text("バックアップの内容", style = MaterialTheme.typography.titleMedium)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -260,7 +281,7 @@ private fun PreviewContent(
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("やめる") }
-        Button(onClick = onStart, modifier = Modifier.weight(1f)) { Text("復元する") }
+        Button(onClick = onStart, enabled = enoughSpace, modifier = Modifier.weight(1f)) { Text("復元する") }
     }
 }
 
@@ -321,16 +342,15 @@ private fun LabeledValue(label: String, value: String) {
 }
 
 @Composable
-private fun FailedContent(message: String?, onRetry: () -> Unit) {
+private fun FailedContent(message: String?, mustExit: Boolean, onExit: () -> Unit, onRetry: () -> Unit) {
     Icon(Icons.Filled.Error, contentDescription = null, tint = MaterialTheme.colorScheme.error)
     Text("復元に失敗しました", style = MaterialTheme.typography.titleMedium)
     Text(message ?: "不明なエラーです", style = MaterialTheme.typography.bodyMedium)
-    Text(
-        "端末の状態は変更されていません（検証を通ってから初めて反映するため）。もう一度お試しください。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("やり直す") }
+    if (mustExit) {
+        Button(onClick = onExit, modifier = Modifier.fillMaxWidth()) { Text("アプリを終了") }
+    } else {
+        OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("やり直す") }
+    }
 }
 
 /** バイト数 → `1.2 GB` 等の表示用整形（[BackupScreen]の同名関数と同じ実装。ファイル間で共有するほどの汎用性はまだ無い）。 */

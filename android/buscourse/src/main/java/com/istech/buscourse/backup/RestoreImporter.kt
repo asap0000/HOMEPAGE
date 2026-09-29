@@ -3,6 +3,7 @@ package com.istech.buscourse.backup
 import android.content.Context
 import android.net.Uri
 import android.os.Process
+import android.os.StatFs
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
@@ -18,11 +19,19 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.DigestInputStream
 import java.security.MessageDigest
+import java.io.EOFException
+import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
 
 /** 復元の失敗（記録中・データあり・版が新しすぎる・manifest不正・照合不一致等をまとめて表す）。 */
-class RestoreImportException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class RestoreImportException(
+    message: String,
+    cause: Throwable? = null,
+    val afterDatabaseClosed: Boolean = false,
+    val rollbackSucceeded: Boolean = true,
+    val storageShortage: Boolean = false,
+) : Exception(message, cause)
 
 /** 確認画面に出すmanifestの中身（設計ドラフト§8-5「manifestの中身を表示」）。 */
 data class RestorePreview(
@@ -32,6 +41,7 @@ data class RestorePreview(
     val dbSchemaVersion: Int,
     val fileCount: Int,
     val totalBytes: Long,
+    val storageCheck: RestoreCompatibility.StorageCheck,
 )
 
 /** 進捗画面に出す「処理したファイル数とバイト数」（バックアップ側[BackupProgress]の鏡像）。 */
@@ -94,9 +104,13 @@ class RestoreImporter(
      * 確認画面へ進む前に断る。
      */
     suspend fun peekManifest(srcUri: Uri): RestorePreview = withContext(Dispatchers.IO) {
-        val manifest = readManifestEntry(srcUri)
+        val manifest = try {
+            readManifestEntry(srcUri)
+        } catch (e: Exception) {
+            throw mapCorruptZip(e)
+        }
         requireSchemaAcceptable(manifest)
-        manifest.toPreview()
+        manifest.toPreview().copy(storageCheck = storageCheck(manifest.totalBytes))
     }
 
     /**
@@ -113,6 +127,13 @@ class RestoreImporter(
             throw RestoreImportException("既にデータが入っている端末では復元できません（黙って混ぜない）")
         }
 
+        val manifest = try {
+            readManifestEntry(srcUri).also(::requireSchemaAcceptable)
+        } catch (e: Exception) {
+            throw mapCorruptZip(e)
+        }
+        requireSufficientStorage(manifest.totalBytes)
+
         val stagingRoot = File(context.cacheDir, STAGING_DIR_NAME)
         stagingRoot.deleteRecursively()
         stagingRoot.mkdirs()
@@ -120,6 +141,7 @@ class RestoreImporter(
         // DB接続を閉じたかどうかを自前で追跡する（RoomDatabaseは`isOpen`のような公開APIを
         // 持たないため。閉じた後はcatch節でこの[database]へ触れてはならない＝work_logも書けない）。
         var databaseClosed = false
+        val writeJournal = RestoreWriteJournal()
 
         try {
             val extraction = extractToStaging(srcUri, stagingRoot, onProgress)
@@ -140,7 +162,7 @@ class RestoreImporter(
             // ここまでで検証は完了。以降はステージングを実配置へ移すだけ（DB接続はこの直前に閉じる）。
             database.close()
             databaseClosed = true
-            applyStagedFiles(stagingRoot)
+            applyStagedFiles(stagingRoot, writeJournal)
 
             val deviceOriginId = backupStateStore.ensureOriginId()
             val identity = RestoreIdentityDecision.decide(deviceOriginId, extraction.manifest.originId)
@@ -158,14 +180,20 @@ class RestoreImporter(
             // 閉じた後の失敗は前掲クラスKDoc「自分で決めた点」の理由によりログを取らない
             // （閉じた[database]へ触れると例外になる）。
             if (databaseClosed) {
-                throw if (e is RestoreImportException) e else RestoreImportException("復元に失敗しました: ${e.message}", e)
+                val rolledBack = writeJournal.rollback(databaseFiles())
+                throw RestoreImportException(
+                    "復元に失敗しました", e,
+                    afterDatabaseClosed = true,
+                    rollbackSucceeded = rolledBack,
+                )
             }
             withContext(NonCancellable) {
                 logFailure(e.message ?: "不明なエラー")
             }
             when (e) {
                 is RestoreImportException -> throw e
-                else -> throw RestoreImportException("復元に失敗しました: ${e.message}", e)
+                is ZipException, is EOFException -> throw RestoreImportException(RestoreCompatibility.CORRUPT_ZIP_MESSAGE, e)
+                else -> throw RestoreImportException("復元に失敗しました", e)
             }
         } finally {
             stagingRoot.deleteRecursively()
@@ -211,10 +239,10 @@ class RestoreImporter(
     }
 
     private fun requireSchemaAcceptable(manifest: ParsedBackupManifest) {
-        if (!RestoreCompatibility.isSchemaAcceptable(manifest.dbSchemaVersion, BusCourseDatabase.SCHEMA_VERSION)) {
+        val edges = BusCourseDatabase.MIGRATIONS.map { it.startVersion to it.endVersion }
+        if (!RestoreCompatibility.isSchemaAcceptable(manifest.dbSchemaVersion, BusCourseDatabase.SCHEMA_VERSION, edges)) {
             throw RestoreImportException(
-                "このバックアップのDBスキーマ版(${manifest.dbSchemaVersion})がアプリ" +
-                    "(${BusCourseDatabase.SCHEMA_VERSION})より新しいため復元できません"
+                "このバックアップ（DB 版 ${manifest.dbSchemaVersion}）は、このアプリでは開けない版です。"
             )
         }
     }
@@ -226,7 +254,28 @@ class RestoreImporter(
         dbSchemaVersion = dbSchemaVersion,
         fileCount = fileCount,
         totalBytes = totalBytes,
+        storageCheck = storageCheck(totalBytes),
     )
+
+    private fun storageCheck(totalBytes: Long) =
+        RestoreCompatibility.checkStorage(totalBytes, StatFs(context.filesDir.path).availableBytes)
+
+    private fun requireSufficientStorage(totalBytes: Long) {
+        val check = storageCheck(totalBytes)
+        if (!check.enough) throw RestoreImportException(
+            RestoreCompatibility.storageMessage(check), storageShortage = true,
+        )
+    }
+
+    private fun databaseFiles(): List<File> {
+        val db = context.getDatabasePath(BusCourseStorage.DATABASE_NAME)
+        return listOf(db, File(db.path + "-wal"), File(db.path + "-shm"))
+    }
+
+    private fun mapCorruptZip(e: Exception): Exception = when (e) {
+        is ZipException, is EOFException -> RestoreImportException(RestoreCompatibility.CORRUPT_ZIP_MESSAGE, e)
+        else -> e
+    }
 
     /**
      * zipを先頭からステージングへ展開しながら、件数・バイト数・ZIP生バイトのSHA-256を1パスで計算する。
@@ -301,20 +350,22 @@ class RestoreImporter(
 
     /**
      * 検証済みのステージング内容を実配置へ反映する。呼び出し前に[database]は閉じておくこと
-     * （DB3点セットの差し替えのため）。ステージングは`cacheDir`配下、実配置は`filesDir`配下で
-     * 別ボリュームの可能性を排除できないため`copyTo(overwrite = true)`で複製する
-     * （呼び出し元の`finally`でステージングは複製後に削除される）。
+     * （DB3点セットの差し替えのため）。同じボリュームなら移動（`renameTo`）で、要る空きを増やさない。
+     * 移動できないときだけ複製する（[moveOrCopyStagedFile]・2026-09-30 空きの試験で束の約2倍を使っていた）。
+     * 書いたファイルは[journal]に記録し、失敗したら呼び出し元がそれを消して「データなし」へ戻す。
      */
-    private fun applyStagedFiles(stagingRoot: File) {
+    private fun applyStagedFiles(stagingRoot: File, journal: RestoreWriteJournal) {
         val dbDir = context.getDatabasePath(BusCourseStorage.DATABASE_NAME).parentFile
         val stagingDbDir = File(stagingRoot, "db")
         for (suffix in listOf("", "-wal", "-shm")) {
             val destFile = File(dbDir, BusCourseStorage.DATABASE_NAME + suffix)
             val stagedFile = File(stagingDbDir, BusCourseStorage.DATABASE_NAME + suffix)
+            // ★バックアップ側に無い `-wal`・`-shm` も、書き戻し先の分は必ず消す。残すと書き戻し先の
+            // 空の DB の書きかけが、戻した DB に重なって壊れる（検分で発見・旧実装は無条件に delete していた）。
             destFile.delete()
             if (stagedFile.isFile) {
-                destFile.parentFile?.mkdirs()
-                stagedFile.copyTo(destFile, overwrite = true)
+                journal.record(destFile)
+                check(moveOrCopyStagedFile(stagedFile, destFile)) { "DBファイルを書き込めませんでした" }
             }
         }
 
@@ -326,16 +377,19 @@ class RestoreImporter(
                 .forEach { src ->
                     val rel = src.relativeTo(stagingBusCourseRoot)
                     val dest = File(filesRoot, rel.path)
-                    dest.parentFile?.mkdirs()
-                    src.copyTo(dest, overwrite = true)
+                    journal.record(dest)
+                    check(moveOrCopyStagedFile(src, dest)) { "ファイルを書き込めませんでした" }
                 }
         }
 
-        val stagingNaviSettings = File(stagingRoot, "files/datastore/navi_settings.preferences_pb")
-        if (stagingNaviSettings.isFile) {
-            val destNaviSettings = context.preferencesDataStoreFile("navi_settings")
-            destNaviSettings.parentFile?.mkdirs()
-            stagingNaviSettings.copyTo(destNaviSettings, overwrite = true)
+        for (name in BackupWriteTargets.DATASTORE_PATHS) {
+            val staged = File(stagingRoot, "files/datastore/$name")
+            if (staged.isFile) {
+                val storeName = name.removeSuffix(".preferences_pb")
+                val dest = context.preferencesDataStoreFile(storeName)
+                journal.record(dest)
+                check(moveOrCopyStagedFile(staged, dest)) { "設定ファイルを書き込めませんでした" }
+            }
         }
     }
 
