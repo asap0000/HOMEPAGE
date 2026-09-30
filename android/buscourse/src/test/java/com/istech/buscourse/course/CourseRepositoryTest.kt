@@ -125,7 +125,7 @@ class CourseRepositoryTest {
         f.writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte()))
     }
 
-    private suspend fun insertSession(): Long {
+    private suspend fun insertSession(status: RecordingSessionStatus = RecordingSessionStatus.COMPLETED): Long {
         val now = System.currentTimeMillis()
         return db.recordingSessionDao().insert(
             RecordingSessionEntity(
@@ -143,9 +143,27 @@ class CourseRepositoryTest {
                 baseFrameIntervalMs = 1000,
                 frameCount = 0,
                 totalDistanceM = null,
-                status = RecordingSessionStatus.COMPLETED.name,
+                status = status.name,
             )
         )
+    }
+
+    @Test
+    fun extractableSessions_includeCompletedAndInterruptedOnly() = runTest {
+        val completed = insertSession(RecordingSessionStatus.COMPLETED)
+        val interrupted = insertSession(RecordingSessionStatus.INTERRUPTED)
+        val recording = insertSession(RecordingSessionStatus.RECORDING)
+        val discarded = insertSession(RecordingSessionStatus.DISCARDED)
+
+        val ids = repository.getExtractableSessions().map { it.id }
+
+        assertThat(ids).containsAtLeast(completed, interrupted)
+        assertThat(ids).doesNotContain(recording)
+        assertThat(ids).doesNotContain(discarded)
+        for (id in listOf(recording, discarded)) {
+            assertThat(runCatching { repository.extractSegmentsFromSession(id) }.exceptionOrNull())
+                .isInstanceOf(IllegalStateException::class.java)
+        }
     }
 
     private suspend fun insertFrame(

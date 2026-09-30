@@ -71,7 +71,7 @@ private fun StringBuilder.appendUnmatchedStops(unmatchedStops: List<UnmatchedSto
 
 /**
  * 試走ログからの区間自動抽出（設計書§3.9・§9 フェーズ2）。
- * 完了済み（COMPLETED）の FULL_RUN / PARTIAL_RUN / TEST_DRIVE セッションを一覧し、
+ * 完了または中断の FULL_RUN / PARTIAL_RUN / TEST_DRIVE セッションを一覧し、
  * 「抽出実行」で stop_visit_event（ARRIVED）と gps_point から停留所間区間を切り出して
  * segment_track へUPSERT、影響コースの course_segment / route_point を再評価する。
  *
@@ -190,7 +190,7 @@ fun ExtractionScreen(
         if (loaded && sessions.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Text(
-                    "抽出対象のセッションがありません。\n（完了済みの FULL_RUN / PARTIAL_RUN / TEST_DRIVE が対象）",
+                    "抽出対象のセッションがありません。\n（完了または中断の FULL_RUN / PARTIAL_RUN / TEST_DRIVE が対象）",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -207,6 +207,11 @@ fun ExtractionScreen(
                         Text(
                             "#${session.id}  ${session.type}",
                             style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "状態: ${if (session.status == "INTERRUPTED") "中断" else session.status}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
                             "${formatDateTime(session.startedAt)}  走行 ${formatDistance(session.totalDistanceM)}",

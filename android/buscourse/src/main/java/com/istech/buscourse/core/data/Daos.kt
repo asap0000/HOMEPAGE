@@ -302,6 +302,10 @@ interface RecordingSessionDao {
     @Query("SELECT * FROM recording_session WHERE status = :status ORDER BY started_at DESC")
     suspend fun getByStatus(status: String): List<RecordingSessionEntity>
 
+    /** プロセス起動前に開始された異常終了候補（起動時リカバリ用）。 */
+    @Query("SELECT * FROM recording_session WHERE status = 'RECORDING' AND started_at < :cutoffMs ORDER BY started_at ASC")
+    suspend fun getRecordingStartedBefore(cutoffMs: Long): List<RecordingSessionEntity>
+
     /** `timelapse_frame` 追加時のカウンタ更新（設計書§4.5.2、RecordingSessionRepositoryが使用）。 */
     @Query("UPDATE recording_session SET frame_count = frame_count + 1 WHERE id = :id")
     suspend fun incrementFrameCount(id: Long)

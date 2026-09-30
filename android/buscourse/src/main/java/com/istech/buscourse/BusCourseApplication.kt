@@ -1,9 +1,21 @@
 package com.istech.buscourse
 
 import android.app.Application
+import android.util.Log
+import android.widget.Toast
 import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.WorkLogCategory
+import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.map.FailClosedNetworkInterceptor
+import com.istech.buscourse.recording.RecordingSessionRepository
+import com.istech.buscourse.recording.RecordingStateStore
 import com.istech.buscourse.recording.StorageRotationWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import org.maplibre.android.MapLibre
 import org.maplibre.android.module.http.HttpRequestUtil
@@ -18,10 +30,13 @@ import org.maplibre.android.module.http.HttpRequestUtil
  */
 class BusCourseApplication : Application() {
 
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /** Room DB のアプリ全体シングルトン（設計書§3.2）。Activity/Service/Workerから共有して使う。 */
     val database: BusCourseDatabase by lazy { BusCourseDatabase.build(this) }
 
     override fun onCreate() {
+        val processStartedAtMs = System.currentTimeMillis()
         super.onCreate()
         StorageRotationWorker.schedule(this)
 
@@ -58,5 +73,69 @@ class BusCourseApplication : Application() {
                 .addInterceptor(FailClosedNetworkInterceptor())
                 .build()
         )
+
+        applicationScope.launch { recoverInterruptedSessions(processStartedAtMs) }
+    }
+
+    private suspend fun recoverInterruptedSessions(processStartedAtMs: Long) {
+        val stateStore = RecordingStateStore(this)
+        val wasRecording = runCatching { stateStore.isRecordingFlow.first() }
+            .onFailure { Log.w(TAG, "記録状態の読み取りに失敗しました", it) }
+            .getOrDefault(false)
+        // ★起動時に立っていた「記録中」フラグの走行番号を控える。締め終わるまで（GPS の取り込みで数秒）に
+        // 利用者が新しい記録を始めると、フラグはその新しい記録のものに変わっている＝それを消してはいけない
+        // （消すと画面は「記録していない」のに裏で記録が続く）。検分で発見（2026-09-30）。
+        val staleFlagSessionId = runCatching { stateStore.sessionIdFlow.first() }.getOrNull()
+        var closedCount = 0
+        var repository: RecordingSessionRepository? = null
+        try {
+            val activeRepository = RecordingSessionRepository(this, database)
+            repository = activeRepository
+            val candidates = activeRepository.interruptedSessionCandidates(processStartedAtMs)
+            for (candidate in candidates) {
+                try {
+                    if (activeRepository.closeInterruptedSession(candidate.id) != null) closedCount++
+                } catch (e: Exception) {
+                    Log.w(TAG, "中断記録の締め処理に失敗しました sessionId=${candidate.id}", e)
+                    writeRecoveryWorkLog("中断記録の締め処理に失敗しました", "sessionId=${candidate.id}: $e")
+                }
+            }
+            if (closedCount > 0 || wasRecording) {
+                val currentFlagSessionId = runCatching { stateStore.sessionIdFlow.first() }.getOrNull()
+                if (currentFlagSessionId == null || currentFlagSessionId == staleFlagSessionId) {
+                    runCatching { stateStore.clear() }
+                        .onFailure { Log.w(TAG, "記録状態の消去に失敗しました", it) }
+                }
+            }
+            if (closedCount > 0) {
+                val message = "前回の記録は途中で止まっていたので、中断として保存しました（${closedCount} 件）"
+                writeRecoveryWorkLog(message)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@BusCourseApplication, message, Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "中断記録の起動時リカバリに失敗しました", e)
+            writeRecoveryWorkLog("中断記録の起動時リカバリに失敗しました", e.toString())
+        } finally {
+            repository?.shutdown()
+        }
+    }
+
+    private suspend fun writeRecoveryWorkLog(message: String, detail: String? = null) {
+        runCatching {
+            database.workLogDao().insert(
+                WorkLogEntity(
+                    tsEpochMs = System.currentTimeMillis(),
+                    category = WorkLogCategory.RECORDING.name,
+                    message = message,
+                    detail = detail,
+                )
+            )
+        }.onFailure { Log.w(TAG, "中断記録の作業ログ保存に失敗しました", it) }
+    }
+
+    private companion object {
+        const val TAG = "BusCourseApplication"
     }
 }

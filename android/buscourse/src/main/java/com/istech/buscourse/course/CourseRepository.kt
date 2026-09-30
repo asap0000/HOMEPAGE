@@ -1158,10 +1158,13 @@ class CourseRepository(
     // 試走ログからの区間自動抽出（§3.9）
     // ------------------------------------------------------------------
 
-    /** 区間抽出の対象にできる完了済みセッション一覧（UI「セッション一覧→抽出実行」導線用）。 */
+    /** 区間抽出の対象にできる完了または中断セッション一覧（UI「セッション一覧→抽出実行」導線用）。 */
     suspend fun getExtractableSessions() =
-        recordingSessionDao.getByStatus(RecordingSessionStatus.COMPLETED.name)
+        (recordingSessionDao.getByStatus(RecordingSessionStatus.COMPLETED.name) +
+            recordingSessionDao.getByStatus(RecordingSessionStatus.INTERRUPTED.name))
             .filter { it.type in EXTRACTABLE_SESSION_TYPES }
+            // 2つの問い合わせを繋いだだけだと「完了」の後ろに「中断」が並ぶ＝全体を新しい順に並べ直す。
+            .sortedByDescending { it.startedAt }
 
     /** セッションメモの更新（区間抽出画面「いつの何の目的で走ったか」の後付け記録、2026-07-11追加）。 */
     suspend fun updateSessionMemo(sessionId: Long, memo: String?) {
@@ -2243,8 +2246,8 @@ class CourseRepository(
     suspend fun extractSegmentsFromSession(sessionId: Long): SegmentExtractionResult = withContext(Dispatchers.IO) {
         val session = recordingSessionDao.getById(sessionId)
             ?: throw IllegalArgumentException("セッションが見つかりません: id=$sessionId")
-        check(session.status == RecordingSessionStatus.COMPLETED.name) {
-            "完了済み（COMPLETED）セッションのみ抽出できます（現在: ${session.status}）"
+        check(session.status in setOf(RecordingSessionStatus.COMPLETED.name, RecordingSessionStatus.INTERRUPTED.name)) {
+            "完了または中断のセッションのみ抽出できます（現在: ${session.status}）"
         }
         // UI側（ExtractionScreenの一覧）フィルタとは別に、リポジトリ層の不変条件としても
         // 抽出可能なセッション種別を強制する（設計書§3.9、フェーズ2レビュー#2）。
@@ -2385,8 +2388,8 @@ class CourseRepository(
     ): SegmentExtractionResult = withContext(Dispatchers.IO) {
         val session = recordingSessionDao.getById(sessionId)
             ?: throw IllegalArgumentException("セッションが見つかりません: id=$sessionId")
-        check(session.status == RecordingSessionStatus.COMPLETED.name) {
-            "完了済み（COMPLETED）セッションのみ抽出できます（現在: ${session.status}）"
+        check(session.status in setOf(RecordingSessionStatus.COMPLETED.name, RecordingSessionStatus.INTERRUPTED.name)) {
+            "完了または中断のセッションのみ抽出できます（現在: ${session.status}）"
         }
         check(session.type in EXTRACTABLE_SESSION_TYPES) {
             "抽出可能なセッション種別ではありません（現在: ${session.type}）"

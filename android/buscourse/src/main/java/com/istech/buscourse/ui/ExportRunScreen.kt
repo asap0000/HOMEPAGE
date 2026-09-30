@@ -143,7 +143,7 @@ private fun ExportRunRow(run: ExportRunListItem, selected: Boolean, onChecked: (
             Checkbox(checked = selected, onCheckedChange = onChecked)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(formatRunDate(run.startedAt), style = MaterialTheme.typography.titleSmall)
-                Text("種別: ${run.type}　状態: ${run.status}", style = MaterialTheme.typography.bodySmall)
+                Text("種別: ${run.type}　状態: ${run.status.displaySessionStatus()}", style = MaterialTheme.typography.bodySmall)
                 // ★距離は小数1桁で出す（実測 8433.312813781926 m のような生値は人が読めない・検収 2026-09-02）。
                 Text(
                     "距離: ${run.totalDistanceM?.let { String.format(java.util.Locale.US, "%.1f m", it) } ?: "不明"}" +
@@ -159,3 +159,5 @@ private fun ExportRunRow(run: ExportRunListItem, selected: Boolean, onChecked: (
 
 private fun formatRunDate(epochMs: Long): String =
     SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.getDefault()).format(Date(epochMs))
+
+private fun String.displaySessionStatus(): String = if (this == "INTERRUPTED") "中断" else this

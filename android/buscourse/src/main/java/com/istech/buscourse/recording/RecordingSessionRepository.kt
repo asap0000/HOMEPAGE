@@ -182,6 +182,37 @@ class RecordingSessionRepository(
             updated
         }
 
+    /**
+     * プロセス異常終了で残ったセッションを中断として締める。
+     * 現在のプロセスで記録中の [session] には触れず、DBにもRECORDINGとして残る行だけを更新する。
+     */
+    suspend fun closeInterruptedSession(sessionId: Long): RecordingSessionEntity? = withContext(writeDispatcher) {
+        if (session?.id == sessionId) return@withContext null
+        val current = recordingSessionDao.getById(sessionId) ?: return@withContext null
+        if (current.status != RecordingSessionStatus.RECORDING.name) return@withContext null
+
+        if (gpsPointDao.getBySession(sessionId).isEmpty()) {
+            importGpsPointsFromJsonl(sessionId)
+        }
+        val points = gpsPointDao.getBySession(sessionId)
+        val distance = computeTotalDistanceM(sessionId)
+        val lastFrameAt = timelapseFrameDao.getBySession(sessionId).maxOfOrNull { it.capturedAt }
+        // seq 順＝ふつうは時刻順だが、終了時刻は「いちばん遅い点」で決める（並びに頼らない）。
+        val endedAt = points.maxOfOrNull { it.tsEpochMs } ?: lastFrameAt ?: current.startedAt
+        val updated = current.copy(
+            endedAt = endedAt,
+            totalDistanceM = distance,
+            status = RecordingSessionStatus.INTERRUPTED.name,
+        )
+        recordingSessionDao.update(updated)
+        writeMetaSnapshotBlocking(updated)
+        updated
+    }
+
+    /** プロセス開始以前のRECORDING行。状態フラグではなくDB状態を判定根拠にする。 */
+    suspend fun interruptedSessionCandidates(processStartedAtMs: Long): List<RecordingSessionEntity> =
+        recordingSessionDao.getRecordingStartedBefore(processStartedAtMs)
+
     /** セッション途中経過の `meta.json` スナップショットを最新DB状態で再生成する（§3.3、異常終了リカバリ用）。 */
     suspend fun refreshMetaSnapshot() = withContext(writeDispatcher) {
         val current = session ?: return@withContext
