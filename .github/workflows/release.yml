@@ -90,45 +90,69 @@ jobs:
           echo "VERSION_CODE=$((100 + $GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Build BusCourse release APK
+      - name: Build BusCourse release and navi APKs
         env:
           BUSCOURSE_STORE_PASSWORD: ${{ secrets.BUSCOURSE_STORE_PASSWORD }}
           BUSCOURSE_KEY_ALIAS: ${{ secrets.BUSCOURSE_KEY_ALIAS }}
           BUSCOURSE_KEY_PASSWORD: ${{ secrets.BUSCOURSE_KEY_PASSWORD }}
-        run: ./gradlew :buscourse:testDebugUnitTest :buscourse:assembleRelease --no-daemon --stacktrace
+        # ナビ専科（buildType navi・com.istech.buscourse.navi）も同じ release 鍵で組む（2026-10-02 オーナー依頼）。
+        run: ./gradlew :buscourse:testDebugUnitTest :buscourse:assembleRelease :buscourse:assembleNavi --no-daemon --stacktrace
 
-      - name: Verify release APK
+      - name: Verify release and navi APKs
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -e
-          APK="buscourse/build/outputs/apk/release/buscourse-release.apk"
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          if [ ! -f "$APK" ]; then
-            echo "::error::Expected release APK was not produced: $APK"
+          # verify <APK> <期待する applicationId> <期待する versionName>
+          verify() {
+            local APK="$1" APP_ID="$2" WANT_NAME="$3"
+            if [ ! -f "$APK" ]; then
+              echo "::error::Expected APK was not produced: $APK"
+              exit 1
+            fi
+            if "$AAPT" dump permissions "$APK" | grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE)'; then
+              echo "::error::$APK requests a network permission."
+              exit 1
+            fi
+            local CERTS
+            CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+            if ! grep -q 'Signer #1 certificate DN:' <<< "$CERTS"; then
+              echo "::error::$APK signature verification did not report a signer."
+              exit 1
+            fi
+            if grep -q 'CN=Android Debug' <<< "$CERTS"; then
+              echo "::error::$APK is signed with the Android debug certificate."
+              exit 1
+            fi
+            local BADGING PKG NAME
+            BADGING=$("$AAPT" dump badging "$APK")
+            PKG=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$BADGING")
+            NAME=$(sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p" <<< "$BADGING")
+            if [ "$PKG" != "$APP_ID" ]; then
+              echo "::error::$APK applicationId '$PKG' is not '$APP_ID'."
+              exit 1
+            fi
+            if [ "$NAME" != "$WANT_NAME" ]; then
+              echo "::error::$APK versionName '$NAME' does not match '$WANT_NAME'."
+              exit 1
+            fi
+            grep 'SHA-256 digest' <<< "$CERTS" | head -1 > "$RUNNER_TEMP/$(basename "$APK").cert"
+            if [ ! -s "$RUNNER_TEMP/$(basename "$APK").cert" ]; then
+              echo "::error::$APK signing certificate digest was not reported."
+              exit 1
+            fi
+            echo "OK: $APK ($PKG $NAME) signed, no network permissions."
+          }
+          verify buscourse/build/outputs/apk/release/buscourse-release.apk com.istech.buscourse "$VERSION"
+          verify buscourse/build/outputs/apk/navi/buscourse-navi.apk com.istech.buscourse.navi "$VERSION-navi"
+          # 2つは同じ鍵で署名されていること（片方だけ別の鍵＝取り違え）。
+          if ! cmp -s "$RUNNER_TEMP/buscourse-release.apk.cert" "$RUNNER_TEMP/buscourse-navi.apk.cert"; then
+            echo "::error::release and navi APKs are signed with different certificates."
             exit 1
           fi
-          if "$AAPT" dump permissions "$APK" | grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE)'; then
-            echo "::error::Release APK requests a network permission."
-            exit 1
-          fi
-          echo "OK: release APK has no network permissions."
-          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
-          if ! printf '%s\n' "$CERTS" | grep -q 'Signer #1 certificate DN:'; then
-            echo "::error::APK signature verification did not report a signer."
-            exit 1
-          fi
-          if printf '%s\n' "$CERTS" | grep -q 'CN=Android Debug'; then
-            echo "::error::Release APK is signed with the Android debug certificate."
-            exit 1
-          fi
-          VERSION_NAME=$("$AAPT" dump badging "$APK" | sed -n "s/^package:.*versionName='\\([^']*\\)'.*/\\1/p")
-          if [ "$VERSION_NAME" != "$VERSION" ]; then
-            echo "::error::APK versionName '$VERSION_NAME' does not match requested version '$VERSION'."
-            exit 1
-          fi
-          echo "OK: signed APK versionName matches $VERSION."
+          echo "OK: both APKs share the same signing certificate."
 
       - name: Stage APK and SHA-256 checksum
         id: stage
@@ -136,10 +160,14 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           APK_NAME="BusCourse-$VERSION.apk"
+          NAVI_NAME="BusCourseNavi-$VERSION.apk"
           cp buscourse/build/outputs/apk/release/buscourse-release.apk "$GITHUB_WORKSPACE/$APK_NAME"
+          cp buscourse/build/outputs/apk/navi/buscourse-navi.apk "$GITHUB_WORKSPACE/$NAVI_NAME"
           cd "$GITHUB_WORKSPACE"
           sha256sum "$APK_NAME" | tee "$APK_NAME.sha256"
+          sha256sum "$NAVI_NAME" | tee "$NAVI_NAME.sha256"
           echo "sha256=$(cut -d' ' -f1 "$APK_NAME.sha256")" >> "$GITHUB_OUTPUT"
+          echo "navi_sha256=$(cut -d' ' -f1 "$NAVI_NAME.sha256")" >> "$GITHUB_OUTPUT"
 
       # ★draft は固定（入力で変えられない）。公開はオーナーが GitHub の画面で押す（紙芝居 09-26 改1）。
       # draft の間はタグも作られない＝旧手順のような「タグ一つで公開」の入口が無い。
@@ -152,7 +180,13 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: BusCourse ${{ inputs.version }}
           body: |
+            正式版（全部入り）BusCourse-${{ inputs.version }}.apk
             SHA-256: `${{ steps.stage.outputs.sha256 }}`
+
+            ナビ専科 BusCourseNavi-${{ inputs.version }}.apk
+            SHA-256: `${{ steps.stage.outputs.navi_sha256 }}`
           files: |
             BusCourse-${{ inputs.version }}.apk
             BusCourse-${{ inputs.version }}.apk.sha256
+            BusCourseNavi-${{ inputs.version }}.apk
+            BusCourseNavi-${{ inputs.version }}.apk.sha256
