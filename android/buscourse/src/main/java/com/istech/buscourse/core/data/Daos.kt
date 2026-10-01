@@ -158,6 +158,10 @@ interface CourseDao {
      */
     @Query("SELECT COUNT(*) FROM course")
     suspend fun count(): Int
+
+    /** Course bundle replacement; dependent course rows cascade from course. */
+    @Query("DELETE FROM course")
+    suspend fun deleteAllForBundleReplacement()
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */
@@ -332,6 +336,9 @@ interface RecordingSessionDao {
      */
     @Query("SELECT COUNT(*) FROM recording_session")
     suspend fun count(): Int
+
+    @Query("DELETE FROM recording_session")
+    suspend fun deleteAllForBundleReplacement()
 }
 
 /** `timelapse_frame`（LORES連写／HIRES単写メタデータ）の操作（設計書§3.5、D6）。 */
@@ -340,8 +347,14 @@ interface TimelapseFrameDao {
     @Insert
     suspend fun insert(frame: TimelapseFrameEntity): Long
 
+    @Insert
+    suspend fun insertAll(frames: List<TimelapseFrameEntity>)
+
     @Query("SELECT * FROM timelapse_frame WHERE session_id = :sessionId ORDER BY seq")
     suspend fun getBySession(sessionId: Long): List<TimelapseFrameEntity>
+
+    @Query("SELECT file_rel_path FROM timelapse_frame")
+    suspend fun getAllFileRelativePaths(): List<String>
 
     @Query("SELECT COUNT(*) FROM timelapse_frame WHERE session_id = :sessionId AND kind = :kind")
     suspend fun countBySessionAndKind(sessionId: Long, kind: String): Int
@@ -573,6 +586,9 @@ interface NaviMapDao {
     @Query("SELECT * FROM navi_track_point WHERE segment_id = :segmentId ORDER BY seq")
     suspend fun getTrackPoints(segmentId: Long): List<NaviTrackPointEntity>
 
+    @Query("SELECT * FROM navi_track_point")
+    suspend fun getAllTrackPoints(): List<NaviTrackPointEntity>
+
     @Query("SELECT * FROM navi_event_output WHERE event_id = :eventId ORDER BY id")
     suspend fun getOutputs(eventId: Long): List<NaviEventOutputEntity>
 
@@ -581,4 +597,10 @@ interface NaviMapDao {
 
     @Query("DELETE FROM navi_map WHERE id = :id")
     suspend fun deleteMap(id: Long)
+
+    @Query("DELETE FROM navi_map")
+    suspend fun deleteAllForBundleReplacement()
+
+    @Query("SELECT COUNT(*) FROM navi_map")
+    suspend fun countAll(): Int
 }

@@ -6,6 +6,9 @@ import android.widget.Toast
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
+import com.istech.buscourse.distkit.CourseBundle
+import com.istech.buscourse.core.data.BusCourseStorage
+import java.io.File
 import com.istech.buscourse.map.FailClosedNetworkInterceptor
 import com.istech.buscourse.recording.RecordingSessionRepository
 import com.istech.buscourse.recording.RecordingStateStore
@@ -74,6 +77,14 @@ class BusCourseApplication : Application() {
                 .build()
         )
 
+        if (BuildConfig.NAVI_ONLY) {
+            applicationScope.launch {
+                val root = File(BusCourseStorage.root(this@BusCourseApplication), "distkit")
+                val refs = database.timelapseFrameDao().getAllFileRelativePaths()
+                    .mapNotNull { it.removePrefix("distkit/").takeIf { path -> path != it } }.toSet()
+                CourseBundle.cleanupUnreferenced(root, refs)
+            }
+        }
         applicationScope.launch { recoverInterruptedSessions(processStartedAtMs) }
     }
 

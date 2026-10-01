@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-09-28 オーナー選定 navi_A を元画像からベクター化。外周リングを省略。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ★上の矢印と道路の左下が円の外へ出ていたので縮めて中央へ。
+         アダプティブアイコンは端末ごとに丸・角丸で切り抜かれる。どの形でも欠けない「中央の直径66の円」に収めるため、
+         図柄全体を縮めて中央へ寄せる（2026-09-28・OPPO の実機で端の丸が欠けたのを見て直した）。 -->
+    <group android:pivotX="54" android:pivotY="54" android:scaleX="0.68" android:scaleY="0.68"
+        android:translateX="1.36" android:translateY="3.06">
+        <path
+            android:fillColor="#3366FF" android:pathData="M54,44 L54,29 L46,29 L64,13 L82,29 L74,29 L74,44 Z"/>
+        <path
+            android:fillColor="#3366FF" android:pathData="M22,86 C29,74 41,65 53,56 C58,52 58,48 58,43 L70,43 C70,58 67,65 57,73 C51,78 46,83 41,86 Z"/>
+        <path
+            android:fillColor="#FFFFFF" android:pathData="M59,77 L63,76 L63,72 L59,72 Z"/>
+        <path
+            android:fillColor="#FFFFFF" android:pathData="M60,66 L64,65 L64,61 L60,62 Z"/>
+        <path
+            android:fillColor="#FFFFFF" android:pathData="M62,56 L66,55 L66,51 L62,52 Z"/>
+    </group>
+</vector>

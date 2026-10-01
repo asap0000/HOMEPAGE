@@ -77,10 +77,12 @@ android {
     // ------------------------------------------------------------------------------------------
     buildTypes {
         debug {
+            buildConfigField("boolean", "NAVI_ONLY", "false")
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
         release {
+            buildConfigField("boolean", "NAVI_ONLY", "false")
             isMinifyEnabled = false
             val releaseSigningValues = listOf(
                 "BUSCOURSE_KEYSTORE_PATH",
@@ -97,6 +99,7 @@ android {
             )
         }
         create("field") {
+            buildConfigField("boolean", "NAVI_ONLY", "false")
             // applicationIdSuffix は付けない＝com.istech.buscourse（実データを持つ側）
             isDebuggable = true
             isMinifyEnabled = false
@@ -112,9 +115,24 @@ android {
         // isMinifyEnabled は release を写すので現状 false（R8 は効かない）。検査場へは「PrivacyCamera 型の R8 前提はそのまま成立しない」と伝え済み。
         create("kensa") {
             initWith(getByName("release"))
+            buildConfigField("boolean", "NAVI_ONLY", "false")
             applicationIdSuffix = ".kensa"
             versionNameSuffix = "-kensa"
             signingConfig = signingConfigs.getByName("debug")
+        }
+        create("navi") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".navi"
+            versionNameSuffix = "-navi"
+            buildConfigField("boolean", "NAVI_ONLY", "true")
+            val releaseSigningValues = listOf(
+                "BUSCOURSE_KEYSTORE_PATH", "BUSCOURSE_STORE_PASSWORD", "BUSCOURSE_KEY_ALIAS", "BUSCOURSE_KEY_PASSWORD"
+            ).map { System.getenv(it) }
+            if (releaseSigningValues.all { !it.isNullOrBlank() }) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = null
+            }
         }
     }
 
