@@ -73,6 +73,7 @@ import com.istech.buscourse.navimap.NaviSettingsDefaults
 import com.istech.buscourse.navimap.NaviSettingsEffective
 import com.istech.buscourse.navimap.NaviSettingsRepository
 import com.istech.buscourse.navimap.NaviTheme
+import com.istech.buscourse.BuildConfig
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -94,7 +95,7 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NaviSettingsScreen(onBack: () -> Unit) {
+fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit = {}) {
     val context = LocalContext.current
     val repository = remember { NaviSettingsRepository(context) }
     val scope = rememberCoroutineScope()
@@ -273,6 +274,11 @@ fun NaviSettingsScreen(onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
+                    }
+                },
+                actions = {
+                    if (!BuildConfig.NAVI_ONLY) {
+                        TextButton(onClick = onOpenDistributionExport) { Text("配布用に書き出す") }
                     }
                 },
             )

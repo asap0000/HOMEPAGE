@@ -187,7 +187,7 @@ class MapPackageImporter(
     companion object {
         private const val TAG = "MapPackageImporter"
         private const val MANIFEST_ENTRY_NAME = "manifest.json"
-        private const val RESOLVED_STYLE_FILE_NAME = "style.resolved.json"
+        internal const val RESOLVED_STYLE_FILE_NAME = "style.resolved.json"
         private val SAFE_REGION_ID_REGEX = Regex("^[A-Za-z0-9_-]+$")
     }
 }

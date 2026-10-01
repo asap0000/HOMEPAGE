@@ -131,7 +131,10 @@ android {
             if (releaseSigningValues.all { !it.isNullOrBlank() }) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
-                signingConfig = null
+                // 手元のビルド（合言葉が無い）は debug 鍵で署名する＝実機で試せるように（kensa と同じ扱い）。
+                // 配る APK は CI で必ず release 鍵が付く。★debug 鍵の navi を入れた端末へ release 鍵の navi は
+                // 上書きできない（署名違い）——試験機では入れ直す前に一度アンインストールすること。
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }

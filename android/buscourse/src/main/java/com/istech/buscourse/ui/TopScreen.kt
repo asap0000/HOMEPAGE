@@ -18,12 +18,24 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.launch
 import com.istech.buscourse.BuildConfig
 
 /**
@@ -41,12 +53,27 @@ import com.istech.buscourse.BuildConfig
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TopScreen(
+    viewModel: BusCourseViewModel,
     onOpenDesign: () -> Unit,
     onOpenNavi: () -> Unit,
     onOpenNaviSettings: () -> Unit,
+    onOpenBundleInstall: () -> Unit,
 ) {
+    val selectedMap by viewModel.mapRepository.selectedPackage.collectAsState(initial = null)
+    var courseCount by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    LaunchedEffect(Unit) { courseCount = viewModel.repository.getCourses().size }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch { courseCount = viewModel.repository.getCourses().size }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val naviState = naviTopState(selectedMap?.displayName, courseCount)
     Scaffold(
-        topBar = { TopAppBar(title = { Text("BusCourse") }) },
+        topBar = { TopAppBar(title = { Text(if (BuildConfig.NAVI_ONLY) "BusCourse ナビ" else "BusCourse") }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -55,33 +82,61 @@ fun TopScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // 1段目＝主機能。全幅・大きめに取る。
-            TopMenuCard(
-                title = "ナビ",
-                icon = { Icon(Icons.Filled.Navigation, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                onClick = onOpenNavi,
-                compact = false,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // 2段目＝準備・調整。横並びで半分幅ずつ。
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
+            if (BuildConfig.NAVI_ONLY) {
+                if (!naviState.canNavigate) Text(naviState.prompt.orEmpty(), style = MaterialTheme.typography.titleMedium)
+                Text("地図：${naviState.mapLine}")
+                Text("コース：${naviState.courseLine}")
                 TopMenuCard(
-                    title = "設計",
-                    icon = { Icon(Icons.Filled.Architecture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    onClick = onOpenDesign,
-                    compact = true,
-                    modifier = Modifier.weight(1f),
+                    title = "ナビ",
+                    // 押せないときはアイコンも薄くする（文字だけ灰色でアイコンが青いと押せそうに見える）。
+                    icon = {
+                        Icon(
+                            Icons.Filled.Navigation, contentDescription = null,
+                            tint = if (naviState.canNavigate) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        )
+                    },
+                    onClick = onOpenNavi,
+                    compact = false,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = naviState.canNavigate,
                 )
                 TopMenuCard(
                     title = "ナビ設定",
                     icon = { Icon(Icons.Filled.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
                     onClick = onOpenNaviSettings,
                     compact = true,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                 )
+                Button(onClick = onOpenBundleInstall, modifier = Modifier.fillMaxWidth()) { Text("束を入れる") }
+            } else {
+                // 正式版の配置・表示は従来のまま。
+                TopMenuCard(
+                    title = "ナビ",
+                    icon = { Icon(Icons.Filled.Navigation, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    onClick = onOpenNavi,
+                    compact = false,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    TopMenuCard(
+                        title = "設計",
+                        icon = { Icon(Icons.Filled.Architecture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        onClick = onOpenDesign,
+                        compact = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TopMenuCard(
+                        title = "ナビ設定",
+                        icon = { Icon(Icons.Filled.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        onClick = onOpenNaviSettings,
+                        compact = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
 
             Spacer(Modifier.weight(1f))
@@ -118,9 +173,10 @@ private fun TopMenuCard(
     icon: @Composable () -> Unit,
     onClick: () -> Unit,
     compact: Boolean,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    Card(onClick = onClick, modifier = modifier) {
+    Card(onClick = onClick, enabled = enabled, modifier = modifier) {
         if (compact) {
             Column(
                 modifier = Modifier

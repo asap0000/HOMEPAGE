@@ -32,6 +32,9 @@ import com.istech.buscourse.ui.StopCardEditScreen
 import com.istech.buscourse.ui.StopCardListScreen
 import com.istech.buscourse.ui.StopCardRetakeScreen
 import com.istech.buscourse.ui.TopScreen
+import com.istech.buscourse.ui.BundleInstallScreen
+import com.istech.buscourse.ui.DistributionExportScreen
+import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.ui.WorkLogScreen
 import com.istech.buscourse.ui.theme.BusCourseTheme
 
@@ -81,6 +84,8 @@ private object Routes {
     const val NAVI_PICK = "navi_pick"
     const val NAVI_MAIN = "navi/{id}"
     const val NAVI_SETTINGS = "navi_settings"
+    const val BUNDLE_INSTALL = "bundle_install"
+    const val DISTRIBUTION_EXPORT = "distribution_export"
     // コース創設（トップダウン、S4、2026-07-14追加。設計書は docs/00_ファクトブック_バス運行実態.md 参照）
     const val COURSE_CREATE = "course_create"
     // 地図（フェーズ3、設計書§9次工程「アプリ側MapLibre組み込み」、2026-07-12追加）
@@ -107,12 +112,46 @@ private fun AppNavHost() {
     // Activityスコープの単一ViewModelで CourseRepository を全画面共有（:app と同じ方式）
     val viewModel: BusCourseViewModel = viewModel()
 
+    if (BuildConfig.NAVI_ONLY) {
+        NavHost(navController = navController, startDestination = Routes.TOP) {
+            composable(Routes.TOP) {
+                TopScreen(
+                    viewModel = viewModel,
+                    onOpenDesign = {},
+                    onOpenNavi = { navController.navigate(Routes.NAVI_PICK) },
+                    onOpenNaviSettings = { navController.navigate(Routes.NAVI_SETTINGS) },
+                    onOpenBundleInstall = { navController.navigate(Routes.BUNDLE_INSTALL) },
+                )
+            }
+            composable(Routes.BUNDLE_INSTALL) {
+                BundleInstallScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            }
+            composable(Routes.NAVI_PICK) {
+                NaviCoursePickScreen(viewModel, onBack = { navController.popBackStack() }, onOpen = { id -> navController.navigate("navi/$id") })
+            }
+            composable(Routes.NAVI_MAIN) { entry ->
+                val id = entry.arguments?.getString("id")?.toLongOrNull()
+                if (id != null) {
+                    AllowRotationWhileVisible()
+                    NaviMainScreen(courseId = id, onBack = { navController.popBackStack() })
+                }
+            }
+            composable(Routes.NAVI_SETTINGS) {
+                AllowRotationWhileVisible()
+                NaviSettingsScreen(onBack = { navController.popBackStack() })
+            }
+        }
+        return
+    }
+
     NavHost(navController = navController, startDestination = Routes.TOP) {
         composable(Routes.TOP) {
             TopScreen(
+                viewModel = viewModel,
                 onOpenDesign = { navController.navigate(Routes.HOME) },
                 onOpenNavi = { navController.navigate(Routes.NAVI_PICK) },
                 onOpenNaviSettings = { navController.navigate(Routes.NAVI_SETTINGS) },
+                onOpenBundleInstall = {},
             )
         }
         composable(Routes.HOME) {
@@ -243,7 +282,13 @@ private fun AppNavHost() {
         }
         composable(Routes.NAVI_SETTINGS) {
             AllowRotationWhileVisible()
-            NaviSettingsScreen(onBack = { navController.popBackStack() })
+            NaviSettingsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenDistributionExport = { navController.navigate(Routes.DISTRIBUTION_EXPORT) },
+            )
+        }
+        composable(Routes.DISTRIBUTION_EXPORT) {
+            DistributionExportScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
         }
         composable(Routes.COURSE_CREATE) {
             CourseCreateScreen(

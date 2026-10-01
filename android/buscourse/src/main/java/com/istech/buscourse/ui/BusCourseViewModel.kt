@@ -2,11 +2,14 @@ package com.istech.buscourse.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.MapDataPackageEntity
+import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.NaviBlockReason
 import com.istech.buscourse.core.data.SegmentTrackEntity
 import com.istech.buscourse.core.data.WorkLogCategory
@@ -21,10 +24,17 @@ import com.istech.buscourse.course.SegmentExtractionResult
 import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.map.MapDataPackageRepository
 import com.istech.buscourse.map.MapPackageImporter
+import com.istech.buscourse.distkit.CourseBundleExporter
+import com.istech.buscourse.distkit.CourseBundleImporter
+import com.istech.buscourse.distkit.MapBundleExporter
+import com.istech.buscourse.distkit.MapBundleInstaller
+import com.istech.buscourse.distkit.MapCoverageCheck
 import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
 import com.istech.buscourse.navimap.NaviMapRepository
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed interface SendToNaviResult {
@@ -76,6 +86,87 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private val naviMapGenerator by lazy { NaviMapGenerator(database) }
+
+    private val storageRoot by lazy { BusCourseStorage.root(getApplication<BusCourseApplication>()) }
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun exportCourseBundle(courseIds: List<Long>, uri: Uri, onProgress: (Int, Int) -> Unit, onResult: (Result<Unit>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val output = getApplication<BusCourseApplication>().contentResolver.openOutputStream(uri, "wt")
+                        ?: error("保存先を開けません")
+                    output.use {
+                        CourseBundleExporter(database, storageRoot, com.istech.buscourse.BuildConfig.VERSION_CODE).export(courseIds, it) { done, total ->
+                            mainHandler.post { onProgress(done, total) }
+                        }
+                    }
+                }
+            }
+            onResult(result)
+        }
+    }
+
+    fun exportMapBundle(uri: Uri, onProgress: (Long, Long) -> Unit, onResult: (Result<Unit>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val output = getApplication<BusCourseApplication>().contentResolver.openOutputStream(uri, "wt")
+                        ?: error("保存先を開けません")
+                    output.use {
+                        val mapsRoot = BusCourseStorage.resolve(getApplication(), BusCourseStorage.DIR_MAPS)
+                        MapBundleExporter(mapRepository, mapsRoot).export(it) { done, total ->
+                            mainHandler.post { onProgress(done, total) }
+                        }
+                    }
+                }
+            }
+            onResult(result)
+        }
+    }
+
+    fun installCourseBundle(uri: Uri, onProgress: (Long, Long) -> Unit, onResult: (Result<com.istech.buscourse.distkit.CourseBundleImportResult>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                val context = getApplication<BusCourseApplication>()
+                withContext(Dispatchers.IO) {
+                    val input = context.contentResolver.openInputStream(uri) ?: error("束を開けません")
+                    input.use {
+                        CourseBundleImporter(database, storageRoot).importBundle(it) { done, total ->
+                            mainHandler.post { onProgress(done, total) }
+                        }
+                    }
+                }
+            }
+            onResult(result)
+        }
+    }
+
+    fun installMapBundle(uri: Uri, onResult: (Result<com.istech.buscourse.distkit.MapBundleInstallResult>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                val context = getApplication<BusCourseApplication>()
+                withContext(Dispatchers.IO) {
+                    val mapsRoot = BusCourseStorage.resolve(context, BusCourseStorage.DIR_MAPS)
+                    MapBundleInstaller(mapPackageImporter, mapRepository, database, mapsRoot).install(uri)
+                }
+            }
+            onResult(result)
+        }
+    }
+
+    fun checkMapCoverage(onResult: (Result<MapCoverageCheck.Result>) -> Unit) {
+        viewModelScope.launch {
+            onResult(runCatching {
+                val selected = mapRepository.getSelected()
+                val bounds = selected?.let {
+                    MapCoverageCheck.Bounds(it.boundsWest, it.boundsSouth, it.boundsEast, it.boundsNorth)
+                }
+                val points = database.naviMapDao().getAllTrackPoints().map { MapCoverageCheck.Point(it.lat, it.lon) }
+                MapCoverageCheck.check(bounds, points)
+            })
+        }
+    }
 
     /**
      * courseIdごとの編成下書き（画面破棄・戻る操作で失われないようViewModelに保持する）。
