@@ -81,6 +81,15 @@ class NaviSettingsRepositoryTest {
         assertThat(patch.theme).isEqualTo(NaviTheme.NIGHT)
     }
 
+    @Test
+    fun voiceGuidanceDefaultsOnAndCanBeDisabled() = runTest {
+        assertThat(NaviSettingsDefaults.VOICE_GUIDANCE).isTrue()
+        assertThat(NaviDisplayResolver.resolve(NaviSettingsPatch(), hint = null).voiceGuidance).isTrue()
+        repository.setVoiceGuidance(false)
+        assertThat(repository.patchFlow.first().voiceGuidance).isFalse()
+        assertThat(NaviDisplayResolver.resolve(repository.patchFlow.first(), hint = null).voiceGuidance).isFalse()
+    }
+
     private suspend fun clearAll() {
         NaviSettingsField.entries.forEach { field -> repository.clear(field) }
     }

@@ -28,6 +28,7 @@ class NaviSettingsRepository(private val context: Context) {
             theme = NaviTheme.fromStorageValueOrNull(preferences[KEY_THEME]),
             stopNameVisible = preferences[KEY_STOP_NAME_VISIBLE],
             leadMaxSec = preferences[KEY_LEAD_MAX_SEC],
+            voiceGuidance = preferences[KEY_VOICE_GUIDANCE],
         )
     }
 
@@ -61,6 +62,7 @@ class NaviSettingsRepository(private val context: Context) {
 
     suspend fun setStopNameVisible(value: Boolean) = edit { it[KEY_STOP_NAME_VISIBLE] = value }
     suspend fun setLeadMaxSec(value: Double) = edit { it[KEY_LEAD_MAX_SEC] = NaviSettingsDefaults.clampLeadMaxSec(value) }
+    suspend fun setVoiceGuidance(value: Boolean) = edit { it[KEY_VOICE_GUIDANCE] = value }
 
     /** 指定項目の運転者設定を消し、ヒントまたは製品既定へ戻す。 */
     suspend fun clear(field: NaviSettingsField) = edit { preferences ->
@@ -75,6 +77,7 @@ class NaviSettingsRepository(private val context: Context) {
             NaviSettingsField.THEME -> preferences.remove(KEY_THEME)
             NaviSettingsField.STOP_NAME_VISIBLE -> preferences.remove(KEY_STOP_NAME_VISIBLE)
             NaviSettingsField.LEAD_MAX_SEC -> preferences.remove(KEY_LEAD_MAX_SEC)
+            NaviSettingsField.VOICE_GUIDANCE -> preferences.remove(KEY_VOICE_GUIDANCE)
         }
     }
 
@@ -93,6 +96,7 @@ class NaviSettingsRepository(private val context: Context) {
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_STOP_NAME_VISIBLE = booleanPreferencesKey("stop_name_visible")
         val KEY_LEAD_MAX_SEC = doublePreferencesKey("lead_max_sec")
+        val KEY_VOICE_GUIDANCE = booleanPreferencesKey("voice_guidance")
     }
 }
 
@@ -108,4 +112,5 @@ enum class NaviSettingsField {
     THEME,
     STOP_NAME_VISIBLE,
     LEAD_MAX_SEC,
+    VOICE_GUIDANCE,
 }

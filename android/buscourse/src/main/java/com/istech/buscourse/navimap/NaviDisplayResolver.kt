@@ -12,6 +12,7 @@ data class NaviSettingsPatch(
     val theme: NaviTheme? = null,
     val stopNameVisible: Boolean? = null,
     val leadMaxSec: Double? = null,
+    val voiceGuidance: Boolean? = null,
 )
 
 /** `.isnavi` の navi_map.display_* に含まれる表示ヒント。 */
@@ -57,6 +58,7 @@ object NaviDisplayResolver {
             theme = patch.theme ?: defaults.THEME,
             stopNameVisible = patch.stopNameVisible ?: defaults.STOP_NAME_VISIBLE,
             leadMaxSec = defaults.clampLeadMaxSec(patch.leadMaxSec ?: defaults.LEAD_MAX_SEC),
+            voiceGuidance = patch.voiceGuidance ?: defaults.VOICE_GUIDANCE,
         )
     }
 }

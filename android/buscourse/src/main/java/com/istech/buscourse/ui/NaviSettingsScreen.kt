@@ -43,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +75,8 @@ import com.istech.buscourse.navimap.NaviSettingsDefaults
 import com.istech.buscourse.navimap.NaviSettingsEffective
 import com.istech.buscourse.navimap.NaviSettingsRepository
 import com.istech.buscourse.navimap.NaviTheme
+import com.istech.buscourse.guidance.NaviSpeechStatus
+import com.istech.buscourse.guidance.NaviSpeechGuide
 import com.istech.buscourse.BuildConfig
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -99,6 +103,11 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
     val context = LocalContext.current
     val repository = remember { NaviSettingsRepository(context) }
     val scope = rememberCoroutineScope()
+    val speechAvailable by NaviSpeechStatus.available.collectAsState()
+    DisposableEffect(Unit) {
+        val speechProbe = NaviSpeechGuide(context) { }
+        onDispose { speechProbe.close() }
+    }
 
     // 編集中（未保存）の値。初回のみDataStoreの現況（+製品既定へのprecedence解決）で種を撒き、
     // 以降はこの画面がユーザー操作に応じて直接更新する（保存はスライダーonValueChangeFinished／
@@ -114,6 +123,7 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
     var theme by remember { mutableStateOf(NaviSettingsDefaults.THEME) }
     var stopNameVisible by remember { mutableStateOf(NaviSettingsDefaults.STOP_NAME_VISIBLE) }
     var leadMaxSec by remember { mutableStateOf(NaviSettingsDefaults.LEAD_MAX_SEC) }
+    var voiceGuidance by remember { mutableStateOf(NaviSettingsDefaults.VOICE_GUIDANCE) }
 
     LaunchedEffect(Unit) {
         val effective = NaviDisplayResolver.resolve(repository.patchFlow.first(), hint = null)
@@ -127,6 +137,7 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
         theme = effective.theme
         stopNameVisible = effective.stopNameVisible
         leadMaxSec = effective.leadMaxSec
+        voiceGuidance = effective.voiceGuidance
     }
 
     val settings = NaviSettingsEffective(
@@ -140,6 +151,7 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
         theme = theme,
         stopNameVisible = stopNameVisible,
         leadMaxSec = leadMaxSec,
+        voiceGuidance = voiceGuidance,
     )
 
     fun moveSelfCarFwdBack(deltaPct: Int) {
@@ -258,6 +270,12 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
                         onLeadMaxSecChange = {
                             leadMaxSec = it
                             scope.launch { repository.setLeadMaxSec(it) }
+                        },
+                        voiceGuidance = voiceGuidance,
+                        voiceUnavailable = speechAvailable == false,
+                        onVoiceGuidanceChange = {
+                            voiceGuidance = it
+                            scope.launch { repository.setVoiceGuidance(it) }
                         },
                     )
                 }
@@ -932,6 +950,9 @@ private fun NaviDisplayCard(
     onStopNameVisibleChange: (Boolean) -> Unit,
     leadMaxSec: Double,
     onLeadMaxSecChange: (Double) -> Unit,
+    voiceGuidance: Boolean,
+    voiceUnavailable: Boolean,
+    onVoiceGuidanceChange: (Boolean) -> Unit,
 ) {
     // ★2026-07-29（オーナー指示）: 見出しを削って**1画面に収める**。
     // カード見出し「表示」はタブと重複。「地図の向き」「昼夜」は**ボタンの文字を読めば分かる**ので不要
@@ -975,6 +996,19 @@ private fun NaviDisplayCard(
             onSelect = onLeadMaxSecChange,
         )
         Text("時速60kmで最高値。遅いほど短くなる", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        NaviSegmentedToggle(
+            label = "声で案内する",
+            options = listOf(true to "オン", false to "オフ"),
+            selected = voiceGuidance,
+            onSelect = onVoiceGuidanceChange,
+        )
+        if (voiceUnavailable) {
+            Text(
+                "この端末では声が出せません。帯だけで案内します",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }
 

@@ -48,6 +48,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.graphics.Color.Companion.Yellow
 import androidx.core.content.ContextCompat
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.NaviSegmentEntity
@@ -63,6 +66,11 @@ import com.istech.buscourse.navimap.NaviRenderer
 import com.istech.buscourse.navimap.NaviSettingsPatch
 import com.istech.buscourse.navimap.NaviSettingsRepository
 import com.istech.buscourse.navimap.NaviSelfFix
+import com.istech.buscourse.navimap.NaviGuidanceCues
+import com.istech.buscourse.navimap.NaviGuidanceDispatcher
+import com.istech.buscourse.guidance.NaviSpeechGuide
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** navi_map セグメントの種別（TRACK区間のみ距離程に寄与、[ui.NaviScreen]・[navimap.NaviRenderer]と同じ扱い）。 */
 private const val TRACK_KIND = "TRACK"
@@ -101,6 +109,10 @@ fun NaviMainScreen(
     var trackPointsBySegmentId by remember(courseId) {
         mutableStateOf<Map<Long, List<NaviTrackPointEntity>>>(emptyMap())
     }
+    var guidanceCues by remember(courseId) { mutableStateOf<List<NaviGuidanceCues.Cue>>(emptyList()) }
+    var guidanceState by remember(courseId) { mutableStateOf(NaviGuidanceDispatcher.State()) }
+    var guidanceResult by remember(courseId) { mutableStateOf(NaviGuidanceDispatcher.Result(null, null, NaviGuidanceDispatcher.State())) }
+    var speechGuide by remember(courseId) { mutableStateOf<NaviSpeechGuide?>(null) }
     // 走行追従の状態（設計§5-1の3状態モデル。追従⇔プレビューの切替はNaviMainFollowStateの
     // 純関数で行う＝ロジックをComposableから追い出してテスト可能にする）。
     var followState by remember(courseId) { mutableStateOf(NaviMainFollowState()) }
@@ -126,12 +138,24 @@ fun NaviMainScreen(
         val loadedTrackPointsBySegmentId = loadedSegments
             .filter { it.kind == TRACK_KIND }
             .associate { segment -> segment.id to database.naviMapDao().getTrackPoints(segment.id).sortedBy { it.seq } }
+        val events = database.naviMapDao().getEvents(naviMap.id)
+        val loadedCues = withContext(Dispatchers.Default) {
+            val points = loadedSegments.filter { it.kind == TRACK_KIND }
+                .flatMap { segment -> loadedTrackPointsBySegmentId[segment.id].orEmpty() }
+                .sortedBy { it.chainageM }
+                .map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
+            val stops = events.filter { it.category.equals("stop", ignoreCase = true) }
+                .mapNotNull { it.chainageStartM }
+            NaviGuidanceCues.build(points, stops)
+        }
         maxChainageM = naviMainMaxChainageM(loadedSegments)
         // ★state更新は読み込みが揃った最後にまとめて行う（segments/trackPointsBySegmentIdがreadiness=Ready
         // と同時に確定していないと、GPS購読開始（readiness監視のDisposableEffect）が空の経路データで
         // 走ってしまう）。
         segments = loadedSegments
         trackPointsBySegmentId = loadedTrackPointsBySegmentId
+        guidanceCues = loadedCues
+        guidanceState = NaviGuidanceDispatcher.State()
         followState = NaviMainFollowState()
         readiness = NaviMainReadiness.Ready(
             naviMapId = naviMap.id,
@@ -159,6 +183,13 @@ fun NaviMainScreen(
     var followUnavailable by remember { mutableStateOf(false) }
 
     val isReady = readiness is NaviMainReadiness.Ready
+    DisposableEffect(isReady) {
+        if (isReady) speechGuide = NaviSpeechGuide(context) { }
+        onDispose {
+            speechGuide?.close()
+            speechGuide = null
+        }
+    }
     DisposableEffect(isReady, locationGranted) {
         if (!isReady || !locationGranted) {
             followUnavailable = !locationGranted
@@ -215,6 +246,21 @@ fun NaviMainScreen(
                 val patch by settingsRepository.patchFlow.collectAsState(initial = NaviSettingsPatch())
                 val settings = remember(patch, state.hint) { NaviDisplayResolver.resolve(patch, state.hint) }
 
+                LaunchedEffect(guidanceCues, followState.lastFixChainageM, followState.chainageM, followState.mode, followState.onCourse, patch.voiceGuidance, followUnavailable) {
+                    val result = NaviGuidanceDispatcher.update(
+                        cues = guidanceCues,
+                        state = guidanceState,
+                        displayChainageM = followState.chainageM.toDouble(),
+                        gpsChainageM = followState.lastFixChainageM?.toDouble(),
+                        following = followState.mode == NaviMainMode.FOLLOWING && !followUnavailable,
+                        onCourse = followState.onCourse,
+                        voiceEnabled = settings.voiceGuidance,
+                    )
+                    guidanceState = result.state
+                    guidanceResult = result
+                    result.speechText?.let { speechGuide?.speak(it) }
+                }
+
                 NaviRenderer(
                     source = NaviRenderSource.Real(state.naviMapId),
                     chainageM = followState.chainageM,
@@ -229,6 +275,13 @@ fun NaviMainScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
 
+                guidanceResult.bandText?.let { text ->
+                    NaviGuidanceBand(
+                        text = text,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                            .windowInsetsPadding(WindowInsets.statusBars).padding(start = 72.dp, end = 8.dp, top = 8.dp),
+                    )
+                }
                 // 現在地（追従復帰）ボタン。安全装置＝プレビューから抜け出す唯一の手段のため必ず置く。
                 // 追従中は押下不要なので控えめに、プレビュー中は目立たせる（判断の余地ありと明記された点）。
                 NaviMainRecenterButton(
@@ -387,6 +440,30 @@ private fun NaviMainUnavailable(reason: String, modifier: Modifier = Modifier) {
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+/** 画面上端の案内帯。設定画面のNaviRendererプレビューには使わない。 */
+@Composable
+private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
+    val annotated = buildAnnotatedString {
+        val match = Regex("\\d+m").find(text)
+        if (match == null) append(text) else {
+            append(text.substring(0, match.range.first))
+            withStyle(androidx.compose.ui.text.SpanStyle(color = Yellow)) { append(match.value) }
+            append(text.substring(match.range.last + 1))
+        }
+    }
+    Surface(modifier = modifier.fillMaxWidth(), color = Color(0xFF101B38).copy(alpha = 0.96f), shadowElevation = 4.dp) {
+        Text(
+            text = annotated,
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+        )
     }
 }
 

@@ -64,6 +64,7 @@ object NaviSettingsDefaults {
     val ORIENTATION = NaviMapOrientation.HEADING_UP
     val THEME = NaviTheme.NIGHT
     const val STOP_NAME_VISIBLE = true
+    const val VOICE_GUIDANCE = true
     const val LEAD_MAX_SEC = 5.0
     val LEAD_MAX_SEC_OPTIONS = listOf(0.0, 2.0, 3.0, 5.0, 8.0, 10.0)
     fun clampLeadMaxSec(value: Double): Double = value.takeIf { it in LEAD_MAX_SEC_OPTIONS } ?: LEAD_MAX_SEC
@@ -106,4 +107,5 @@ data class NaviSettingsEffective(
     val theme: NaviTheme,
     val stopNameVisible: Boolean,
     val leadMaxSec: Double = NaviSettingsDefaults.LEAD_MAX_SEC,
+    val voiceGuidance: Boolean = NaviSettingsDefaults.VOICE_GUIDANCE,
 )
