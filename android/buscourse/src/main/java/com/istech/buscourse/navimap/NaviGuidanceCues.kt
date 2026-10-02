@@ -7,7 +7,8 @@ object NaviGuidanceCues {
     const val TURN_WIN_M = 25.0
     const val TURN_MIN_DEG = 55.0
     const val TURN_MIN_LEG_M = 8.0
-    const val START_SKIP_M = 150.0
+    // 車庫を出るロータリーの中の動き（15m・57m 付近）だけを外す。150m では、出発して最初の本物の曲がり角（約130m の信号の右折）まで消えていた（オーナー実車指摘）。
+    const val START_SKIP_M = 70.0
     const val TURN_PRE_S = 12.0
     const val TURN_NEAR_S = 4.0
     const val STOP_PRE_S = 20.0
@@ -62,14 +63,14 @@ object NaviGuidanceCues {
         var c = TURN_WIN_M
         val end = points.last().chainageM - TURN_WIN_M
         while (c <= end) {
-            val change = turnAt(points, c)
+            val change = turnAt(points, c, TURN_WIN_M)
             if (change == null) { c += TURN_SCAN_STEP_M; continue }
             if (abs(change) >= TURN_MIN_DEG) {
                 var bestC = c
                 var bestChange: Double = change
                 var probe = c - 10.0
                 while (probe <= c + 10.0) {
-                    val candidate = turnAt(points, probe)
+                    val candidate = turnAt(points, probe, TURN_WIN_M)
                     if (candidate != null && abs(candidate) > abs(bestChange)) { bestC = probe; bestChange = candidate }
                     probe += TURN_SCAN_STEP_M
                 }
@@ -77,7 +78,8 @@ object NaviGuidanceCues {
                 val corner = pointAtOrAfter(points, bestC)
                 val after = pointAtOrAfter(points, bestC + TURN_WIN_M)
                 val shortLeg = min(distanceM(corner, before), distanceM(corner, after))
-                if (bestC >= START_SKIP_M && shortLeg >= TURN_MIN_LEG_M) turns += bestC to kind(bestChange)
+                val change50 = turnAt(points, bestC, TURN_WIN_M * 2.0) ?: bestChange
+                if (bestC >= START_SKIP_M && shortLeg >= TURN_MIN_LEG_M) turns += bestC to classifyTurn(bestChange, change50)
                 c = bestC + TURN_SKIP_AFTER_M
             } else c += TURN_SCAN_STEP_M
         }
@@ -160,9 +162,15 @@ object NaviGuidanceCues {
     }
 
     private fun regularPre(kind: Kind, distance: Double) = if (kind == Kind.STOP) "この先、停留所です。" else "${rounded(distance)}メートル先、${kind.phrase()}です。"
-    private fun kind(change: Double): Kind = when { abs(change) >= 150 -> Kind.U_TURN; change > 0 && abs(change) >= 70 -> Kind.RIGHT; change < 0 && abs(change) >= 70 -> Kind.LEFT; change > 0 -> Kind.SLIGHT_RIGHT; else -> Kind.SLIGHT_LEFT }
-    private fun turnAt(points: List<TrackPoint>, c: Double): Double? {
-        val before = pointAtOrAfter(points, c - TURN_WIN_M); val center = pointAtOrAfter(points, c); val after = pointAtOrAfter(points, c + TURN_WIN_M)
+    // 角の丸みで25m幅だと小さく出る（一方通行への右折が60°で「やや右」になっていた）。映像で確かめた本物の右左折7か所は d50 がすべて50°以上、車線をずらすだけの動き3か所は38〜44°。
+    internal fun classifyTurn(d25: Double, d50: Double): Kind = when {
+        abs(d25) >= 150 -> Kind.U_TURN
+        abs(d25) >= 70 || abs(d50) >= 50 -> if (d25 > 0) Kind.RIGHT else Kind.LEFT
+        d25 > 0 -> Kind.SLIGHT_RIGHT
+        else -> Kind.SLIGHT_LEFT
+    }
+    private fun turnAt(points: List<TrackPoint>, c: Double, windowM: Double): Double? {
+        val before = pointAtOrAfter(points, c - windowM); val center = pointAtOrAfter(points, c); val after = pointAtOrAfter(points, c + windowM)
         if (before == null || center == null || after == null) return null
         return normalize(bearing(center, after) - bearing(before, center))
     }

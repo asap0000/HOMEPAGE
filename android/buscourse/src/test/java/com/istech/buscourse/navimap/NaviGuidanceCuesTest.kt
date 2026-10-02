@@ -21,11 +21,25 @@ class NaviGuidanceCuesTest {
     @Test fun skipsCourseStartStopsAndTurnsAndAppliesSpeedClamps() {
         val straight = route()
         val cues = NaviGuidanceCues.build(straight, listOf(100.0, 250.0, 800.0))
-        assertThat(cues.none { it.chainageM < 150.0 }).isTrue()
-        assertThat(NaviGuidanceCues.build(route(turnAt = 100.0), listOf(100.0))).isEmpty()
+        assertThat(cues.none { it.chainageM < NaviGuidanceCues.START_SKIP_M }).isTrue()
+        assertThat(NaviGuidanceCues.build(route(turnAt = 60.0), listOf(60.0))).isEmpty()
         val stop = cues.single { it.kind == NaviGuidanceCues.Kind.STOP && it.chainageM == 800.0 }
         assertThat(stop.preDistanceM).isWithin(1.0).of(111.0)
         assertThat(stop.preText).isEqualTo("この先、停留所です。")
+    }
+
+    @Test fun startSkipIs70mAndTurnKindUsesBothMeasurementWidths() {
+        assertThat(NaviGuidanceCues.START_SKIP_M).isEqualTo(70.0)
+        assertThat(NaviGuidanceCues.build(route(turnAt = 60.0), emptyList())).isEmpty()
+        val turnAt80m = NaviGuidanceCues.build(route(turnAt = 80.0), emptyList()).single()
+        assertThat(turnAt80m.chainageM).isWithin(4.0).of(80.0)
+
+        assertThat(NaviGuidanceCues.classifyTurn(d25 = 60.0, d50 = 70.0))
+            .isEqualTo(NaviGuidanceCues.Kind.RIGHT)
+        assertThat(NaviGuidanceCues.classifyTurn(d25 = 60.0, d50 = 40.0))
+            .isEqualTo(NaviGuidanceCues.Kind.SLIGHT_RIGHT)
+        assertThat(NaviGuidanceCues.classifyTurn(d25 = -60.0, d50 = -70.0))
+            .isEqualTo(NaviGuidanceCues.Kind.LEFT)
     }
 
     @Test fun mergesAndGeneratesFollowOnText() {

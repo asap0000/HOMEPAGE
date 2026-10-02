@@ -44,7 +44,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,7 +74,6 @@ import com.istech.buscourse.navimap.NaviSettingsDefaults
 import com.istech.buscourse.navimap.NaviSettingsEffective
 import com.istech.buscourse.navimap.NaviSettingsRepository
 import com.istech.buscourse.navimap.NaviTheme
-import com.istech.buscourse.guidance.NaviSpeechStatus
 import com.istech.buscourse.guidance.NaviSpeechGuide
 import com.istech.buscourse.BuildConfig
 import kotlinx.coroutines.flow.first
@@ -103,11 +101,7 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
     val context = LocalContext.current
     val repository = remember { NaviSettingsRepository(context) }
     val scope = rememberCoroutineScope()
-    val speechAvailable by NaviSpeechStatus.available.collectAsState()
-    DisposableEffect(Unit) {
-        val speechProbe = NaviSpeechGuide(context) { }
-        onDispose { speechProbe.close() }
-    }
+    var speechAvailable by remember { mutableStateOf<Boolean?>(null) }
 
     // 編集中（未保存）の値。初回のみDataStoreの現況（+製品既定へのprecedence解決）で種を撒き、
     // 以降はこの画面がユーザー操作に応じて直接更新する（保存はスライダーonValueChangeFinished／
@@ -124,6 +118,26 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
     var stopNameVisible by remember { mutableStateOf(NaviSettingsDefaults.STOP_NAME_VISIBLE) }
     var leadMaxSec by remember { mutableStateOf(NaviSettingsDefaults.LEAD_MAX_SEC) }
     var voiceGuidance by remember { mutableStateOf(NaviSettingsDefaults.VOICE_GUIDANCE) }
+    var speechGuide by remember { mutableStateOf<NaviSpeechGuide?>(null) }
+    var pendingVoiceConfirmation by remember { mutableStateOf(false) }
+
+    DisposableEffect(context) {
+        val guide = NaviSpeechGuide(context) { available ->
+            speechAvailable = available
+            if (!available) {
+                pendingVoiceConfirmation = false
+            } else if (pendingVoiceConfirmation) {
+                pendingVoiceConfirmation = false
+                if (voiceGuidance) speechGuide?.speak("声で案内します")
+            }
+        }
+        speechGuide = guide
+        onDispose {
+            pendingVoiceConfirmation = false
+            speechGuide = null
+            guide.close()
+        }
+    }
 
     LaunchedEffect(Unit) {
         val effective = NaviDisplayResolver.resolve(repository.patchFlow.first(), hint = null)
@@ -274,7 +288,19 @@ fun NaviSettingsScreen(onBack: () -> Unit, onOpenDistributionExport: () -> Unit 
                         voiceGuidance = voiceGuidance,
                         voiceUnavailable = speechAvailable == false,
                         onVoiceGuidanceChange = {
+                            // ★先に「前はオフだったか」を控える。値を先に書き換えると条件が常に偽になり、
+                            // 「声で案内します」が一度も鳴らなかった（OPPO 実機の検分で発見・2026-10-02）。
+                            val turnedOn = it && !voiceGuidance
                             voiceGuidance = it
+                            if (turnedOn) {
+                                when (speechAvailable) {
+                                    true -> speechGuide?.speak("声で案内します")
+                                    null -> pendingVoiceConfirmation = true
+                                    false -> pendingVoiceConfirmation = false
+                                }
+                            } else {
+                                pendingVoiceConfirmation = false
+                            }
                             scope.launch { repository.setVoiceGuidance(it) }
                         },
                     )

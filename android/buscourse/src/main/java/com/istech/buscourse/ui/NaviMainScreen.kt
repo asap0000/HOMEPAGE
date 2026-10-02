@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -229,18 +230,24 @@ fun NaviMainScreen(
         onDispose { if (started) source.stop() }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        when (val state = readiness) {
-            NaviMainReadiness.Loading -> Unit
-            NaviMainReadiness.IdentityMissing -> NaviMainUnavailable(
-                reason = "このコースはバス・コース番号・年度が未設定のためナビできません。",
-                modifier = Modifier.fillMaxSize(),
-            )
-            NaviMainReadiness.MapNotGenerated -> NaviMainUnavailable(
-                reason = "このコースのナビ用マップがまだ生成されていません。コース編集の「ナビ用に送る」から送ってください。",
-                modifier = Modifier.fillMaxSize(),
-            )
-            is NaviMainReadiness.Ready -> {
+    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        NaviGuidanceBand(
+            text = guidanceResult.bandText ?: "この先の案内はありません",
+            onBack = onBack,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+        )
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            when (val state = readiness) {
+                NaviMainReadiness.Loading -> Unit
+                NaviMainReadiness.IdentityMissing -> NaviMainUnavailable(
+                    reason = "このコースはバス・コース番号・年度が未設定のためナビできません。",
+                    modifier = Modifier.fillMaxSize(),
+                )
+                NaviMainReadiness.MapNotGenerated -> NaviMainUnavailable(
+                    reason = "このコースのナビ用マップがまだ生成されていません。コース編集の「ナビ用に送る」から送ってください。",
+                    modifier = Modifier.fillMaxSize(),
+                )
+                is NaviMainReadiness.Ready -> {
                 // precedence＝運転者設定 ＞ .isnavi既定（naviMap.display_*）＞ 製品既定（NaviDisplayResolver）。
                 // patchFlowを購読するため、設定画面での変更が本画面へ即反映される。
                 val patch by settingsRepository.patchFlow.collectAsState(initial = NaviSettingsPatch())
@@ -275,13 +282,6 @@ fun NaviMainScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
 
-                guidanceResult.bandText?.let { text ->
-                    NaviGuidanceBand(
-                        text = text,
-                        modifier = Modifier.align(Alignment.TopCenter)
-                            .windowInsetsPadding(WindowInsets.statusBars).padding(start = 72.dp, end = 8.dp, top = 8.dp),
-                    )
-                }
                 // 現在地（追従復帰）ボタン。安全装置＝プレビューから抜け出す唯一の手段のため必ず置く。
                 // 追従中は押下不要なので控えめに、プレビュー中は目立たせる（判断の余地ありと明記された点）。
                 NaviMainRecenterButton(
@@ -297,32 +297,21 @@ fun NaviMainScreen(
                             resetZoomSignal += 1
                         }
                     },
-                    modifier = Modifier.align(Alignment.BottomEnd)
-                        .windowInsetsPadding(WindowInsets.navigationBars)
-                        .padding(end = 16.dp, bottom = 96.dp),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 8.dp),
                 )
-
-                NaviMainChainageBar(
-                    chainageM = followState.chainageM,
-                    maxChainageM = maxChainageM,
-                    mode = followState.mode,
-                    followUnavailable = followUnavailable,
-                    onChainageChange = { followState = naviMainEnterPreview(followState, it) },
-                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars),
-                )
+                }
             }
         }
-
-        // 全画面描画の上に浮かべる戻るボタン（本画面はTopAppBarを持たない＝NaviRendererを完全に
-        // 全画面表示するため）。地図/映像どちらの背景でも視認できるよう、常に暗い円背景を敷く。
-        // 実機OPPOでステータスバーに埋もれて押せなかった実バグの再発防止＝statusBarsインセットを敷く。
-        NaviMainBackButton(
-            onBack = onBack,
-            modifier = Modifier.align(Alignment.TopStart)
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .padding(16.dp),
-        )
+        if (readiness is NaviMainReadiness.Ready) {
+            NaviMainChainageBar(
+                chainageM = followState.chainageM,
+                maxChainageM = maxChainageM,
+                mode = followState.mode,
+                followUnavailable = followUnavailable,
+                onChainageChange = { followState = naviMainEnterPreview(followState, it) },
+                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars),
+            )
+        }
     }
 }
 
@@ -443,9 +432,9 @@ private fun NaviMainUnavailable(reason: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** 画面上端の案内帯。設定画面のNaviRendererプレビューには使わない。 */
+/** 画面上端の常設案内行。設定画面のNaviRendererプレビューには使わない。 */
 @Composable
-private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
+private fun NaviGuidanceBand(text: String, onBack: () -> Unit, modifier: Modifier = Modifier) {
     val annotated = buildAnnotatedString {
         val match = Regex("\\d+m").find(text)
         if (match == null) append(text) else {
@@ -454,16 +443,21 @@ private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
             append(text.substring(match.range.last + 1))
         }
     }
-    Surface(modifier = modifier.fillMaxWidth(), color = Color(0xFF101B38).copy(alpha = 0.96f), shadowElevation = 4.dp) {
-        Text(
-            text = annotated,
-            color = Color.White,
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-        )
+    Surface(modifier = modifier.fillMaxWidth(), color = Color(0xFF101B38), shadowElevation = 4.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.size(52.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る", tint = Color.White)
+            }
+            Text(
+                text = annotated,
+                color = if (text == "この先の案内はありません") Color.White.copy(alpha = 0.62f) else Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(end = 12.dp),
+            )
+        }
     }
 }
 
@@ -497,7 +491,7 @@ private fun NaviMainChainageBar(
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -531,22 +525,8 @@ private fun NaviMainChainageBar(
                 value = chainageM,
                 onValueChange = onChainageChange,
                 valueRange = 0f..maxOf(maxChainageM, 0f),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).height(32.dp),
             )
-        }
-    }
-}
-
-/** 全画面描画の上に浮かべる戻るボタン（実ナビアプリの浮動戻る矢印相当。地図/映像どちらの上でも視認できる暗い円背景）。 */
-@Composable
-private fun NaviMainBackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier,
-        shape = CircleShape,
-        color = Color.Black.copy(alpha = 0.35f),
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る", tint = Color.White)
         }
     }
 }
