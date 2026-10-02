@@ -17,7 +17,7 @@ class BackupInventoryTest {
 
     @Test
     fun `includes stopcards sessions segments comparisons with non-blank reasons`() {
-        for (topDir in listOf("stopcards", "sessions", "segments", "comparisons")) {
+        for (topDir in listOf("stopcards", "sessions", "segments", "comparisons", "naviruns")) {
             val decision = BackupInventory.classifyBusCourseRelPath("$topDir/17/foo.jpg")
             assertThat(decision.include).isTrue()
             assertThat(decision.reason).isNotEmpty()
@@ -84,12 +84,13 @@ class BackupInventoryTest {
         val root = tempFolder.newFolder("buscourse")
         writeFile(root, "stopcards/1/photo_orig.jpg")
         writeFile(root, "sessions/1/meta.json")
+        writeFile(root, "naviruns/1.jsonl")
         writeFile(root, "maps/region/tiles/region.mbtiles")
         writeFile(root, "exports/old.gpx")
 
         val included = BackupInventory.listIncludedFiles(root).map { it.relativeTo(root).path.replace(File.separatorChar, '/') }
 
-        assertThat(included).containsExactly("stopcards/1/photo_orig.jpg", "sessions/1/meta.json")
+        assertThat(included).containsExactly("stopcards/1/photo_orig.jpg", "sessions/1/meta.json", "naviruns/1.jsonl")
     }
 
     @Test

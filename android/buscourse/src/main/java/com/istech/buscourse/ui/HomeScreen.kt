@@ -75,6 +75,7 @@ fun HomeScreen(
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
     onOpenBackupRestore: () -> Unit,
+    onOpenNaviRuns: () -> Unit = {},
 ) {
     var showExportRun by remember { mutableStateOf(false) }
     BackHandler(enabled = showExportRun) { showExportRun = false }
@@ -168,6 +169,12 @@ fun HomeScreen(
                 title = "EX用書き出し",
                 description = "選んだ走行を、EXで読める1つの.isrunファイルに書き出します",
                 onClick = { showExportRun = true },
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.Route,
+                title = "ナビの走った跡",
+                description = "全部入りのナビで走った回と、コースを外れた所を見ます",
+                onClick = onOpenNaviRuns,
             )
         }
     }

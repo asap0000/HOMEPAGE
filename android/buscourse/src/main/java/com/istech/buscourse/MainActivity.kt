@@ -24,6 +24,7 @@ import com.istech.buscourse.ui.NaviMainScreen
 import com.istech.buscourse.ui.NaviCoursePickScreen
 import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.NaviSettingsScreen
+import com.istech.buscourse.ui.NaviRunListScreen
 import com.istech.buscourse.ui.RecordingScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
@@ -98,6 +99,7 @@ private object Routes {
     // 速度マップ（トップダウン創設 S4「速度ヒート地図レイヤ」、設計ドラフトv2§6、2026-07-18追加）。
     // コース創設前の生セッション単体を対象にするため courses/{id} 系ではなく sessions/{id} 系にする。
     const val SPEED_MAP = "sessions/{sessionId}/speedmap"
+    const val NAVI_RUNS = "navi-runs"
     fun stopCardEdit(id: Long) = "stopcards/$id"
     fun stopCardRetake(id: Long) = "stopcards/$id/retake"
     fun courseDetail(id: Long) = "courses/$id"
@@ -164,7 +166,11 @@ private fun AppNavHost() {
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
                 onOpenBackupRestore = { navController.navigate(Routes.BACKUP_RESTORE) },
+                onOpenNaviRuns = { navController.navigate(Routes.NAVI_RUNS) },
             )
+        }
+        composable(Routes.NAVI_RUNS) {
+            NaviRunListScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.BACKUP_RESTORE) {
             BackupRestoreScreen(onBack = { navController.popBackStack() })

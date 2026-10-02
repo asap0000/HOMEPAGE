@@ -24,6 +24,7 @@ object BackupInventory {
     private val DB = Category("db/buscourse.db(+wal/shm)", "Room DB本体。すべての索引（3点セット必須。取りこぼすと古い状態を読む）")
     private val STOPCARDS = Category("files/buscourse/stopcards/**", "停留所カードの写真・音声（撮り直せない）")
     private val SESSIONS = Category("files/buscourse/sessions/**", "走行記録（走り直せない。総量の大半を占める）")
+    private val NAVI_RUNS = Category("files/buscourse/naviruns/**", "ナビの走った跡（走り直せない。B の撮り直しの材料）")
     private val SEGMENTS = Category("files/buscourse/segments/**", "区間軌跡GPX（地図描画・プランナーEXへの一次素材）")
     private val COMPARISONS = Category("files/buscourse/comparisons/**", "試走比較の残骸（v14でテーブルはdrop済み。小さいため同梱し判断を後回しにする、未決2）")
     private val NAVI_SETTINGS = Category("files/datastore/navi_settings.preferences_pb", "映像ナビ設定（作り直すのが面倒）")
@@ -43,7 +44,7 @@ object BackupInventory {
 
     /** manifest.json「含めたもの」の一覧（表示用）。 */
     val INCLUDED_CATEGORIES: List<Category> =
-        listOf(DB, STOPCARDS, SESSIONS, SEGMENTS, COMPARISONS, NAVI_SETTINGS, NAVI_COURSE_VISIBILITY)
+        listOf(DB, STOPCARDS, SESSIONS, NAVI_RUNS, SEGMENTS, COMPARISONS, NAVI_SETTINGS, NAVI_COURSE_VISIBILITY)
 
     /** manifest.json「除いたもの」の一覧（理由つき、表示用）。 */
     val EXCLUDED_CATEGORIES: List<Category> = listOf(MAPS, RECORDING_STATE, EXPORTS, BACKUP_STATE)
@@ -58,6 +59,7 @@ object BackupInventory {
         return when (topDir) {
             "stopcards" -> InventoryDecision(true, STOPCARDS.reason)
             "sessions" -> InventoryDecision(true, SESSIONS.reason)
+            "naviruns" -> InventoryDecision(true, NAVI_RUNS.reason)
             "segments" -> InventoryDecision(true, SEGMENTS.reason)
             "comparisons" -> InventoryDecision(true, COMPARISONS.reason)
             "maps" -> InventoryDecision(false, MAPS.reason)

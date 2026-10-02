@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExploreOff
 import androidx.compose.material.icons.filled.GpsOff
 import androidx.compose.material.icons.filled.MyLocation
@@ -45,9 +45,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -60,6 +62,11 @@ import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.navimap.NaviDisplayResolver
 import com.istech.buscourse.navimap.NaviFollow
+import com.istech.buscourse.navimap.NaviRunLog
+import com.istech.buscourse.navimap.NaviRunWriter
+import com.istech.buscourse.BuildConfig
+import com.istech.buscourse.core.data.BusCourseStorage
+import java.io.File
 import com.istech.buscourse.navimap.NaviMapDisplayHint
 import com.istech.buscourse.navimap.NaviMapRepository
 import com.istech.buscourse.navimap.NaviRenderSource
@@ -161,6 +168,7 @@ fun NaviMainScreen(
         readiness = NaviMainReadiness.Ready(
             naviMapId = naviMap.id,
             hint = NaviMapDisplayHint(orientation = naviMap.displayOrientation, pitchDeg = naviMap.displayPitchDeg),
+            busId = identity.busId, courseNo = identity.courseNo, year = identity.year,
         )
     }
 
@@ -184,6 +192,38 @@ fun NaviMainScreen(
     var followUnavailable by remember { mutableStateOf(false) }
 
     val isReady = readiness is NaviMainReadiness.Ready
+    // 回廊（250m）の判定に使うコースの線。ナビの当てはめは 150m より外で答えを返さないので別に測る。
+    val corridorRoute = remember(segments, trackPointsBySegmentId) {
+        segments.filter { it.kind == TRACK_KIND }
+            .flatMap { segment -> trackPointsBySegmentId[segment.id].orEmpty() }
+            .sortedBy { it.chainageM }
+            .map { it.lat to it.lon }
+    }
+    // ナビの走った跡（B の1歩目・全部入りだけ。ナビ専科では残さない）。画面を開いてから閉じるまでが1回。
+    val runWriter = remember(isReady, courseId) {
+        val ready = readiness as? NaviMainReadiness.Ready
+        if (ready == null || BuildConfig.NAVI_ONLY) {
+            null
+        } else {
+            val startedAtMs = System.currentTimeMillis()
+            val dir = File(BusCourseStorage.root(context), BusCourseStorage.DIR_NAVI_RUNS)
+            NaviRunWriter(
+                body = File(dir, "$startedAtMs${NaviRunLog.BODY_SUFFIX}"),
+                header = NaviRunLog.Header(
+                    startedAtMs = startedAtMs,
+                    busId = ready.busId,
+                    courseNo = ready.courseNo,
+                    year = ready.year,
+                    naviMapId = ready.naviMapId,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    offEnterM = OFF_COURSE_ENTER_M,
+                    offExitM = OFF_COURSE_EXIT_M,
+                ),
+                onError = { android.util.Log.w("NaviRunLog", "走った跡を書けませんでした（ナビは続ける）", it) },
+            )
+        }
+    }
+    DisposableEffect(runWriter) { onDispose { runWriter?.close() } }
     DisposableEffect(isReady) {
         if (isReady) speechGuide = NaviSpeechGuide(context) { }
         onDispose {
@@ -217,6 +257,22 @@ fun NaviMainScreen(
                         fix = fix,
                         fixElapsedRealtimeMs = location.elapsedRealtimeNanos / 1_000_000,
                     )
+                    runWriter?.onFix(
+                        NaviRunLog.Fix(
+                            timeMs = location.time,
+                            lat = location.latitude,
+                            lon = location.longitude,
+                            accuracyM = location.accuracy.takeIf { location.hasAccuracy() },
+                            speedMps = location.speed.takeIf { location.hasSpeed() },
+                            bearingDeg = location.bearing.takeIf { location.hasBearing() },
+                            chainageM = fix?.chainageM,
+                            lateralOffsetM = fix?.lateralOffsetM,
+                            onCourse = followState.onCourse,
+                            following = followState.mode == NaviMainMode.FOLLOWING,
+                            inCorridor = fix != null ||
+                                NaviRunLog.isWithinRoute(location.latitude, location.longitude, corridorRoute),
+                        ),
+                    )
                 },
                 onProviderDisabled = { followUnavailable = true },
                 onProviderEnabled = { followUnavailable = false },
@@ -233,7 +289,6 @@ fun NaviMainScreen(
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
         NaviGuidanceBand(
             text = guidanceResult.bandText ?: "この先の案内はありません",
-            onBack = onBack,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         )
         Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -304,11 +359,16 @@ fun NaviMainScreen(
         }
         if (readiness is NaviMainReadiness.Ready) {
             NaviMainChainageBar(
+                onBack = onBack,
                 chainageM = followState.chainageM,
                 maxChainageM = maxChainageM,
-                mode = followState.mode,
-                followUnavailable = followUnavailable,
                 onChainageChange = { followState = naviMainEnterPreview(followState, it) },
+                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars),
+            )
+        } else {
+            // 読み込み中・ナビできない画面でも × で戻れるように（帯の「←」を外したため）。
+            NaviMainChainageBar(
+                onBack = onBack,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars),
             )
         }
@@ -401,7 +461,7 @@ private sealed interface NaviMainReadiness {
     data object MapNotGenerated : NaviMainReadiness
 
     /** navi_mapが解決できた＝[NaviRenderer]を描画してよい。 */
-    data class Ready(val naviMapId: Long, val hint: NaviMapDisplayHint) : NaviMainReadiness
+    data class Ready(val naviMapId: Long, val hint: NaviMapDisplayHint, val busId: String, val courseNo: Int, val year: Int) : NaviMainReadiness
 }
 
 /**
@@ -434,7 +494,7 @@ private fun NaviMainUnavailable(reason: String, modifier: Modifier = Modifier) {
 
 /** 画面上端の常設案内行。設定画面のNaviRendererプレビューには使わない。 */
 @Composable
-private fun NaviGuidanceBand(text: String, onBack: () -> Unit, modifier: Modifier = Modifier) {
+private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
     val annotated = buildAnnotatedString {
         val match = Regex("\\d+m").find(text)
         if (match == null) append(text) else {
@@ -445,9 +505,6 @@ private fun NaviGuidanceBand(text: String, onBack: () -> Unit, modifier: Modifie
     }
     Surface(modifier = modifier.fillMaxWidth(), color = Color(0xFF101B38), shadowElevation = 4.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(52.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る", tint = Color.White)
-            }
             Text(
                 text = annotated,
                 color = if (text == "この先の案内はありません") Color.White.copy(alpha = 0.62f) else Color.White,
@@ -455,35 +512,29 @@ private fun NaviGuidanceBand(text: String, onBack: () -> Unit, modifier: Modifie
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(end = 12.dp),
+                modifier = Modifier.weight(1f).padding(start = 16.dp, end = 12.dp),
             )
         }
     }
 }
 
-/** 距離程ラベルの固定幅（設計§3-2：桁数が変わってもレイアウトが動かないよう固定する）。 */
-private val CHAINAGE_LABEL_WIDTH = 96.dp
-
-/** 追従/プレビューの状態バッジの固定幅（"追従"/"手動"、いずれも2文字＝桁数変化でズレない）。 */
-private val MODE_BADGE_WIDTH = 40.dp
-
 /**
- * 画面下部の距離スライダー（本画面唯一の操作子・設計§7-1「D-padは出さない」）。数値表示は
- * [CHAINAGE_LABEL_WIDTH]の固定幅・等幅フォント・1行固定にし、桁数変化でパネル高/幅が動いて
- * 地図がぶれることを防ぐ（設計§3-2、オーナーが実機で見つけた実バグの再発防止）。縦横どちらでも
- * 単純な横並びRowのため、[NaviRenderer]の縦横分岐（映像の置き方）とは独立して破綻しない。
+ * 画面下部の列（本画面唯一の操作子・設計§7-1「D-padは出さない」）。並び＝［×（ナビをやめる）］［距離の表示］［距離スライダー］。
  *
- * [mode]/[followUnavailable]は追従⇔プレビューの状態表示（設計§5-1）。バッジも
- * [MODE_BADGE_WIDTH]固定幅にし、追従⇔手動の切替でHUDが動かないようにする。
+ * - **×**: 2026-10-02 オーナー承認（案A）。帯の左にあった「←」が道標の矢印と紛れるため、案内の帯から外してここへ置く
+ *   （方向を表さない形・Google マップの案内中と同じ位置）。ナビできない画面（[chainageM] 等が無い）でも × だけは出す。
+ * - **距離の表示**: 等幅・1行・幅固定（桁数変化で列が動いて地図がぶれるのを防ぐ・設計§3-2）。幅は決め打ちをやめ、
+ *   **そのコースの全行程で作った最も長い文字列を実際の文字の大きさで測った幅**にする（22km のコースで 96dp から
+ *   はみ出していた・オーナー実機指摘 2026-10-02。端末の文字サイズを大きくしても切れない）。
+ * - 「追従／手動」の表示は消した（オーナー指示。手動のときは現在地ボタンが目立つ形に変わる）。
  */
 @Composable
 private fun NaviMainChainageBar(
-    chainageM: Float,
-    maxChainageM: Float,
-    mode: NaviMainMode,
-    followUnavailable: Boolean,
-    onChainageChange: (Float) -> Unit,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    chainageM: Float? = null,
+    maxChainageM: Float = 0f,
+    onChainageChange: (Float) -> Unit = {},
 ) {
     Surface(
         modifier = modifier,
@@ -491,45 +542,44 @@ private fun NaviMainChainageBar(
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            modifier = Modifier.padding(start = 4.dp, end = 16.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // GPS利用不可時は追従状態そのものが成立しない（GPS fixが来ないため）ので常に「手動」表示。
-            val badgeLabel = if (followUnavailable) "手動" else if (mode == NaviMainMode.FOLLOWING) "追従" else "手動"
-            val badgeColor = if (followUnavailable || mode == NaviMainMode.PREVIEW) {
-                MaterialTheme.colorScheme.tertiary
-            } else {
-                MaterialTheme.colorScheme.primary
+            IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = "ナビをやめる")
             }
-            Text(
-                badgeLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = badgeColor,
-                maxLines = 1,
-                softWrap = false,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(MODE_BADGE_WIDTH),
-            )
-            Text(
-                "${chainageM.toInt()}m / ${maxChainageM.toInt()}m",
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.End,
-                modifier = Modifier.width(CHAINAGE_LABEL_WIDTH),
-            )
-            Slider(
-                value = chainageM,
-                onValueChange = onChainageChange,
-                valueRange = 0f..maxOf(maxChainageM, 0f),
-                modifier = Modifier.weight(1f).height(32.dp),
-            )
+            if (chainageM != null && maxChainageM > 0f) {
+                val labelStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                val measurer = rememberTextMeasurer()
+                val density = LocalDensity.current
+                val longestLabel = naviMainChainageLabel(maxChainageM, maxChainageM)
+                val labelWidth = remember(longestLabel, labelStyle, density) {
+                    // 測った幅ちょうどだと丸めで最後の1文字が切れることがあるので 2dp の余裕を足す。
+                    with(density) { measurer.measure(longestLabel, labelStyle).size.width.toDp() } + 2.dp
+                }
+                Text(
+                    naviMainChainageLabel(chainageM, maxChainageM),
+                    style = labelStyle,
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.width(labelWidth),
+                )
+                Slider(
+                    value = chainageM,
+                    onValueChange = onChainageChange,
+                    valueRange = 0f..maxChainageM,
+                    modifier = Modifier.weight(1f).height(32.dp),
+                )
+            }
         }
     }
 }
+
+/** 距離の表示の文字列（「1234m / 21876m」）。 */
+internal fun naviMainChainageLabel(chainageM: Float, maxChainageM: Float): String =
+    "${chainageM.toInt()}m / ${maxChainageM.toInt()}m"
 
 /**
  * 現在地（追従復帰）ボタン（設計§5-1「必須UI＝現在地ボタン」）。プレビューから抜け出す唯一の手段
