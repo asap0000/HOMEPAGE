@@ -36,6 +36,7 @@ android {
         // :app と同様、配布ビルドでは CI が VERSION_CODE / VERSION_NAME を注入する想定。
         versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = System.getenv("VERSION_NAME") ?: "0.0-dev"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -169,6 +170,13 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    testBuildType = "kensa"
+
+    sourceSets {
+        getByName("test").java.srcDir("src/sharedTest/java")
+        getByName("androidTest").java.srcDir("src/sharedTest/java")
+    }
 }
 
 dependencies {
@@ -245,4 +253,12 @@ dependencies {
     testImplementation(libs.androidx.test.core.ktx)
     testImplementation(libs.truth)
     testImplementation(libs.androidx.room.testing)
+
+    // Instrumentation dependencies stay out of every application APK.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.core.ktx)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.truth)
 }
