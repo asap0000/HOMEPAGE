@@ -6,7 +6,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onFirst
-import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.printToLog
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -28,14 +28,23 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
+import org.junit.rules.RuleChain
+import org.junit.rules.Timeout
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class RecordingToNaviE2ETest {
-    @get:Rule
     val composeRule = createEmptyComposeRule()
+
+    /**
+     * 試験全体の時間切れ（検査場の指摘 2026-10-03: 無いと止まったとき永久に終わらず、無人の検査で致命的）。
+     * 通常は OPPO で約15秒・仮想の端末で 35〜110秒。止まった回は検査場の道具が画面・スタックを取ってから打ち切る（既定7分）ので、
+     * それより短い 5分で試験の側から落とす。
+     */
+    @get:Rule
+    val rules: RuleChain = RuleChain.outerRule(Timeout.seconds(300)).around(composeRule)
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val app: BusCourseApplication get() = context.applicationContext as BusCourseApplication
@@ -118,9 +127,9 @@ class RecordingToNaviE2ETest {
             useUnmergedTree = true,
         )
         try {
-            composeRule.waitUntil(10_000) { sliders().fetchSemanticsNodes().isNotEmpty() }
+            composeRule.waitUntil(10_000) { exists { sliders() } }
         } catch (e: Throwable) {
-            composeRule.onRoot(useUnmergedTree = true).printToLog("E2E")
+            dumpScreen()
             throw e
         }
         // 返り値（動いたか）は見ない＝すでに同じ値（0m で開いた直後の 0m）だと false が返る。効き目は下の帯で確かめる。
@@ -128,14 +137,14 @@ class RecordingToNaviE2ETest {
         val pattern = Regex("^" + Regex.escape(kind) + """ (\d+)m$""")
         try {
             composeRule.waitUntil(10_000) {
-                composeRule.onAllNodes(SemanticsMatcher("帯が $kind ${expectedM}m±10") { node ->
+                exists { composeRule.onAllNodes(SemanticsMatcher("帯が $kind ${expectedM}m±10") { node ->
                     node.config.getOrElse(SemanticsProperties.Text) { emptyList() }.any { text ->
                         pattern.find(text.text)?.groupValues?.get(1)?.toInt()?.let { kotlin.math.abs(it - expectedM) <= 10 } == true
                     }
-                }, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+                }, useUnmergedTree = true) }
             }
         } catch (e: Throwable) {
-            composeRule.onRoot(useUnmergedTree = true).printToLog("E2E")
+            dumpScreen()
             throw e
         }
         composeRule.onNodeWithText("確認モード（現在地は使いません）").assertIsDisplayed()
@@ -145,7 +154,7 @@ class RecordingToNaviE2ETest {
     private fun backToTop() {
         repeat(5) {
             composeRule.waitForIdle()
-            val atTop = composeRule.onAllNodes(hasText("ナビ設定"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+            val atTop = exists { composeRule.onAllNodes(hasText("ナビ設定"), useUnmergedTree = true) }
             if (atTop) return
             composeRule.onAllNodes(androidx.compose.ui.test.hasContentDescription("戻る"), useUnmergedTree = true)
                 .onFirst().performClick()
@@ -153,13 +162,37 @@ class RecordingToNaviE2ETest {
         waitForText("ナビ設定")
     }
 
+    /**
+     * 待ちの条件で使う「あるか」。画面の切り替わりで根が一瞬無いとき（`No compose hierarchies found`）は
+     * 失敗にせず「まだ無い」として待ちを続ける（検査場の指摘 2026-10-03: 条件式から即失敗していた）。
+     */
+    private fun exists(nodes: () -> androidx.compose.ui.test.SemanticsNodeInteractionCollection): Boolean =
+        try {
+            nodes().fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        } catch (e: IllegalStateException) {
+            false
+        }
+
+    /**
+     * 失敗したときの画面の中身を logcat の `E2E` へ。根が2つ（ダイアログ）でも落ちないよう、根を全部書き出す
+     * （検査場の指摘 2026-10-03: `onRoot` が根2つで自分で落ち、本来の失敗を隠していた）。書き出しの失敗は元の失敗を隠さない。
+     */
+    private fun dumpScreen() {
+        runCatching {
+            val roots = composeRule.onAllNodes(isRoot(), useUnmergedTree = true)
+            val count = roots.fetchSemanticsNodes(atLeastOneRootRequired = false).size
+            android.util.Log.d("E2E", "roots=$count")
+            for (i in 0 until count) roots[i].printToLog("E2E")
+        }.onFailure { android.util.Log.d("E2E", "dump failed: $it") }
+    }
+
     private fun waitForText(text: String) {
         try {
             composeRule.waitUntil(10_000) {
-                composeRule.onAllNodes(hasText(text, substring = true), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+                exists { composeRule.onAllNodes(hasText(text, substring = true), useUnmergedTree = true) }
             }
         } catch (e: Throwable) {
-            composeRule.onRoot(useUnmergedTree = true).printToLog("E2E")
+            dumpScreen()
             throw AssertionError("画面に「$text」が出ない", e)
         }
     }
