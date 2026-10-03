@@ -110,6 +110,9 @@ private const val TRACK_KIND = "TRACK"
 fun NaviMainScreen(
     courseId: Long,
     onBack: () -> Unit,
+    checkMode: Boolean = false,
+    previewMapId: Long? = null,
+    onSendPreview: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val database = remember { (context.applicationContext as BusCourseApplication).database }
@@ -129,12 +132,27 @@ fun NaviMainScreen(
     var speechGuide by remember(courseId) { mutableStateOf<NaviSpeechGuide?>(null) }
     // 走行追従の状態（設計§5-1の3状態モデル。追従⇔プレビューの切替はNaviMainFollowStateの
     // 純関数で行う＝ロジックをComposableから追い出してテスト可能にする）。
-    var followState by remember(courseId) { mutableStateOf(NaviMainFollowState()) }
+    var followState by remember(courseId, checkMode) { mutableStateOf(NaviMainFollowState(mode = if (checkMode) NaviMainMode.PREVIEW else NaviMainMode.FOLLOWING)) }
     // ★同じボタンを2回押しても再び発火させるため真偽値でなくカウンタにする。真偽値だと「戻す」を
     // 立てたあと下ろす後始末が要り、下ろし忘れると次のカメラ適用で毎回リセットされる（＝増分Nが無意味になる）。
     var resetZoomSignal by remember(courseId) { mutableStateOf(0) }
 
-    LaunchedEffect(courseId) {
+    LaunchedEffect(courseId, previewMapId) {
+        if (previewMapId != null) {
+            val map = database.naviMapDao().getMapById(previewMapId)
+            if (map == null) { readiness = NaviMainReadiness.MapNotGenerated; return@LaunchedEffect }
+            val loadedSegments = database.naviMapDao().getSegments(map.id).sortedBy { it.seq }
+            val loadedPoints = loadedSegments.filter { it.kind == TRACK_KIND }
+                .associate { it.id to database.naviMapDao().getTrackPoints(it.id).sortedBy { point -> point.seq } }
+            val events = database.naviMapDao().getEvents(map.id)
+            val points = loadedSegments.filter { it.kind == TRACK_KIND }.flatMap { loadedPoints[it.id].orEmpty() }
+                .sortedBy { it.chainageM }.map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
+            guidanceCues = withContext(Dispatchers.Default) { NaviGuidanceCues.build(points, events.filter { it.category.equals("stop", true) }.mapNotNull { it.chainageStartM }) }
+            segments = loadedSegments; trackPointsBySegmentId = loadedPoints; maxChainageM = naviMainMaxChainageM(loadedSegments)
+            followState = NaviMainFollowState(mode = NaviMainMode.PREVIEW)
+            readiness = NaviMainReadiness.Ready(map.id, NaviMapDisplayHint(map.displayOrientation, map.displayPitchDeg), map.busId, map.courseNo, map.year)
+            return@LaunchedEffect
+        }
         val identity = database.courseDao().getById(courseId)?.identityOrNull()
         if (identity == null) {
             readiness = NaviMainReadiness.IdentityMissing
@@ -170,7 +188,7 @@ fun NaviMainScreen(
         trackPointsBySegmentId = loadedTrackPointsBySegmentId
         guidanceCues = loadedCues
         guidanceState = NaviGuidanceDispatcher.State()
-        followState = NaviMainFollowState()
+        followState = NaviMainFollowState(mode = if (checkMode) NaviMainMode.PREVIEW else NaviMainMode.FOLLOWING)
         readiness = NaviMainReadiness.Ready(
             naviMapId = naviMap.id,
             hint = NaviMapDisplayHint(orientation = naviMap.displayOrientation, pitchDeg = naviMap.displayPitchDeg),
@@ -190,8 +208,8 @@ fun NaviMainScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> locationGranted = granted }
-    LaunchedEffect(Unit) {
-        if (!locationGranted) permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    LaunchedEffect(Unit, checkMode) {
+        if (!checkMode && !locationGranted) permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
     }
     // 権限が無い／GPSプロバイダが無効／start()に失敗＝追従不能。この場合は本画面をプレビュー相当
     // （手動スライダーのみ）にdegradeする（設計「GPSが来ない場合は追従できないので…」）。
@@ -206,9 +224,9 @@ fun NaviMainScreen(
             .map { it.lat to it.lon }
     }
     // ナビの走った跡（B の1歩目・全部入りだけ。ナビ専科では残さない）。画面を開いてから閉じるまでが1回。
-    val runWriter = remember(isReady, courseId) {
+    val runWriter = remember(isReady, courseId, checkMode) {
         val ready = readiness as? NaviMainReadiness.Ready
-        if (ready == null || BuildConfig.NAVI_ONLY) {
+        if (checkMode || ready == null || BuildConfig.NAVI_ONLY) {
             null
         } else {
             val startedAtMs = System.currentTimeMillis()
@@ -231,14 +249,14 @@ fun NaviMainScreen(
     }
     DisposableEffect(runWriter) { onDispose { runWriter?.close() } }
     DisposableEffect(isReady) {
-        if (isReady) speechGuide = NaviSpeechGuide(context) { }
+        if (isReady && !checkMode) speechGuide = NaviSpeechGuide(context) { }
         onDispose {
             speechGuide?.close()
             speechGuide = null
         }
     }
-    DisposableEffect(isReady, locationGranted) {
-        if (!isReady || !locationGranted) {
+    DisposableEffect(isReady, locationGranted, checkMode) {
+        if (checkMode || !isReady || !locationGranted) {
             followUnavailable = !locationGranted
             return@DisposableEffect onDispose {}
         }
@@ -298,6 +316,7 @@ fun NaviMainScreen(
             kind = guidanceResult.bandKind,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         )
+        if (checkMode) Surface(Modifier.fillMaxWidth().height(24.dp), color = Color(0xFF2F7D4F)) { Box(contentAlignment = Alignment.Center) { Text("確認モード（現在地は使いません）", color = Color.White, style = MaterialTheme.typography.labelSmall) } }
         Box(Modifier.fillMaxWidth().weight(1f)) {
             when (val state = readiness) {
                 NaviMainReadiness.Loading -> Unit
@@ -320,33 +339,33 @@ fun NaviMainScreen(
                         cues = guidanceCues,
                         state = guidanceState,
                         displayChainageM = followState.chainageM.toDouble(),
-                        gpsChainageM = followState.lastFixChainageM?.toDouble(),
-                        following = followState.mode == NaviMainMode.FOLLOWING && !followUnavailable,
-                        onCourse = followState.onCourse,
-                        voiceEnabled = settings.voiceGuidance,
+                        gpsChainageM = if (checkMode) null else followState.lastFixChainageM?.toDouble(),
+                        following = !checkMode && followState.mode == NaviMainMode.FOLLOWING && !followUnavailable,
+                        onCourse = checkMode || followState.onCourse,
+                        voiceEnabled = !checkMode && settings.voiceGuidance,
                     )
                     guidanceState = result.state
                     guidanceResult = result
-                    result.speechText?.let { speechGuide?.speak(it) }
+                    if (!checkMode) result.speechText?.let { speechGuide?.speak(it) }
                 }
 
                 NaviRenderer(
                     source = NaviRenderSource.Real(state.naviMapId),
                     chainageM = followState.chainageM,
                     settings = settings,
-                    selfFix = followState.selfLat?.let { lat ->
+                    selfFix = if (checkMode) null else followState.selfLat?.let { lat ->
                         followState.selfLon?.let { lon -> NaviSelfFix(lat, lon, followState.selfHeadingDeg, followState.speedMps, followState.fixElapsedRealtimeMs) }
                     },
-                    onCourse = followState.onCourse,
-                    searchAll = !followState.onCourse,
-                    leadActive = followState.mode == NaviMainMode.FOLLOWING,
+                    onCourse = checkMode || followState.onCourse,
+                    searchAll = !checkMode && !followState.onCourse,
+                    leadActive = !checkMode && followState.mode == NaviMainMode.FOLLOWING,
                     resetZoomSignal = resetZoomSignal,
                     modifier = Modifier.fillMaxSize(),
                 )
 
                 // 現在地（追従復帰）ボタン。安全装置＝プレビューから抜け出す唯一の手段のため必ず置く。
                 // 追従中は押下不要なので控えめに、プレビュー中は目立たせる（判断の余地ありと明記された点）。
-                NaviMainRecenterButton(
+                if (!checkMode) NaviMainRecenterButton(
                     mode = followState.mode,
                     unavailable = followUnavailable,
                     onClick = {
@@ -364,20 +383,33 @@ fun NaviMainScreen(
                 }
             }
         }
+        // 端末の下の操作ボタンの分の余白は、いちばん下に来るもの（送るボタンがあればそれ）にだけ付ける
+        // （下の列に付けたまま送るボタンを足すと、ボタンが操作ボタンに重なった・実機で発見 2026-10-03）。
+        val barInset = if (onSendPreview == null) Modifier.windowInsetsPadding(WindowInsets.navigationBars) else Modifier
         if (readiness is NaviMainReadiness.Ready) {
             NaviMainChainageBar(
                 onBack = onBack,
                 chainageM = followState.chainageM,
                 maxChainageM = maxChainageM,
                 onChainageChange = { followState = naviMainEnterPreview(followState, it) },
-                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars),
+                modifier = Modifier.fillMaxWidth().then(barInset),
             )
         } else {
             // 読み込み中・ナビできない画面でも × で戻れるように（帯の「←」を外したため）。
             NaviMainChainageBar(
                 onBack = onBack,
-                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars),
+                modifier = Modifier.fillMaxWidth().then(barInset),
             )
+        }
+        if (onSendPreview != null) {
+            androidx.compose.material3.Button(
+                onClick = onSendPreview,
+                enabled = readiness is NaviMainReadiness.Ready,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) { Text("この内容でナビへ送る") }
         }
     }
 }

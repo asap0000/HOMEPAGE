@@ -7,6 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -25,6 +27,7 @@ import com.istech.buscourse.ui.NaviCoursePickScreen
 import com.istech.buscourse.ui.NaviScreen
 import com.istech.buscourse.ui.NaviSettingsScreen
 import com.istech.buscourse.ui.NaviRunListScreen
+import com.istech.buscourse.ui.CoursePrecheckScreen
 import com.istech.buscourse.ui.RecordingScreen
 import com.istech.buscourse.ui.RouteMapScreen
 import com.istech.buscourse.ui.SpeedMapScreen
@@ -84,6 +87,8 @@ private object Routes {
     // NAVI_PICK: 識別情報を中心に、どのコースをナビするか選ぶ専用一覧。
     const val NAVI_PICK = "navi_pick"
     const val NAVI_MAIN = "navi/{id}"
+    const val NAVI_CHECK = "navi/{id}/check"
+    const val COURSE_PRECHECK = "courses/{id}/precheck"
     const val NAVI_SETTINGS = "navi_settings"
     const val BUNDLE_INSTALL = "bundle_install"
     const val DISTRIBUTION_EXPORT = "distribution_export"
@@ -105,6 +110,8 @@ private object Routes {
     fun courseDetail(id: Long) = "courses/$id"
     fun courseMap(id: Long) = "courses/$id/map"
     fun courseNavi(id: Long) = "courses/$id/navi"
+    fun naviCheck(id: Long) = "navi/$id/check"
+    fun coursePrecheck(id: Long) = "courses/$id/precheck"
     fun speedMap(sessionId: Long) = "sessions/$sessionId/speedmap"
 }
 
@@ -129,7 +136,7 @@ private fun AppNavHost() {
                 BundleInstallScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
             }
             composable(Routes.NAVI_PICK) {
-                NaviCoursePickScreen(viewModel, onBack = { navController.popBackStack() }, onOpen = { id -> navController.navigate("navi/$id") })
+                NaviCoursePickScreen(viewModel, onBack = { navController.popBackStack() }, onOpen = { id -> navController.navigate("navi/$id") }, onCheck = { id -> navController.navigate(Routes.naviCheck(id)) })
             }
             composable(Routes.NAVI_MAIN) { entry ->
                 val id = entry.arguments?.getString("id")?.toLongOrNull()
@@ -137,6 +144,10 @@ private fun AppNavHost() {
                     AllowRotationWhileVisible()
                     NaviMainScreen(courseId = id, onBack = { navController.popBackStack() })
                 }
+            }
+            composable(Routes.NAVI_CHECK) { entry ->
+                val id = entry.arguments?.getString("id")?.toLongOrNull()
+                if (id != null) { AllowRotationWhileVisible(); NaviMainScreen(courseId = id, onBack = { navController.popBackStack() }, checkMode = true) }
             }
             composable(Routes.NAVI_SETTINGS) {
                 AllowRotationWhileVisible()
@@ -240,6 +251,9 @@ private fun AppNavHost() {
                     onBack = { navController.popBackStack() },
                     onOpenMap = { navController.navigate(Routes.courseMap(id)) },
                     onOpenNavi = { navController.navigate(Routes.courseNavi(id)) },
+                    onOpenPrecheck = { navController.navigate(Routes.coursePrecheck(id)) },
+                    sendRequested = backStackEntry.savedStateHandle.getStateFlow("sendRequested", false).collectAsState().value,
+                    onSendRequestHandled = { backStackEntry.savedStateHandle["sendRequested"] = false },
                 )
             }
         }
@@ -273,7 +287,19 @@ private fun AppNavHost() {
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpen = { id -> navController.navigate("navi/$id") },
+                onCheck = { id -> navController.navigate(Routes.naviCheck(id)) },
             )
+        }
+        composable(Routes.COURSE_PRECHECK) { entry ->
+            val id = entry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) {
+                val courseEntry = remember(entry) { navController.getBackStackEntry(Routes.courseDetail(id)) }
+                CoursePrecheckScreen(
+                    courseId = id,
+                    onBack = { navController.popBackStack() },
+                    onSend = { courseEntry.savedStateHandle["sendRequested"] = true; navController.popBackStack() },
+                )
+            }
         }
         composable(Routes.NAVI_MAIN) { backStackEntry ->
             val id = backStackEntry.arguments?.getString("id")?.toLongOrNull()
@@ -285,6 +311,10 @@ private fun AppNavHost() {
                     onBack = { navController.popBackStack() },
                 )
             }
+        }
+        composable(Routes.NAVI_CHECK) { entry ->
+            val id = entry.arguments?.getString("id")?.toLongOrNull()
+            if (id != null) { AllowRotationWhileVisible(); NaviMainScreen(courseId = id, onBack = { navController.popBackStack() }, checkMode = true) }
         }
         composable(Routes.NAVI_SETTINGS) {
             AllowRotationWhileVisible()

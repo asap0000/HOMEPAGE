@@ -598,6 +598,9 @@ interface NaviMapDao {
     @Query("DELETE FROM navi_map WHERE id = :id")
     suspend fun deleteMap(id: Long)
 
+    @Query("DELETE FROM navi_map WHERE profile = 'preview'")
+    suspend fun deletePreviewMaps(): Int
+
     @Query("DELETE FROM navi_map")
     suspend fun deleteAllForBundleReplacement()
 

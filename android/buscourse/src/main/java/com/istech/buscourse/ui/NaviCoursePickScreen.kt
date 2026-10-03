@@ -4,10 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,6 +21,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -74,6 +77,7 @@ fun NaviCoursePickScreen(
     viewModel: BusCourseViewModel,
     onBack: () -> Unit,
     onOpen: (Long) -> Unit,
+    onCheck: (Long) -> Unit = onOpen,
 ) {
     var rows by remember { mutableStateOf<List<NaviCoursePickRow>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
@@ -210,14 +214,26 @@ fun NaviCoursePickScreen(
                                 }
                             }
                         }
-                        // 識別情報が無い行にはつまみを出さない（切り替えても使えるようにならないため）。
-                        row.visibilityKey?.let { key ->
-                            Switch(
-                                checked = !disabled,
-                                onCheckedChange = { checked ->
-                                    scope.launch { visibility.setEnabled(key, checked) }
-                                },
-                            )
+                        // 右側は縦に積む＝［つまみ］の下に［確かめる］（GPS を使わない確認モード・2026-10-03 オーナー承認）。
+                        // ★横に並べると名前が折り返し、名前の下のバッジが潰れた（実機で確認・2026-10-03）。
+                        // 識別情報が無い行にはどちらも出さない（つまみは切り替えても使えるようにならず、確かめるデータも無いため）。
+                        if (identity != null) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                row.visibilityKey?.let { key ->
+                                    Switch(
+                                        checked = !disabled,
+                                        onCheckedChange = { checked ->
+                                            scope.launch { visibility.setEnabled(key, checked) }
+                                        },
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = { onCheck(row.course.id) },
+                                    enabled = !disabled,
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(32.dp),
+                                ) { Text("確かめる", style = MaterialTheme.typography.labelMedium) }
+                            }
                         }
                     }
                     HorizontalDivider()

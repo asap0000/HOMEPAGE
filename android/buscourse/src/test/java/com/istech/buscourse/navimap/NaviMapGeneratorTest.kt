@@ -40,8 +40,8 @@ class NaviMapGeneratorTest {
     @Test
     fun builderAccumulatesMonotonicChainageAndUsesProductDefaults() {
         val generated = NaviMapBuilder.build(source(samples = listOf(
-            TrackSample(1_000, 35.0, 139.0), TrackSample(2_000, 35.001, 139.0),
-            TrackSample(3_000, 35.001, 139.0),
+            TrackSample(1_000, 1.0, 2.0), TrackSample(2_000, 1.001, 2.0),
+            TrackSample(3_000, 1.001, 2.0),
         )))
 
         assertThat(generated.trackPoints.first().chainageM).isEqualTo(0.0)
@@ -56,7 +56,7 @@ class NaviMapGeneratorTest {
     @Test
     fun builderRejectsInsufficientTrackAndExternalUrl() {
         val points = assertThrows(NaviMapGenerationException::class.java) {
-            NaviMapBuilder.build(source(samples = listOf(TrackSample(1, 35.0, 139.0))))
+            NaviMapBuilder.build(source(samples = listOf(TrackSample(1, 1.0, 2.0))))
         }
         assertThat(points.reason).isEqualTo(NaviMapGenerationException.Reason.INSUFFICIENT_TRACK_POINTS)
         val url = assertThrows(NaviMapGenerationException::class.java) {
@@ -70,7 +70,7 @@ class NaviMapGeneratorTest {
     fun builderRejectsNonFiniteCoordinate() {
         val failure = assertThrows(NaviMapGenerationException::class.java) {
             NaviMapBuilder.build(source(samples = listOf(
-                TrackSample(1_000, 35.0, 139.0), TrackSample(2_000, Double.NaN, 139.0),
+                TrackSample(1_000, 1.0, 2.0), TrackSample(2_000, Double.NaN, 2.0),
             )))
         }
         assertThat(failure.reason).isEqualTo(NaviMapGenerationException.Reason.NON_FINITE_COORDINATE)
@@ -79,14 +79,14 @@ class NaviMapGeneratorTest {
     @Test
     fun builderHandlesTimestampPresenceAndAbsenceForAllPoints() {
         val timed = NaviMapBuilder.build(source(samples = listOf(
-            TrackSample(1_000, 35.0, 139.0), TrackSample(3_500, 35.001, 139.0),
+            TrackSample(1_000, 1.0, 2.0), TrackSample(3_500, 1.001, 2.0),
         )))
         assertThat(timed.segment.baseEpochMs).isEqualTo(1_000)
         assertThat(timed.trackPoints.map { it.tRelS }).containsExactly(0.0, 2.5).inOrder()
         assertThat(timed.map.mediaMode).isEqualTo("referenced")
 
         val untimed = NaviMapBuilder.build(source(samples = listOf(
-            TrackSample(1_000, 35.0, 139.0), TrackSample(null, 35.001, 139.0),
+            TrackSample(1_000, 1.0, 2.0), TrackSample(null, 1.001, 2.0),
         )))
         assertThat(untimed.segment.baseEpochMs).isNull()
         assertThat(untimed.trackPoints.map { it.tRelS }).containsExactly(0.0, 0.0).inOrder()
@@ -98,7 +98,7 @@ class NaviMapGeneratorTest {
     @Test
     fun builderMarksMediaNoneWhenTimestampedButNoLoresFrames() {
         val generated = NaviMapBuilder.build(source(
-            samples = listOf(TrackSample(1_000, 35.0, 139.0), TrackSample(2_000, 35.001, 139.0)),
+            samples = listOf(TrackSample(1_000, 1.0, 2.0), TrackSample(2_000, 1.001, 2.0)),
             loresFrameCount = 0,
         ))
         assertThat(generated.map.mediaMode).isEqualTo("none")
@@ -109,9 +109,9 @@ class NaviMapGeneratorTest {
     fun builderAnchorsStopsToNearestTrackWithoutNames() {
         val generated = NaviMapBuilder.build(source(
             samples = listOf(
-                TrackSample(null, 35.0, 139.0), TrackSample(null, 35.001, 139.0), TrackSample(null, 35.002, 139.0),
+                TrackSample(null, 1.0, 2.0), TrackSample(null, 1.001, 2.0), TrackSample(null, 1.002, 2.0),
             ),
-            stops = listOf(StopInput(7, 2, 35.0011, 139.0)),
+            stops = listOf(StopInput(7, 2, 1.0011, 2.0)),
         ))
         assertThat(generated.events.single().event.chainageStartM).isEqualTo(generated.trackPoints[1].chainageM)
         assertThat(generated.events.single().event.variablesJson).isEqualTo("{}")
@@ -143,8 +143,8 @@ class NaviMapGeneratorTest {
         val points = dao.getTrackPoints(segment.id)
 
         assertThat(points).hasSize(5)
-        assertThat(points.first().lat).isEqualTo(35.90)
-        assertThat(points.last().lat).isEqualTo(35.90)
+        assertThat(points.first().lat).isEqualTo(1.90)
+        assertThat(points.last().lat).isEqualTo(1.90)
         assertThat(points.first().tRelS).isEqualTo(0.0)
         assertThat(points.last().tRelS).isEqualTo(8.0)
 
@@ -168,7 +168,7 @@ class NaviMapGeneratorTest {
         val points = dao.getTrackPoints(segment.id)
 
         assertThat(points).hasSize(2)
-        assertThat(points.first().lat).isEqualTo(35.0)
+        assertThat(points.first().lat).isEqualTo(1.0)
         assertThat(segment.sessionId).isNotNull()
         assertThat(segment.baseEpochMs).isEqualTo(1_000)
         assertThat(dao.getMapById(mapId)?.mediaMode).isEqualTo("none")
@@ -208,12 +208,55 @@ class NaviMapGeneratorTest {
         assertThat(active?.profile).isEqualTo("ex_full")
     }
 
+    @Test
+    fun previewIsArchivedAndDoesNotArchiveActiveAppSimple() = runTest {
+        val (courseId, _) = insertGpsCourseWithFramedStops("架空A", 81)
+        val generator = NaviMapGenerator(database)
+        val activeId = generator.generateFromCourse(courseId, now = 100)
+        val previewId = generator.generatePreview(courseId, now = 200)
+        val dao = database.naviMapDao()
+        assertThat(dao.getMapById(previewId)?.profile).isEqualTo("preview")
+        assertThat(dao.getMapById(previewId)?.archivedAt).isEqualTo(200)
+        assertThat(dao.getMapById(activeId)?.archivedAt).isNull()
+        assertThat(dao.getActiveMapsByIdentity("架空A", 81, 2026).map { it.id }).containsExactly(activeId)
+    }
+
+    @Test
+    fun previewCanBeGeneratedWithoutCourseIdentity() = runTest {
+        val (courseId, _) = insertGpsCourseWithFramedStops("架空B", 82)
+        database.courseDao().updateIdentity(courseId, null, null, null, updatedAt = 301)
+        val id = NaviMapGenerator(database).generatePreview(courseId, now = 300)
+        val map = database.naviMapDao().getMapById(id)!!
+        assertThat(map.profile).isEqualTo("preview")
+        assertThat(map.busId).isEmpty()
+        assertThat(map.courseNo).isEqualTo(0)
+        assertThat(map.year).isEqualTo(0)
+    }
+
+    @Test
+    fun deletingPreviewMapsLeavesAppSimpleAndCascadesChildren() = runTest {
+        val (courseId, _) = insertGpsCourseWithFramedStops("架空C", 83)
+        val generator = NaviMapGenerator(database)
+        val appId = generator.generateFromCourse(courseId, now = 100)
+        val previewId = generator.generatePreview(courseId, now = 200)
+        val dao = database.naviMapDao()
+        val appSegment = dao.getSegments(appId).single()
+        val appPointCount = dao.getTrackPoints(appSegment.id).size
+        val appEventCount = dao.getEvents(appId).size
+        assertThat(dao.deletePreviewMaps()).isEqualTo(1)
+        assertThat(dao.getMapById(appId)?.profile).isEqualTo("app_simple")
+        assertThat(dao.getSegments(appId)).hasSize(1)
+        assertThat(dao.getSegments(previewId)).isEmpty()
+        assertThat(dao.getTrackPoints(appSegment.id)).hasSize(appPointCount)
+        assertThat(dao.getEvents(appId)).hasSize(appEventCount)
+    }
+
     // ---- ヘルパ ----
 
     private fun source(
         title: String = "テストコース",
         samples: List<TrackSample> = listOf(
-            TrackSample(1_000, 35.0, 139.0), TrackSample(2_000, 35.001, 139.0),
+            TrackSample(1_000, 1.0, 2.0), TrackSample(2_000, 1.001, 2.0),
         ),
         stops: List<StopInput> = emptyList(),
         loresFrameCount: Int = 3,
@@ -225,14 +268,14 @@ class NaviMapGeneratorTest {
         val sessionId = database.recordingSessionDao().insert(session(courseId))
         database.courseDao().updateSourceSession(courseId, sessionId, 1)
         val cardId = database.busStopCardDao().upsert(card())
-        val frame1 = database.timelapseFrameDao().insert(frame(sessionId, 0, 3_000, 35.00, 139.0, cardId))
-        val frame2 = database.timelapseFrameDao().insert(frame(sessionId, 1, 7_000, 35.02, 139.0, cardId))
+        val frame1 = database.timelapseFrameDao().insert(frame(sessionId, 0, 3_000, 1.00, 2.0, cardId))
+        val frame2 = database.timelapseFrameDao().insert(frame(sessionId, 1, 7_000, 1.02, 2.0, cardId))
         database.gpsPointDao().insertAll(listOf(
-            gps(sessionId, 0, 1_000, 35.90, 139.0), // 車庫（窓外）
-            gps(sessionId, 1, 3_000, 35.00, 139.0), // 窓内 始点
-            gps(sessionId, 2, 5_000, 35.01, 139.0), // 窓内
-            gps(sessionId, 3, 7_000, 35.02, 139.0), // 窓内 終点
-            gps(sessionId, 4, 9_000, 35.90, 139.0), // 車庫（窓外）
+            gps(sessionId, 0, 1_000, 1.90, 2.0), // 車庫（窓外）
+            gps(sessionId, 1, 3_000, 1.00, 2.0), // 窓内 始点
+            gps(sessionId, 2, 5_000, 1.01, 2.0), // 窓内
+            gps(sessionId, 3, 7_000, 1.02, 2.0), // 窓内 終点
+            gps(sessionId, 4, 9_000, 1.90, 2.0), // 車庫（窓外）
         ))
         // GPS 優先を確かめるため route_point は別座標にしておく。
         database.routePointDao().insertAll(listOf(
@@ -252,8 +295,8 @@ class NaviMapGeneratorTest {
         val sessionId = database.recordingSessionDao().insert(session(courseId))
         database.courseDao().updateSourceSession(courseId, sessionId, 1)
         database.gpsPointDao().insertAll(listOf(
-            gps(sessionId, 0, 1_000, 35.0, 139.0),
-            gps(sessionId, 1, 2_000, 35.01, 139.0),
+            gps(sessionId, 0, 1_000, 1.0, 2.0),
+            gps(sessionId, 1, 2_000, 1.01, 2.0),
         ))
         database.routePointDao().insertAll(listOf(
             RoutePointEntity(courseId = courseId, seq = 0, lat = 36.0, lon = 140.0, chainageM = 0.0),
@@ -279,7 +322,7 @@ class NaviMapGeneratorTest {
     )
 
     private fun card() = BusStopCardEntity(
-        name = "秘密の停留所名", photoDirRelPath = "stopcards/1", latitude = 35.001, longitude = 139.0,
+        name = "秘密の停留所名", photoDirRelPath = "stopcards/1", latitude = 1.001, longitude = 2.0,
         altitudeM = null, notes = null, createdAt = 1, updatedAt = 1,
     )
 

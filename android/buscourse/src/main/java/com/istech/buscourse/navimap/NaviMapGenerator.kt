@@ -159,7 +159,13 @@ object NaviMapBuilder {
 
 /** 確定コースから app_simple ナビマップを Room へ登録するDB部。 */
 class NaviMapGenerator(private val database: BusCourseDatabase) {
-    suspend fun generateFromCourse(courseId: Long, now: Long = System.currentTimeMillis()): Long {
+    suspend fun generateFromCourse(courseId: Long, now: Long = System.currentTimeMillis()): Long =
+        generate(courseId, now, preview = false)
+
+    suspend fun generatePreview(courseId: Long, now: Long = System.currentTimeMillis()): Long =
+        generate(courseId, now, preview = true)
+
+    private suspend fun generate(courseId: Long, now: Long, preview: Boolean): Long {
         val course = database.courseDao().getById(courseId) ?: throw NaviMapGenerationException(
             NaviMapGenerationException.Reason.COURSE_NOT_FOUND,
             "コースが見つかりません: $courseId",
@@ -167,7 +173,7 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
         val busId = course.busId
         val courseNo = course.courseNo
         val year = course.year
-        if (busId == null || courseNo == null || year == null) {
+        if (!preview && (busId == null || courseNo == null || year == null)) {
             throw NaviMapGenerationException(
                 NaviMapGenerationException.Reason.MISSING_COURSE_IDENTITY,
                 "コースidentityが未設定です: $courseId",
@@ -221,19 +227,26 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
             0
         }
         // ★M-1: title に course.name（園児名を含みうる）を焼かない。identity から決定的に作る（正典 §4）。
-        val title = "${year}年 ${busId}${courseNo}コース"
+        val effectiveBusId = busId ?: ""
+        val effectiveCourseNo = courseNo ?: 0
+        val effectiveYear = year ?: 0
+        val title = "${effectiveYear}年 ${effectiveBusId}${effectiveCourseNo}コース"
         // ★m-2: route_point 退避時は時間軸が無いので session を segment に残さない（§7 の半端参照を避ける）。
         val sessionForSegment = course.sourceSessionId?.takeIf { usesGpsSamples }
 
         val generated = NaviMapBuilder.build(
-            NaviMapSource(busId, courseNo, year, title, sessionForSegment, samples, stopInputs, loresFrameCount),
+            NaviMapSource(effectiveBusId, effectiveCourseNo, effectiveYear, title, sessionForSegment, samples, stopInputs, loresFrameCount),
         )
 
         return database.withTransaction {
             val dao = database.naviMapDao()
-            dao.archiveSupersededAppSimple(busId, courseNo, year, now)
+            if (!preview) dao.archiveSupersededAppSimple(effectiveBusId, effectiveCourseNo, effectiveYear, now)
+            val mapToInsert = generated.map.copy(
+                profile = if (preview) "preview" else generated.map.profile,
+                archivedAt = if (preview) now else generated.map.archivedAt,
+            )
             val mapId = NaviMapRepository(database).registerMap(
-                generated.map.copy(createdAt = now, updatedAt = now), now,
+                mapToInsert.copy(createdAt = now, updatedAt = now), now,
             )
             val segmentId = dao.insertSegment(generated.segment.copy(naviMapId = mapId))
             dao.insertTrackPoints(generated.trackPoints.map { it.copy(segmentId = segmentId) })
@@ -244,7 +257,7 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
             // ★M-3: 同一 identity にアクティブな ex_full があれば、生まれたばかりの app_simple は
             // その時点で下位＝保管退避（正典 §8「EX完成形が正、App簡易は保管退避」）。
             // 行は消さず archived_at のみ付け、アクティブ集合に stale な app_simple を残さない。
-            if (dao.getActiveMapsByIdentity(busId, courseNo, year).any { it.profile == "ex_full" }) {
+            if (!preview && dao.getActiveMapsByIdentity(effectiveBusId, effectiveCourseNo, effectiveYear).any { it.profile == "ex_full" }) {
                 dao.archiveMap(mapId, now)
             }
             mapId

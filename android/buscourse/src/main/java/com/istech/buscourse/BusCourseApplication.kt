@@ -33,7 +33,8 @@ import org.maplibre.android.module.http.HttpRequestUtil
  */
 class BusCourseApplication : Application() {
 
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** アプリの寿命で動く後始末用（画面を離れたあとも走り切らせたい削除など。例: 送る前の確認用データ）。 */
+    internal val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Room DB のアプリ全体シングルトン（設計書§3.2）。Activity/Service/Workerから共有して使う。 */
     val database: BusCourseDatabase by lazy { BusCourseDatabase.build(this) }
@@ -42,6 +43,10 @@ class BusCourseApplication : Application() {
         val processStartedAtMs = System.currentTimeMillis()
         super.onCreate()
         StorageRotationWorker.schedule(this)
+        applicationScope.launch {
+            runCatching { database.naviMapDao().deletePreviewMaps() }
+                .onFailure { Log.w("BusCourseApplication", "確認用ナビデータの起動時削除に失敗しました", it) }
+        }
 
         // MapLibre本体の初期化。`HttpRequestUtil.setOkHttpClient(...)`（下記）は
         // `org.maplibre.android.module.http.HttpRequestImpl`のクラス初期化(<clinit>)を誘発し、

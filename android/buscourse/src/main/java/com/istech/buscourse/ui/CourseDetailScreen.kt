@@ -153,6 +153,9 @@ fun CourseDetailScreen(
     onBack: () -> Unit,
     onOpenMap: () -> Unit,
     onOpenNavi: () -> Unit,
+    onOpenPrecheck: () -> Unit = {},
+    sendRequested: Boolean = false,
+    onSendRequestHandled: () -> Unit = {},
 ) {
     val repository = viewModel.repository
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -178,6 +181,16 @@ fun CourseDetailScreen(
     var identityCourseNoInput by remember { mutableStateOf("") }
     var identityYearInput by remember { mutableStateOf("") }
     var identityError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(sendRequested) {
+        if (sendRequested) {
+            val identity = details?.course?.identityOrNull()
+            identityBusIdInput = identity?.busId ?: ""
+            identityCourseNoInput = identity?.courseNo?.toString() ?: ""
+            identityYearInput = identity?.year?.toString() ?: ""
+            identityError = null; sendBlocked = false; showSendDialog = true
+            onSendRequestHandled()
+        }
+    }
     var activeCards by remember { mutableStateOf<List<BusStopCardEntity>>(emptyList()) }
     var usageMap by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var unusedOnlyFilter by remember { mutableStateOf(false) }
@@ -667,6 +680,11 @@ fun CourseDetailScreen(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    OutlinedButton(
+                        onClick = onOpenPrecheck,
+                        enabled = !busy && !dirty && details != null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("送る前に確かめる") }
                     Button(
                         onClick = {
                             val identity = details?.course?.identityOrNull()
