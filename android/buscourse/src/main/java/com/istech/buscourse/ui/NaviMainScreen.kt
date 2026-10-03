@@ -21,7 +21,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.TurnLeft
+import androidx.compose.material.icons.filled.TurnRight
+import androidx.compose.material.icons.filled.TurnSlightLeft
+import androidx.compose.material.icons.filled.TurnSlightRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.UTurnRight
 import androidx.compose.material.icons.filled.ExploreOff
 import androidx.compose.material.icons.filled.GpsOff
 import androidx.compose.material.icons.filled.MyLocation
@@ -289,6 +295,7 @@ fun NaviMainScreen(
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
         NaviGuidanceBand(
             text = guidanceResult.bandText ?: "この先の案内はありません",
+            kind = guidanceResult.bandKind,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         )
         Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -494,7 +501,7 @@ private fun NaviMainUnavailable(reason: String, modifier: Modifier = Modifier) {
 
 /** 画面上端の常設案内行。設定画面のNaviRendererプレビューには使わない。 */
 @Composable
-private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
+private fun NaviGuidanceBand(text: String, kind: NaviGuidanceCues.Kind?, modifier: Modifier = Modifier) {
     val annotated = buildAnnotatedString {
         val match = Regex("\\d+m").find(text)
         if (match == null) append(text) else {
@@ -505,6 +512,17 @@ private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
     }
     Surface(modifier = modifier.fillMaxWidth(), color = Color(0xFF101B38), shadowElevation = 4.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            if (kind != null) {
+                val icon = when (kind) {
+                    NaviGuidanceCues.Kind.RIGHT -> Icons.Filled.TurnRight
+                    NaviGuidanceCues.Kind.LEFT -> Icons.Filled.TurnLeft
+                    NaviGuidanceCues.Kind.SLIGHT_RIGHT -> Icons.Filled.TurnSlightRight
+                    NaviGuidanceCues.Kind.SLIGHT_LEFT -> Icons.Filled.TurnSlightLeft
+                    NaviGuidanceCues.Kind.U_TURN -> Icons.Filled.UTurnRight
+                    NaviGuidanceCues.Kind.STOP -> Icons.Filled.DirectionsBus
+                }
+                Icon(icon, contentDescription = kind.label(), tint = Color.White, modifier = Modifier.padding(start = 16.dp).size(24.dp))
+            }
             Text(
                 text = annotated,
                 color = if (text == "この先の案内はありません") Color.White.copy(alpha = 0.62f) else Color.White,
@@ -512,7 +530,7 @@ private fun NaviGuidanceBand(text: String, modifier: Modifier = Modifier) {
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = 16.dp, end = 12.dp),
+                modifier = Modifier.weight(1f).padding(start = if (kind != null) 8.dp else 16.dp, end = 12.dp),
             )
         }
     }

@@ -45,4 +45,20 @@ class NaviGuidanceDispatcherTest {
         assertThat(result.speechText).isNull()
         assertThat(result.bandText).isEqualTo("左折 30m")
     }
+
+    @Test fun bandKindFollowsBandCueAndIsNullOffCourse() {
+        val plain = NaviGuidanceDispatcher.update(listOf(cue), NaviGuidanceDispatcher.State(), 70.0, 70.0, true, true, true)
+        assertThat(plain.bandKind).isEqualTo(NaviGuidanceCues.Kind.LEFT)
+        val pair = NaviGuidanceCues.Cue(
+            100.0, NaviGuidanceCues.Kind.RIGHT, NaviGuidanceCues.Variant.V2, 40.0, 10.0, "x", "まもなく右折です。",
+            groupText = "x", bandText = "右折、すぐ左折",
+        )
+        val merged = NaviGuidanceDispatcher.update(listOf(pair), NaviGuidanceDispatcher.State(), 70.0, 70.0, true, true, true)
+        assertThat(merged.bandText).isEqualTo("右折、すぐ左折 30m")
+        assertThat(merged.bandKind).isEqualTo(NaviGuidanceCues.Kind.RIGHT)
+        val off = NaviGuidanceDispatcher.update(listOf(cue), NaviGuidanceDispatcher.State(), 0.0, 65.0, true, false, true)
+        assertThat(off.bandKind).isNull()
+        val none = NaviGuidanceDispatcher.update(listOf(cue), NaviGuidanceDispatcher.State(), 150.0, 150.0, true, true, true)
+        assertThat(none.bandKind).isNull()
+    }
 }

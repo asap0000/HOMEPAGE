@@ -135,10 +135,10 @@ object NaviGuidanceCues {
                     else -> "${rounded(first.preDistanceM)}メートル先、${a.phrase()}、その先すぐ${b.phrase()}です。"
                 }
                 val bandText = when {
-                    a == Kind.STOP && b == Kind.STOP -> "停留所 → すぐ停留所"
-                    a == Kind.STOP -> "停留所 → すぐ${b.phrase()}"
-                    b == Kind.STOP -> "${a.phrase()} → すぐ停留所"
-                    else -> "${a.phrase()} → すぐ${b.phrase()}"
+                    a == Kind.STOP && b == Kind.STOP -> "停留所、すぐ停留所"
+                    a == Kind.STOP -> "停留所、すぐ${b.phrase()}"
+                    b == Kind.STOP -> "${a.phrase()}、すぐ停留所"
+                    else -> "${a.phrase()}、すぐ${b.phrase()}"
                 }
                 result[range.first] = first.copy(preText = text, groupText = text, bandText = bandText)
                 result[range.last] = result[range.last].copy(preText = null)
@@ -216,7 +216,7 @@ object NaviGuidanceDispatcher {
         val spoken: Set<String> = emptySet(),
         val wasOnCourse: Boolean? = null,
     )
-    data class Result(val bandText: String?, val speechText: String?, val state: State)
+    data class Result(val bandText: String?, val speechText: String?, val state: State, val bandKind: NaviGuidanceCues.Kind? = null)
 
     fun update(cues: List<NaviGuidanceCues.Cue>, state: State, displayChainageM: Double, gpsChainageM: Double?, following: Boolean, onCourse: Boolean, voiceEnabled: Boolean): Result {
         if (!onCourse) return Result("コースに戻ると案内を再開します", null, state.copy(lastGpsM = gpsChainageM ?: state.lastGpsM, wasOnCourse = false))
@@ -227,7 +227,7 @@ object NaviGuidanceDispatcher {
             val special = it.bandText
             if (special != null) "$special ${remaining}m" else "${it.bandLabel} ${remaining}m"
         }
-        if (gpsChainageM == null) return Result(band, null, state)
+        if (gpsChainageM == null) return Result(band, null, state, bandCue?.kind)
         val last = if (state.wasOnCourse == false) gpsChainageM else state.lastGpsM
         val crossedEvents = if (!state.initialized || last == null) emptySet() else buildSet {
             cues.forEachIndexed { index, cue ->
@@ -240,6 +240,6 @@ object NaviGuidanceDispatcher {
             if ("n$index" in crossedEvents) add(cue.nearAtM to cue.nearText)
         } }.maxByOrNull { it.first }?.second
         val shouldSpeak = following && crossed != null && voiceEnabled
-        return Result(band, crossed.takeIf { shouldSpeak }, State(true, gpsChainageM, state.spoken + crossedEvents, true))
+        return Result(band, crossed.takeIf { shouldSpeak }, State(true, gpsChainageM, state.spoken + crossedEvents, true), bandCue?.kind)
     }
 }

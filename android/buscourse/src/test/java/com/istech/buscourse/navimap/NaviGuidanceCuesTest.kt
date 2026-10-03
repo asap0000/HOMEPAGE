@@ -54,6 +54,7 @@ class NaviGuidanceCuesTest {
         val pair = NaviGuidanceCues.build(route(), listOf(300.0, 330.0))
         assertThat(pair.map { it.variant }).containsExactly(NaviGuidanceCues.Variant.V2, NaviGuidanceCues.Variant.V2).inOrder()
         assertThat(pair.first().preText).isEqualTo("この先、停留所が続きます。")
+        assertThat(pair.first().bandText).isEqualTo("停留所、すぐ停留所")
 
         val highSpeedStop = NaviGuidanceCues.build(route(speedMps = 10.0), listOf(800.0)).single()
         assertThat(highSpeedStop.preDistanceM).isWithin(1.0).of(200.0)
