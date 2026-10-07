@@ -68,6 +68,8 @@ fun DistributionExportScreen(viewModel: BusCourseViewModel, onBack: () -> Unit) 
     var runningKind by remember { mutableStateOf<ExportKind?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var progress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // 書き出しの段階。null＝まだ数字が来ていない（押した直後・コースを読んでいる）。
+    var preparing by remember { mutableStateOf(false) }
     var pendingKind by remember { mutableStateOf<ExportKind?>(null) }
     val today = LocalDate.now().toString()
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
@@ -77,9 +79,15 @@ fun DistributionExportScreen(viewModel: BusCourseViewModel, onBack: () -> Unit) 
         active = true
         runningKind = kind
         message = null
+        progress = null
+        preparing = false
         if (kind == ExportKind.COURSES) {
             val ids = courses.filter { checked[it.course.id] == true }.map { it.course.id }
-            viewModel.exportCourseBundle(ids, uri, { done, total -> progress = done to total }) { result ->
+            viewModel.exportCourseBundle(
+                ids, uri,
+                onProgress = { done, total -> preparing = false; progress = done to total },
+                onPrepare = { done, total -> preparing = true; progress = done to total },
+            ) { result ->
                 active = false
                 if (result.isSuccess) message = "できました。USB・SD などで配布先へ運んでください"
                 else {
@@ -147,13 +155,38 @@ fun DistributionExportScreen(viewModel: BusCourseViewModel, onBack: () -> Unit) 
                 Text("地図の束を書き出す")
             }
             if (active) {
-                Text("書き出し中…")
-                progress?.let { (done, total) ->
-                    Text(if (runningKind == ExportKind.MAP) "$done / $total bytes" else "$done / $total 枚")
-                    LinearProgressIndicator(progress = { if (total > 0) done.toFloat() / total else 0f }, modifier = Modifier.fillMaxWidth())
-                }
+                ExportStatus(kind = runningKind, preparing = preparing, progress = progress)
             }
             message?.let { Text(it) }
+        }
+    }
+}
+
+/**
+ * 書き出し中の表示（オーナー実機指摘 2026-10-04: 押してからバーが伸びるまで何も動かず、止まったと勘違いした）。
+ * - 押した直後（まだ数字が無い）＝動き続ける細いバー＋「書き出しの準備をしています…」
+ * - コースの束の準備（全映像の確かめ・3,656 枚で約20秒）＝「準備しています（映像を確かめています ◯ / ◯ 枚）」とバー
+ * - 書き出し＝「書き出しています ◯ / ◯ 枚」（地図は MB）とバー
+ * 画面を消さないこと・アプリを閉じないことも添える（数分かかる）。
+ */
+@Composable
+private fun ExportStatus(kind: ExportKind?, preparing: Boolean, progress: Pair<Int, Int>?) {
+    androidx.compose.material3.Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val (title, detail) = when {
+                progress == null -> "書き出しの準備をしています…" to null
+                preparing -> "準備しています" to "映像を確かめています ${"%,d".format(progress.first)} / ${"%,d".format(progress.second)} 枚"
+                kind == ExportKind.MAP -> "書き出しています" to "${progress.first / 1_048_576} / ${progress.second / 1_048_576} MB"
+                else -> "書き出しています" to "${"%,d".format(progress.first)} / ${"%,d".format(progress.second)} 枚"
+            }
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            detail?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+            if (progress == null || progress.second <= 0) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(progress = { progress.first.toFloat() / progress.second }, modifier = Modifier.fillMaxWidth())
+            }
+            Text("数分かかることがあります。終わるまでこの画面のままお待ちください。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

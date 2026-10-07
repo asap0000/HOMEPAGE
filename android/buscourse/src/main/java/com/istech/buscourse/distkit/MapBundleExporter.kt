@@ -27,8 +27,23 @@ class MapBundleExporter(
             var completed = manifest.length()
             files.forEach { file ->
                 val path = file.relativeTo(root).invariantSeparatorsPath
-                zip.putNextEntry(ZipEntry(path)); file.inputStream().use { it.copyTo(zip) }; zip.closeEntry()
-                completed += file.length(); onProgress(completed, total)
+                zip.putNextEntry(ZipEntry(path))
+                // 地図のタイル（mbtiles）は1つで数十〜数百MBあるので、ファイル単位ではなく 4MB ごとに進みを返す
+                // （ファイル単位だとバーが止まって見えた・オーナー実機指摘 2026-10-04）。
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    var sinceReport = 0L
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        zip.write(buffer, 0, n)
+                        completed += n
+                        sinceReport += n
+                        if (sinceReport >= 4L * 1024 * 1024) { onProgress(completed, total); sinceReport = 0 }
+                    }
+                }
+                zip.closeEntry()
+                onProgress(completed, total)
             }
         }
     }

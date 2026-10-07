@@ -25,6 +25,7 @@ class CourseBundleExporter(
         courseIds: List<Long>,
         output: OutputStream,
         onProgress: (completedFrames: Int, totalFrames: Int) -> Unit = { _, _ -> },
+        onPrepare: (checkedFrames: Int, totalFrames: Int) -> Unit = { _, _ -> },
     ) {
         require(courseIds.isNotEmpty()) { "コースがありません" }
         val courses = JSONArray()
@@ -57,7 +58,9 @@ class CourseBundleExporter(
         CourseBundle.write(output,
             CourseBundle.Payload(courses.length(), courses.toString().toByteArray(Charsets.UTF_8), bundleFrames),
             sourceVersionCode,
-        ) { completed, frameTotal -> onProgress(completed, frameTotal) }
+            onProgress = { completed, frameTotal -> onProgress(completed, frameTotal) },
+            onPrepare = { checked, frameTotal -> onPrepare(checked, frameTotal) },
+        )
     }
 
     /** Thin local-file adapter retained for tests and non-SAF callers. */

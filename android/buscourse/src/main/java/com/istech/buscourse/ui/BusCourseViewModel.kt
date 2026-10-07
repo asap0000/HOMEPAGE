@@ -90,16 +90,18 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
     private val storageRoot by lazy { BusCourseStorage.root(getApplication<BusCourseApplication>()) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    fun exportCourseBundle(courseIds: List<Long>, uri: Uri, onProgress: (Int, Int) -> Unit, onResult: (Result<Unit>) -> Unit) {
+    fun exportCourseBundle(courseIds: List<Long>, uri: Uri, onProgress: (Int, Int) -> Unit, onPrepare: (Int, Int) -> Unit, onResult: (Result<Unit>) -> Unit) {
         viewModelScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     val output = getApplication<BusCourseApplication>().contentResolver.openOutputStream(uri, "wt")
                         ?: error("保存先を開けません")
                     output.use {
-                        CourseBundleExporter(database, storageRoot, com.istech.buscourse.BuildConfig.VERSION_CODE).export(courseIds, it) { done, total ->
-                            mainHandler.post { onProgress(done, total) }
-                        }
+                        CourseBundleExporter(database, storageRoot, com.istech.buscourse.BuildConfig.VERSION_CODE).export(
+                            courseIds, it,
+                            onProgress = { done, total -> mainHandler.post { onProgress(done, total) } },
+                            onPrepare = { done, total -> mainHandler.post { onPrepare(done, total) } },
+                        )
                     }
                 }
             }

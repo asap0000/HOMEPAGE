@@ -33,7 +33,9 @@ object CourseBundle {
 
     /** Writes directly to the caller's stream without creating an archive or frame copy. */
     fun write(output: OutputStream, payload: Payload, sourceVersionCode: Int,
-              createdAt: String = Instant.now().toString(), onProgress: (Int, Int) -> Unit = { _, _ -> }) {
+              createdAt: String = Instant.now().toString(), onProgress: (Int, Int) -> Unit = { _, _ -> },
+              /** 書き出す前の準備（全映像の SHA-256 を先に測る＝manifest を先頭に置くため）の進み。何千枚あると数十秒かかる。 */
+              onPrepare: (Int, Int) -> Unit = { _, _ -> }) {
         require(payload.courseCount > 0) { "コースがありません" }
         val frameIndex = JSONArray()
         val names = mutableSetOf<String>()
@@ -51,7 +53,10 @@ object CourseBundle {
         )
         val files = mutableListOf<WriteRecord>()
         metadata.forEach { (path, bytes) -> files += WriteRecord(path, bytes.size.toLong(), sha256(bytes), bytes, null) }
-        payload.frames.forEach { frame -> files += inspect(frame.relativePath, frame.source) }
+        payload.frames.forEachIndexed { index, frame ->
+            files += inspect(frame.relativePath, frame.source)
+            onPrepare(index + 1, payload.frames.size)
+        }
         val records = JSONArray()
         var expanded = 0L
         files.forEach { record ->
