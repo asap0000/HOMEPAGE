@@ -61,4 +61,12 @@ class NaviGuidanceDispatcherTest {
         val none = NaviGuidanceDispatcher.update(listOf(cue), NaviGuidanceDispatcher.State(), 150.0, 150.0, true, true, true)
         assertThat(none.bandKind).isNull()
     }
+
+    @Test fun persistedBandTextTakesPrecedenceOverKindLabel() {
+        val cue = NaviGuidanceCues.Cue(100.0, NaviGuidanceCues.Kind.UNKNOWN, NaviGuidanceCues.Variant.V1,
+            40.0, 10.0, null, "案内", bandText = "保存した案内帯")
+        val result = NaviGuidanceDispatcher.update(listOf(cue), NaviGuidanceDispatcher.State(), 25.0, null,
+            following = false, onCourse = true, voiceEnabled = false)
+        assertThat(result.bandText).isEqualTo("保存した案内帯 80m")
+    }
 }

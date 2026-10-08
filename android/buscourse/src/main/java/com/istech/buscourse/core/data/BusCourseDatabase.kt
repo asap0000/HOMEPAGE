@@ -150,6 +150,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         NaviTrackPointEntity::class,
         NaviEventEntity::class,
         NaviEventOutputEntity::class,
+        NaviGuidanceEntity::class,
+        NaviGuidanceBuildEntity::class,
     ],
     version = BusCourseDatabase.SCHEMA_VERSION,
     exportSchema = false,
@@ -176,7 +178,7 @@ abstract class BusCourseDatabase : RoomDatabase() {
          * `manifest.json`（[com.istech.buscourse.backup.BackupManifest.dbSchemaVersion]）が
          * バージョン番号を二重管理しないよう、ここを唯一の正として参照する（2026-07-26追加）。
          */
-        const val SCHEMA_VERSION = 23
+        const val SCHEMA_VERSION = 24
 
         /** DB は標準の `context.getDatabasePath("buscourse.db")` に配置する（設計書§3.2）。 */
         fun build(context: Context): BusCourseDatabase =
@@ -568,13 +570,22 @@ abstract class BusCourseDatabase : RoomDatabase() {
             }
         }
 
+        /** 保存済み案内と生成方針を追加する。バックアップは DB ファイル単位で運ぶため個別処理は不要。 */
+        val MIGRATION_23_24 = object : androidx.room.migration.Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_guidance` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `navi_map_id` INTEGER NOT NULL, `seq` INTEGER NOT NULL, `role` TEXT NOT NULL, `kind` TEXT NOT NULL, `chainage_m` REAL NOT NULL, `chainage_end_m` REAL, `variant` TEXT NOT NULL, `pre_distance_m` REAL NOT NULL, `near_distance_m` REAL NOT NULL, `pre_text` TEXT, `near_text` TEXT NOT NULL, `group_text` TEXT, `band_text` TEXT NOT NULL, `source` TEXT NOT NULL, `policy_id` TEXT NOT NULL, `evidence_json` TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_navi_guidance_navi_map_id_seq` ON `navi_guidance` (`navi_map_id`, `seq`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `navi_guidance_build` (`navi_map_id` INTEGER NOT NULL, `policy_id` TEXT NOT NULL, `status` TEXT NOT NULL, `region_id` TEXT, `map_sha256` TEXT, `route_sha256` TEXT, `created_at` INTEGER NOT NULL, `summary_json` TEXT NOT NULL, PRIMARY KEY(`navi_map_id`), FOREIGN KEY(`navi_map_id`) REFERENCES `navi_map`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
+
         /** Registered migration edges, exposed for backup compatibility checks. */
         val MIGRATIONS: List<androidx.room.migration.Migration> = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
             MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
             MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
             MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_19, MIGRATION_19_20,
-            MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23,
+            MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
         )
     }
 }

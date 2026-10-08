@@ -114,3 +114,9 @@ internal fun SupportSQLiteDatabase.downgradeRecordingSessionToBeforeV23() {
         RECORDING_SESSION_COLUMNS_BEFORE_V22 + V22_RECORDING_SESSION_ADDED_COLUMNS,
     )
 }
+
+/** 現行版 Room が先に作る v24 の純増2表を旧版 fixture から除く。 */
+internal fun SupportSQLiteDatabase.downgradeGuidanceToBeforeV24() {
+    execSQL("DROP TABLE IF EXISTS `navi_guidance_build`")
+    execSQL("DROP TABLE IF EXISTS `navi_guidance`")
+}

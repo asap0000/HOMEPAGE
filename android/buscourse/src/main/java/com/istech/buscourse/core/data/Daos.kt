@@ -3,6 +3,7 @@ package com.istech.buscourse.core.data
 import androidx.room.Dao
 import androidx.room.Embedded
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Relation
 import androidx.room.Transaction
@@ -537,6 +538,12 @@ interface NaviMapDao {
     @Insert suspend fun insertTrackPoints(points: List<NaviTrackPointEntity>)
     @Insert suspend fun insertEvents(events: List<NaviEventEntity>)
     @Insert suspend fun insertOutputs(outputs: List<NaviEventOutputEntity>)
+    @Insert suspend fun insertGuidance(rows: List<NaviGuidanceEntity>)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertGuidanceBuild(build: NaviGuidanceBuildEntity)
+    @Query("SELECT * FROM navi_guidance WHERE navi_map_id = :mapId ORDER BY seq")
+    suspend fun getGuidance(mapId: Long): List<NaviGuidanceEntity>
+    @Query("SELECT * FROM navi_guidance_build WHERE navi_map_id = :mapId")
+    suspend fun getGuidanceBuild(mapId: Long): NaviGuidanceBuildEntity?
 
     @Query("SELECT * FROM navi_map WHERE id = :id")
     suspend fun getMapById(id: Long): NaviMapEntity?

@@ -6,6 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.MapDataPackageEntity
@@ -85,7 +88,10 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
         MapPackageImporter(getApplication<BusCourseApplication>(), mapRepository)
     }
 
-    private val naviMapGenerator by lazy { NaviMapGenerator(database) }
+    private val naviMapGenerator by lazy { NaviMapGenerator(database, storageRoot) }
+    var roadProgress by mutableStateOf<String?>(null)
+        private set
+    private var roadProgressGeneration = 0
 
     private val storageRoot by lazy { BusCourseStorage.root(getApplication<BusCourseApplication>()) }
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -597,7 +603,13 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
                         SendToNaviResult.Retryable("オフライン地図（.iscmap）が選ばれていません。地図データ管理で選んでください。")
                     } else {
                         try {
-                            naviMapGenerator.generateFromCourse(courseId)
+                            roadProgress = null
+                            val progressGeneration = ++roadProgressGeneration
+                            naviMapGenerator.generateFromCourse(courseId, onRoadProgress = { message ->
+                                Handler(Looper.getMainLooper()).post {
+                                    if (roadProgressGeneration == progressGeneration) roadProgress = message
+                                }
+                            })
                             // 送れなかった理由を消し、成形済みにする（消さないと一覧が「送れません」と嘘をつき続け、
                             // 立てないと保存せずに送った予約が洗浄し直しで消える）。
                             repository.markCourseSentToNavi(courseId)
@@ -611,6 +623,9 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
                             }
                         } catch (e: Exception) {
                             SendToNaviResult.Retryable("ナビ用の地図を作れませんでした。入力と地図データを確認して、もう一度お試しください。")
+                        } finally {
+                            roadProgressGeneration++
+                            roadProgress = null
                         }
                     }
                 }

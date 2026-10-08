@@ -81,7 +81,7 @@ class BusCourseDatabaseMigration21Test {
         openSeededV20(context, name).close()
 
         val room = Room.databaseBuilder(context, BusCourseDatabase::class.java, name)
-            .addMigrations(BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22, BusCourseDatabase.MIGRATION_22_23)
+            .addMigrations(BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22, BusCourseDatabase.MIGRATION_22_23, BusCourseDatabase.MIGRATION_23_24)
             .build()
         try {
             val dao = room.courseDao()
@@ -145,6 +145,7 @@ class BusCourseDatabaseMigration21Test {
         db.downgradeCourseToBeforeV21()
         db.downgradeCourseStopToBeforeV22()
         db.downgradeRecordingSessionToBeforeV22()
+        db.downgradeGuidanceToBeforeV24()
         db.execSQL("PRAGMA user_version = 20")
         return db
     }

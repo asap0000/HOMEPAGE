@@ -241,7 +241,10 @@ private fun NaviScreenBody(
                     generating = true
                     scope.launch {
                         try {
-                            NaviMapGenerator(database).generateFromCourse(courseId)
+                            NaviMapGenerator(database,
+                                if (com.istech.buscourse.BuildConfig.NAVI_ONLY) null
+                                else com.istech.buscourse.core.data.BusCourseStorage.root(context)
+                            ).generateFromCourse(courseId)
                             reloadKey++
                         } catch (e: NaviMapGenerationException) {
                             Toast.makeText(context, "ナビ用マップの生成に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()

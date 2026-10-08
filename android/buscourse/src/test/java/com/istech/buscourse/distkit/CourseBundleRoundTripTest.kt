@@ -8,6 +8,8 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.NaviBranchEntity
 import com.istech.buscourse.core.data.NaviEventEntity
 import com.istech.buscourse.core.data.NaviEventOutputEntity
+import com.istech.buscourse.core.data.NaviGuidanceBuildEntity
+import com.istech.buscourse.core.data.NaviGuidanceEntity
 import com.istech.buscourse.core.data.NaviMapEntity
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
@@ -23,6 +25,7 @@ import com.istech.buscourse.navimap.NaviThinnedFrames
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertThrows
 import org.junit.Before
@@ -94,6 +97,11 @@ class CourseBundleRoundTripTest {
         assertThat(frames.all { File(targetRoot, it.fileRelPath).isFile }).isTrue()
         val event = targetDb.naviMapDao().getEvents(importedMap.id).single()
         assertThat(event.stopCardId).isNull()
+        val guidance = targetDb.naviMapDao().getGuidance(importedMap.id)
+        assertThat(guidance.map { listOf(it.seq, it.role, it.kind, it.chainageM, it.bandText, it.source, it.evidenceJson) })
+            .containsExactly(listOf(0, "turn", "RIGHT", 10.0, "右折", "existing", "{\"synthetic\":true}"),
+                listOf(1, "future-role", "future-kind", 15.0, "保存された帯", "research", "{}"))
+        assertThat(targetDb.naviMapDao().getGuidanceBuild(importedMap.id)?.status).isEqualTo("GPS_ONLY")
         assertThat(importedMap.mediaCount).isEqualTo(11)
 
         val cue = NaviFrameResolver.frameCueAtChainageM(segments, mapOf(segment.id to points), 20.0)!!
@@ -227,6 +235,12 @@ class CourseBundleRoundTripTest {
 
         assertThat(sourceDb.naviMapDao().getActiveMapsByIdentity("BUS-G", 8, 2032)).hasSize(1)
         assertThat(archive.isFile).isTrue()
+        val navi = JSONObject(JSONArray(archiveEntries(archive).getValue("courses.json").toString(Charsets.UTF_8))
+            .getJSONObject(0).getJSONObject("navi").toString())
+        assertThat(navi.has("guidance")).isFalse()
+        archive.inputStream().use { CourseBundleImporter(targetDb, targetRoot, naviOnly = true).importBundle(it) }
+        val importedMap = targetDb.naviMapDao().getActiveMapsByIdentity("BUS-G", 8, 2032).single()
+        assertThat(targetDb.naviMapDao().getGuidance(importedMap.id)).isEmpty()
     }
 
     @Test fun abandonedExtractionIsRemovedWithoutTouchingCommittedBundle() = runTest {
@@ -277,6 +291,16 @@ class CourseBundleRoundTripTest {
             NaviTrackPointEntity(segmentId = segmentId, seq = 1, chainageM = 0.0, tRelS = 10.0, lat = 0.0, lon = 0.0),
             NaviTrackPointEntity(segmentId = segmentId, seq = 2, chainageM = 20.0, tRelS = 20.0, lat = 0.0, lon = 0.001),
         ))
+        sourceDb.naviMapDao().insertGuidance(listOf(
+            NaviGuidanceEntity(naviMapId = mapId, seq = 0, role = "turn", kind = "RIGHT", chainageM = 10.0,
+                variant = "V1", preDistanceM = 40.0, nearDistanceM = 10.0, preText = "40メートル先、右折です。",
+                nearText = "まもなく右折です。", bandText = "右折", source = "existing", policyId = "test",
+                evidenceJson = "{\"synthetic\":true}"),
+            NaviGuidanceEntity(naviMapId = mapId, seq = 1, role = "future-role", kind = "future-kind", chainageM = 15.0,
+                variant = "V1", preDistanceM = 0.0, nearDistanceM = 0.0, nearText = "将来案内", bandText = "保存された帯",
+                source = "research", policyId = "test"),
+        ))
+        sourceDb.naviMapDao().insertGuidanceBuild(NaviGuidanceBuildEntity(mapId, "test", "GPS_ONLY", createdAt = 200L, summaryJson = "{}"))
         val eventId = sourceDb.naviMapDao().insertEvent(
             NaviEventEntity(
                 naviMapId = mapId, templateId = "app.stop", category = "stop", anchorType = "STOP_EVENT",

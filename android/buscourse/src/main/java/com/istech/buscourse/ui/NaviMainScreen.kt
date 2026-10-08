@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.TurnLeft
 import androidx.compose.material.icons.filled.TurnRight
 import androidx.compose.material.icons.filled.TurnSlightLeft
 import androidx.compose.material.icons.filled.TurnSlightRight
+import androidx.compose.material.icons.filled.TurnSharpLeft
+import androidx.compose.material.icons.filled.TurnSharpRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.UTurnRight
@@ -147,7 +149,8 @@ fun NaviMainScreen(
             val events = database.naviMapDao().getEvents(map.id)
             val points = loadedSegments.filter { it.kind == TRACK_KIND }.flatMap { loadedPoints[it.id].orEmpty() }
                 .sortedBy { it.chainageM }.map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
-            guidanceCues = withContext(Dispatchers.Default) { NaviGuidanceCues.build(points, events.filter { it.category.equals("stop", true) }.mapNotNull { it.chainageStartM }) }
+            val saved = database.naviMapDao().getGuidance(map.id)
+            guidanceCues = withContext(Dispatchers.Default) { if (saved.isNotEmpty()) savedCues(saved) else NaviGuidanceCues.build(points, events.filter { it.category.equals("stop", true) }.mapNotNull { it.chainageStartM }) }
             segments = loadedSegments; trackPointsBySegmentId = loadedPoints; maxChainageM = naviMainMaxChainageM(loadedSegments)
             followState = NaviMainFollowState(mode = NaviMainMode.PREVIEW)
             readiness = NaviMainReadiness.Ready(map.id, NaviMapDisplayHint(map.displayOrientation, map.displayPitchDeg), map.busId, map.courseNo, map.year)
@@ -178,7 +181,8 @@ fun NaviMainScreen(
                 .map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
             val stops = events.filter { it.category.equals("stop", ignoreCase = true) }
                 .mapNotNull { it.chainageStartM }
-            NaviGuidanceCues.build(points, stops)
+            val saved = database.naviMapDao().getGuidance(naviMap.id)
+            if (saved.isNotEmpty()) savedCues(saved) else NaviGuidanceCues.build(points, stops)
         }
         maxChainageM = naviMainMaxChainageM(loadedSegments)
         // ★state更新は読み込みが揃った最後にまとめて行う（segments/trackPointsBySegmentIdがreadiness=Ready
@@ -552,8 +556,16 @@ private fun NaviGuidanceBand(text: String, kind: NaviGuidanceCues.Kind?, modifie
                     NaviGuidanceCues.Kind.SLIGHT_LEFT -> Icons.Filled.TurnSlightLeft
                     NaviGuidanceCues.Kind.U_TURN -> Icons.Filled.UTurnRight
                     NaviGuidanceCues.Kind.STOP -> Icons.Filled.DirectionsBus
+                    NaviGuidanceCues.Kind.DIAGONAL_RIGHT -> Icons.Filled.TurnSlightRight
+                    NaviGuidanceCues.Kind.DIAGONAL_LEFT -> Icons.Filled.TurnSlightLeft
+                    NaviGuidanceCues.Kind.RIGHT_DIRECTION -> Icons.Filled.TurnRight
+                    NaviGuidanceCues.Kind.LEFT_DIRECTION -> Icons.Filled.TurnLeft
+                    NaviGuidanceCues.Kind.RIGHT_FRONT -> Icons.Filled.TurnSharpRight
+                    NaviGuidanceCues.Kind.LEFT_FRONT -> Icons.Filled.TurnSharpLeft
+                    NaviGuidanceCues.Kind.RIGHT_RETURN, NaviGuidanceCues.Kind.LEFT_RETURN, NaviGuidanceCues.Kind.RETURN -> Icons.Filled.UTurnRight
+                    NaviGuidanceCues.Kind.STRAIGHT, NaviGuidanceCues.Kind.UNKNOWN -> null
                 }
-                Icon(icon, contentDescription = kind.label(), tint = Color.White, modifier = Modifier.padding(start = 16.dp).size(24.dp))
+                if (icon != null) Icon(icon, contentDescription = kind.label(), tint = Color.White, modifier = Modifier.padding(start = 16.dp).size(24.dp))
             }
             Text(
                 text = annotated,
@@ -567,6 +579,15 @@ private fun NaviGuidanceBand(text: String, kind: NaviGuidanceCues.Kind?, modifie
         }
     }
 }
+
+private fun savedCues(rows: List<com.istech.buscourse.core.data.NaviGuidanceEntity>): List<NaviGuidanceCues.Cue> = rows
+    .filter { it.role == "turn" || it.role == "stop" }
+    .map { row ->
+        val kind = runCatching { NaviGuidanceCues.Kind.valueOf(row.kind) }.getOrDefault(NaviGuidanceCues.Kind.UNKNOWN)
+        NaviGuidanceCues.Cue(row.chainageM, kind,
+            runCatching { NaviGuidanceCues.Variant.valueOf(row.variant) }.getOrDefault(NaviGuidanceCues.Variant.V1),
+            row.preDistanceM, row.nearDistanceM, row.preText, row.nearText, row.groupText, row.bandText)
+    }
 
 /**
  * 画面下部の列（本画面唯一の操作子・設計§7-1「D-padは出さない」）。並び＝［×（ナビをやめる）］［距離の表示］［距離スライダー］。

@@ -141,3 +141,49 @@ data class NaviEventOutputEntity(
     @ColumnInfo(name = "output_kind") val outputKind: String,
     @ColumnInfo(name = "payload_json", defaultValue = "'{}'") val payloadJson: String = "{}",
 )
+
+@Entity(
+    tableName = "navi_guidance",
+    indices = [Index(value = ["navi_map_id", "seq"], unique = true)],
+    foreignKeys = [ForeignKey(
+        entity = NaviMapEntity::class,
+        parentColumns = ["id"], childColumns = ["navi_map_id"], onDelete = ForeignKey.CASCADE,
+    )],
+)
+data class NaviGuidanceEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "navi_map_id") val naviMapId: Long,
+    val seq: Int,
+    val role: String,
+    val kind: String,
+    @ColumnInfo(name = "chainage_m") val chainageM: Double,
+    @ColumnInfo(name = "chainage_end_m") val chainageEndM: Double? = null,
+    val variant: String,
+    @ColumnInfo(name = "pre_distance_m") val preDistanceM: Double,
+    @ColumnInfo(name = "near_distance_m") val nearDistanceM: Double,
+    @ColumnInfo(name = "pre_text") val preText: String? = null,
+    @ColumnInfo(name = "near_text") val nearText: String,
+    @ColumnInfo(name = "group_text") val groupText: String? = null,
+    @ColumnInfo(name = "band_text") val bandText: String,
+    val source: String,
+    @ColumnInfo(name = "policy_id") val policyId: String,
+    @ColumnInfo(name = "evidence_json", defaultValue = "'{}'") val evidenceJson: String = "{}",
+)
+
+@Entity(
+    tableName = "navi_guidance_build",
+    foreignKeys = [ForeignKey(
+        entity = NaviMapEntity::class,
+        parentColumns = ["id"], childColumns = ["navi_map_id"], onDelete = ForeignKey.CASCADE,
+    )],
+)
+data class NaviGuidanceBuildEntity(
+    @PrimaryKey @ColumnInfo(name = "navi_map_id") val naviMapId: Long,
+    @ColumnInfo(name = "policy_id") val policyId: String,
+    val status: String,
+    @ColumnInfo(name = "region_id") val regionId: String? = null,
+    @ColumnInfo(name = "map_sha256") val mapSha256: String? = null,
+    @ColumnInfo(name = "route_sha256") val routeSha256: String? = null,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "summary_json") val summaryJson: String,
+)

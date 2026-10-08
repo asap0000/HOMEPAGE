@@ -26,7 +26,9 @@ object NaviGuidanceCues {
 
     data class TrackPoint(val chainageM: Double, val tRelS: Double, val lat: Double, val lon: Double)
     enum class Kind {
-        LEFT, RIGHT, SLIGHT_LEFT, SLIGHT_RIGHT, U_TURN, STOP;
+        LEFT, RIGHT, SLIGHT_LEFT, SLIGHT_RIGHT, U_TURN, STOP,
+        DIAGONAL_RIGHT, DIAGONAL_LEFT, RIGHT_DIRECTION, LEFT_DIRECTION,
+        RIGHT_FRONT, LEFT_FRONT, RIGHT_RETURN, LEFT_RETURN, RETURN, STRAIGHT, UNKNOWN;
 
         fun label(): String = if (this == STOP) "停留所" else phrase()
         fun phrase(): String = when (this) {
@@ -36,6 +38,17 @@ object NaviGuidanceCues {
             SLIGHT_RIGHT -> "やや右"
             U_TURN -> "Uターン"
             STOP -> "停留所"
+            DIAGONAL_RIGHT -> "斜め右方向"
+            DIAGONAL_LEFT -> "斜め左方向"
+            RIGHT_DIRECTION -> "右方向"
+            LEFT_DIRECTION -> "左方向"
+            RIGHT_FRONT -> "右手前方向"
+            LEFT_FRONT -> "左手前方向"
+            RIGHT_RETURN -> "右戻る方向"
+            LEFT_RETURN -> "左戻る方向"
+            RETURN -> "戻る方向"
+            STRAIGHT -> "直進方向"
+            UNKNOWN -> ""
         }
     }
     enum class Variant { V1, V2, V3, V4 }
@@ -94,9 +107,23 @@ object NaviGuidanceCues {
         stops.filter { it.isFinite() && it >= START_SKIP_M }.sorted().map { Raw(it, Kind.STOP) }, points,
     )
 
-    private fun applyVariants(raw: List<Raw>, points: List<TrackPoint>): List<Cue> {
+    private fun applyVariants(raw: List<Raw>, points: List<TrackPoint>): List<Cue> =
+        applyVariantsToCues(raw.map { item ->
+            val speed = speedAt(points, item.chainage)
+            val isTurn = item.kind != Kind.STOP
+            val preRange = if (isTurn) TURN_PRE_M else STOP_PRE_M
+            val nearRange = if (isTurn) TURN_NEAR_M else STOP_NEAR_M
+            val pre = clamp(speed * if (isTurn) TURN_PRE_S else STOP_PRE_S, preRange.start, preRange.endInclusive)
+            val near = clamp(speed * if (isTurn) TURN_NEAR_S else STOP_NEAR_S, nearRange.start, nearRange.endInclusive)
+            Cue(item.chainage, item.kind, Variant.V1, pre, near, regularPre(item.kind, pre), "まもなく${item.kind.phrase()}です。")
+        }, points)
+
+    /** エンジンも旧案内と同じ予告・直前・まとめ文の整形を使う。 */
+    internal fun applyVariantsToCues(input: List<Cue>, points: List<TrackPoint>): List<Cue> {
+        val raw = input.map { Raw(it.chainageM, it.kind) }.sortedBy { it.chainage }
         if (raw.isEmpty()) return emptyList()
-        val speeds = raw.map { speedAt(points, it.chainage) }
+        val supplied = input.sortedBy { it.chainageM }
+        val speeds = supplied.map { speedAt(points, it.chainageM) }
         val groups = mutableListOf<IntRange>()
         var start = 0
         for (i in 1 until raw.size) {
@@ -106,13 +133,15 @@ object NaviGuidanceCues {
         groups += start until raw.size
         val result = MutableList(raw.size) { i ->
             val item = raw[i]
+            val original = supplied[i]
             val speed = speeds[i]
             val isTurn = item.kind != Kind.STOP
             val preRange = if (isTurn) TURN_PRE_M else STOP_PRE_M
             val nearRange = if (isTurn) TURN_NEAR_M else STOP_NEAR_M
             val pre = clamp(speed * if (isTurn) TURN_PRE_S else STOP_PRE_S, preRange.start, preRange.endInclusive)
             val near = clamp(speed * if (isTurn) TURN_NEAR_S else STOP_NEAR_S, nearRange.start, nearRange.endInclusive)
-            Cue(item.chainage, item.kind, Variant.V1, pre, near, regularPre(item.kind, pre), "まもなく${item.kind.phrase()}です。")
+            original.copy(variant = Variant.V1, preDistanceM = pre, nearDistanceM = near,
+                preText = regularPre(item.kind, pre), nearText = "まもなく${item.kind.phrase()}です。", groupText = null, bandText = null)
         }.toMutableList()
         groups.forEach { range ->
             val count = range.count()
@@ -169,6 +198,26 @@ object NaviGuidanceCues {
         d25 > 0 -> Kind.SLIGHT_RIGHT
         else -> Kind.SLIGHT_LEFT
     }
+    internal fun directionKind(angle: Double): Kind {
+        require(angle.isFinite()) { "Direction angle is not finite" }
+        val normalized = normalize(angle)
+        val absolute = abs(normalized)
+        val right = normalized >= 0
+        return when {
+            absolute < 28 -> Kind.STRAIGHT
+            absolute < 70 -> if (right) Kind.DIAGONAL_RIGHT else Kind.DIAGONAL_LEFT
+            absolute < 110 -> if (right) Kind.RIGHT_DIRECTION else Kind.LEFT_DIRECTION
+            absolute < 150 -> if (right) Kind.RIGHT_FRONT else Kind.LEFT_FRONT
+            absolute < 170 -> if (right) Kind.RIGHT_RETURN else Kind.LEFT_RETURN
+            else -> Kind.RETURN
+        }
+    }
+    internal fun directionGeometry(points: List<TrackPoint>, c: Double): Pair<Double?, Double?> =
+        turnAt(points, c, 25.0) to turnAt(points, c, 50.0)
+    internal fun distanceBetween(a: TrackPoint?, b: TrackPoint?): Double = distanceM(a, b)
+    internal fun pointAt(points: List<TrackPoint>, chainage: Double): TrackPoint? = pointAtOrAfter(points, chainage)
+    internal fun cueSpeed(points: List<TrackPoint>, chainage: Double): Double = speedAt(points, chainage)
+    internal fun roundedDistance(value: Double): Int = rounded(value)
     private fun turnAt(points: List<TrackPoint>, c: Double, windowM: Double): Double? {
         val before = pointAtOrAfter(points, c - windowM); val center = pointAtOrAfter(points, c); val after = pointAtOrAfter(points, c + windowM)
         if (before == null || center == null || after == null) return null

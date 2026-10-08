@@ -5,6 +5,7 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.NaviBranchEntity
 import com.istech.buscourse.core.data.NaviEventEntity
 import com.istech.buscourse.core.data.NaviEventOutputEntity
+import com.istech.buscourse.core.data.NaviGuidanceEntity
 import com.istech.buscourse.core.data.NaviMapEntity
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
@@ -40,7 +41,7 @@ class CourseBundleExporter(
             val year = course.year ?: throw IllegalArgumentException("コースidentityがありません")
             var map = database.naviMapDao().getActiveMapsByIdentity(busId, courseNo, year).firstOrNull()
             if (map == null) {
-                NaviMapGenerator(database).generateFromCourse(courseId)
+                NaviMapGenerator(database, storageRoot).generateFromCourse(courseId)
                 map = database.naviMapDao().getActiveMapsByIdentity(busId, courseNo, year).firstOrNull()
             }
             val activeMap = map ?: throw IllegalStateException("アクティブなナビ地図を作成できませんでした")
@@ -87,6 +88,8 @@ class CourseBundleExporter(
         val points = segments.flatMap { dao.getTrackPoints(it.id) }
         val events = dao.getEvents(map.id)
         val outputs = events.flatMap { dao.getOutputs(it.id) }
+        val guidance = dao.getGuidance(map.id)
+        val guidanceBuild = dao.getGuidanceBuild(map.id)
         val segmentsById = segments.associateBy { it.id }
         val sessionKeysForMap = mutableMapOf<Long, String>()
         segments.mapNotNull { it.sessionId }.distinct().forEach { oldId ->
@@ -112,13 +115,18 @@ class CourseBundleExporter(
                 if (pendingKeys.add(sessionKey to frame)) pending += PendingFrame(sessionKey, frame)
             }
         }
-        return JSONObject()
+        val result = JSONObject()
             .put("map", mapJson(map, includedFrameCount))
             .put("branches", JSONArray().also { a -> branches.forEach { a.put(branchJson(it)) } })
             .put("segments", JSONArray().also { a -> segmentsForJson.forEach { a.put(segmentJson(it)) } })
             .put("trackPoints", JSONArray().also { a -> points.forEach { a.put(trackPointJson(it)) } })
             .put("events", JSONArray().also { a -> events.forEach { a.put(eventJson(it.copy(stopCardId = null))) } })
             .put("outputs", JSONArray().also { a -> outputs.forEach { a.put(outputJson(it)) } })
+        if (guidance.isNotEmpty()) result.put("guidance", JSONArray().also { a -> guidance.forEach { a.put(guidanceJson(it)) } })
+        guidanceBuild?.let { result.put("guidanceBuild", JSONObject().put("policyId", it.policyId).put("status", it.status)
+            .put("regionId", it.regionId).put("mapSha256", it.mapSha256).put("routeSha256", it.routeSha256)
+            .put("createdAt", it.createdAt).put("summaryJson", it.summaryJson)) }
+        return result
     }
 
     private fun courseJson(course: CourseEntity) = JSONObject()
@@ -148,6 +156,11 @@ class CourseBundleExporter(
         .put("validFrom", x.validFrom).put("validUntil", x.validUntil).put("repeatPolicy", x.repeatPolicy)
     private fun outputJson(x: NaviEventOutputEntity) = JSONObject().put("id", x.id).put("eventId", x.eventId)
         .put("outputKind", x.outputKind).put("payloadJson", x.payloadJson)
+    private fun guidanceJson(x: NaviGuidanceEntity) = JSONObject().put("id", x.id).put("seq", x.seq).put("role", x.role).put("kind", x.kind)
+        .put("chainageM", x.chainageM).put("chainageEndM", x.chainageEndM).put("variant", x.variant)
+        .put("preDistanceM", x.preDistanceM).put("nearDistanceM", x.nearDistanceM).put("preText", x.preText)
+        .put("nearText", x.nearText).put("groupText", x.groupText).put("bandText", x.bandText)
+        .put("source", x.source).put("policyId", x.policyId).put("evidenceJson", x.evidenceJson)
 
     private data class PendingFrame(val sessionKey: String, val frame: NaviThinnedFrames.Frame)
 }

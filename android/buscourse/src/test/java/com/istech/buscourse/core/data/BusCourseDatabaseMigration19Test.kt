@@ -133,6 +133,7 @@ class BusCourseDatabaseMigration19Test {
             downgradeCourseStopToBeforeV19(this)
             downgradeCourseToBeforeV21()
             downgradeRecordingSessionToBeforeV22()
+            downgradeGuidanceToBeforeV24()
             execSQL("PRAGMA user_version = 17")
         }
         helper.close()
@@ -254,6 +255,7 @@ class BusCourseDatabaseMigration19Test {
         BusCourseDatabase.MIGRATION_17_19, BusCourseDatabase.MIGRATION_19_20,
         BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22,
         BusCourseDatabase.MIGRATION_22_23,
+        BusCourseDatabase.MIGRATION_23_24,
     )
 
     private companion object {

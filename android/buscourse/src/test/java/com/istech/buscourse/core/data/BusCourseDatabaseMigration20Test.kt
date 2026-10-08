@@ -130,6 +130,7 @@ class BusCourseDatabaseMigration20Test {
             downgradeCourseToBeforeV21()
             downgradeCourseStopToBeforeV22()
             downgradeRecordingSessionToBeforeV22()
+            downgradeGuidanceToBeforeV24()
             execSQL("PRAGMA user_version = 19")
         }
         helper.close()
@@ -142,6 +143,7 @@ class BusCourseDatabaseMigration20Test {
                 BusCourseDatabase.MIGRATION_16_17, BusCourseDatabase.MIGRATION_17_19,
                 BusCourseDatabase.MIGRATION_19_20, BusCourseDatabase.MIGRATION_20_21, BusCourseDatabase.MIGRATION_21_22,
                 BusCourseDatabase.MIGRATION_22_23,
+                BusCourseDatabase.MIGRATION_23_24,
             )
             .allowMainThreadQueries()
             .build()

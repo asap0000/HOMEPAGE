@@ -4,10 +4,22 @@ import androidx.room.withTransaction
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.NaviEventEntity
 import com.istech.buscourse.core.data.NaviEventOutputEntity
+import com.istech.buscourse.core.data.NaviGuidanceBuildEntity
+import com.istech.buscourse.core.data.NaviGuidanceEntity
 import com.istech.buscourse.core.data.NaviMapEntity
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
 import com.istech.buscourse.core.geo.GeoMath
+import com.istech.buscourse.map.MapDataPackageRepository
+import com.istech.buscourse.navimap.road.NaviRoadIndexStore
+import com.istech.buscourse.navimap.road.NaviRoadMatcher
+import com.istech.buscourse.navimap.road.RoadFingerprint
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /** DB参照を解決済みにした、簡易ナビマップ生成の入力。 */
 data class NaviMapSource(
@@ -158,14 +170,14 @@ object NaviMapBuilder {
 }
 
 /** 確定コースから app_simple ナビマップを Room へ登録するDB部。 */
-class NaviMapGenerator(private val database: BusCourseDatabase) {
-    suspend fun generateFromCourse(courseId: Long, now: Long = System.currentTimeMillis()): Long =
-        generate(courseId, now, preview = false)
+class NaviMapGenerator(private val database: BusCourseDatabase, private val storageRoot: File? = null) {
+    suspend fun generateFromCourse(courseId: Long, now: Long = System.currentTimeMillis(),
+        onRoadProgress: (String) -> Unit = {}): Long = generate(courseId, now, preview = false, onRoadProgress = onRoadProgress)
 
-    suspend fun generatePreview(courseId: Long, now: Long = System.currentTimeMillis()): Long =
-        generate(courseId, now, preview = true)
+    suspend fun generatePreview(courseId: Long, now: Long = System.currentTimeMillis(),
+        onRoadProgress: (String) -> Unit = {}): Long = generate(courseId, now, preview = true, onRoadProgress = onRoadProgress)
 
-    private suspend fun generate(courseId: Long, now: Long, preview: Boolean): Long {
+    private suspend fun generate(courseId: Long, now: Long, preview: Boolean, onRoadProgress: (String) -> Unit): Long {
         val course = database.courseDao().getById(courseId) ?: throw NaviMapGenerationException(
             NaviMapGenerationException.Reason.COURSE_NOT_FOUND,
             "コースが見つかりません: $courseId",
@@ -238,6 +250,33 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
             NaviMapSource(effectiveBusId, effectiveCourseNo, effectiveYear, title, sessionForSegment, samples, stopInputs, loresFrameCount),
         )
 
+        val selected = MapDataPackageRepository(database).getSelected()
+        val groups = listOf(NaviGuidanceEngine.TrackGroup("track", generated.trackPoints.map {
+            NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon)
+        }))
+        val routeSha = RoadFingerprint.of(groups)
+        var roadError = false
+        val roadEvidence = if (selected != null && storageRoot != null) withContext(Dispatchers.Default) {
+            try {
+                onRoadProgress("地図の道の索引を準備しています")
+                val index = NaviRoadIndexStore(storageRoot).obtain(selected)
+                currentCoroutineContext().ensureActive()
+                if (index == null) null else NaviRoadMatcher(index.file).match(index, groups) { done, total ->
+                    onRoadProgress("地図の道で照らしています（$done / $total）")
+                }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { roadError = true; null }
+        } else null
+        val stopChainages = generated.events.filter { it.event.category.equals("stop", true) }.mapNotNull { it.event.chainageStartM }
+        val guidance = if (roadEvidence == null) NaviGuidanceEngine.build(groups, stopChainages) else try {
+            NaviGuidanceEngine.build(groups, stopChainages, roadEvidence)
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) {
+            roadError = true
+            NaviGuidanceEngine.build(groups, stopChainages)
+        }
+        val guidanceStatus = if (roadError) NaviGuidanceEngine.STATUS_ROAD_ERROR else guidance.status
+
         return database.withTransaction {
             val dao = database.naviMapDao()
             if (!preview) dao.archiveSupersededAppSimple(effectiveBusId, effectiveCourseNo, effectiveYear, now)
@@ -249,7 +288,20 @@ class NaviMapGenerator(private val database: BusCourseDatabase) {
                 mapToInsert.copy(createdAt = now, updatedAt = now), now,
             )
             val segmentId = dao.insertSegment(generated.segment.copy(naviMapId = mapId))
-            dao.insertTrackPoints(generated.trackPoints.map { it.copy(segmentId = segmentId) })
+            val storedPoints = generated.trackPoints.map { it.copy(segmentId = segmentId) }
+            dao.insertTrackPoints(storedPoints)
+            dao.insertGuidance(guidance.guidance.mapIndexed { index, item ->
+                val cue = item.cue
+                NaviGuidanceEntity(naviMapId = mapId, seq = index, role = item.role, kind = cue.kind.name,
+                    chainageM = cue.chainageM, variant = cue.variant.name, preDistanceM = cue.preDistanceM,
+                    nearDistanceM = cue.nearDistanceM, preText = cue.preText, nearText = cue.nearText,
+                    groupText = cue.groupText, bandText = cue.bandText ?: cue.kind.phrase(), source = item.source,
+                    policyId = guidance.policyId, evidenceJson = org.json.JSONObject(item.evidence).toString())
+            })
+            dao.insertGuidanceBuild(NaviGuidanceBuildEntity(mapId, guidance.policyId, guidanceStatus,
+                regionId = selected?.regionId, mapSha256 = selected?.mbtilesSha256, routeSha256 = routeSha,
+                createdAt = now, summaryJson = org.json.JSONObject(guidance.summary + guidance.summaryDetails).put("diagnostics",
+                    org.json.JSONArray().also { rows -> guidance.diagnostics.forEach { rows.put(org.json.JSONObject(it)) } }).toString()))
             for (generatedEvent in generated.events) {
                 val eventId = dao.insertEvent(generatedEvent.event.copy(naviMapId = mapId))
                 dao.insertOutputs(generatedEvent.outputs.map { it.copy(eventId = eventId) })

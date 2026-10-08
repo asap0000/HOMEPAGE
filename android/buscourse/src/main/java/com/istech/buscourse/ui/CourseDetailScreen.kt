@@ -1033,6 +1033,7 @@ fun CourseDetailScreen(
                 OutlinedTextField(identityCourseNoInput, { identityCourseNoInput = it }, label = { Text("コース番号") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(identityYearInput, { identityYearInput = it }, label = { Text("年度") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                if (busy) viewModel.roadProgress?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 identityError?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

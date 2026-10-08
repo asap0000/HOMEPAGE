@@ -7,6 +7,8 @@ import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.core.data.NaviBranchEntity
 import com.istech.buscourse.core.data.NaviEventEntity
 import com.istech.buscourse.core.data.NaviEventOutputEntity
+import com.istech.buscourse.core.data.NaviGuidanceBuildEntity
+import com.istech.buscourse.core.data.NaviGuidanceEntity
 import com.istech.buscourse.core.data.NaviMapEntity
 import com.istech.buscourse.core.data.NaviSegmentEntity
 import com.istech.buscourse.core.data.NaviTrackPointEntity
@@ -228,6 +230,22 @@ class CourseBundleImporter(
             dao.insertOutput(
                 NaviEventOutputEntity(eventId = eventId, outputKind = obj.getString("outputKind"), payloadJson = obj.optString("payloadJson", "{}")),
             )
+        }
+        // 古い版のアプリは知っているキーしか読まないので、束の schema_version は上げない。行の id は束の値を使わず振り直す（別の端末の id と衝突させない）。
+        navi.optJSONArray("guidance")?.let { rows ->
+            dao.insertGuidance(rows.objects().map { obj ->
+                NaviGuidanceEntity(id = 0, naviMapId = mapId, seq = obj.getInt("seq"), role = obj.getString("role"),
+                    kind = obj.getString("kind"), chainageM = obj.getDouble("chainageM"), chainageEndM = obj.nullableDouble("chainageEndM"),
+                    variant = obj.getString("variant"), preDistanceM = obj.getDouble("preDistanceM"), nearDistanceM = obj.getDouble("nearDistanceM"),
+                    preText = obj.optNullableString("preText"), nearText = obj.getString("nearText"), groupText = obj.optNullableString("groupText"),
+                    bandText = obj.getString("bandText"), source = obj.getString("source"), policyId = obj.getString("policyId"),
+                    evidenceJson = obj.optString("evidenceJson", "{}"))
+            })
+        }
+        navi.optJSONObject("guidanceBuild")?.let { obj ->
+            dao.insertGuidanceBuild(NaviGuidanceBuildEntity(mapId, obj.getString("policyId"), obj.getString("status"),
+                obj.optNullableString("regionId"), obj.optNullableString("mapSha256"), obj.optNullableString("routeSha256"),
+                obj.getLong("createdAt"), obj.optString("summaryJson", "{}")))
         }
     }
 

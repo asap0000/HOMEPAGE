@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import com.istech.buscourse.BusCourseApplication
+import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.navimap.NaviMapGenerationException
 import com.istech.buscourse.navimap.NaviMapGenerator
 import kotlinx.coroutines.launch
@@ -27,8 +28,10 @@ fun CoursePrecheckScreen(courseId: Long, onBack: () -> Unit, onSend: () -> Unit)
     val db = remember { (context.applicationContext as BusCourseApplication).database }
     var mapId by remember(courseId) { mutableStateOf<Long?>(null) }
     var error by remember(courseId) { mutableStateOf<String?>(null) }
+    var roadProgress by remember(courseId) { mutableStateOf<String?>(null) }
     LaunchedEffect(courseId) {
-        try { mapId = NaviMapGenerator(db).generatePreview(courseId) }
+        try { mapId = NaviMapGenerator(db, BusCourseStorage.root(context)).generatePreview(courseId,
+            onRoadProgress = { message -> android.os.Handler(android.os.Looper.getMainLooper()).post { roadProgress = message } }) }
         catch (e: NaviMapGenerationException) {
             error = when (e.reason) {
                 NaviMapGenerationException.Reason.INSUFFICIENT_TRACK_POINTS -> "このコースは映像ナビを作れません（軌跡がありません）。停留所を直して保存すると、もう一度試せます。"
@@ -55,7 +58,7 @@ fun CoursePrecheckScreen(courseId: Long, onBack: () -> Unit, onSend: () -> Unit)
         }
         else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(); Text("確認用のデータを作っています…")
+                CircularProgressIndicator(); Text(roadProgress ?: "確認用のデータを作っています…")
                 androidx.compose.material3.TextButton(onClick = onBack) { Text("×") }
             }
         }
