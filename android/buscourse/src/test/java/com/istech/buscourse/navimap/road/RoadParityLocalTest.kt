@@ -25,7 +25,8 @@ class RoadParityLocalTest {
         val differences = mutableListOf<String>()
         for (key in listOf("blue123", "red91011", "late2")) {
             val source = JSONObject(File(root, "courses/$key.json").readText())
-            val derived = JSONObject(File(root, "derived/$key.json").readText())
+            val r7 = File(root, "derived-r7/$key.json")
+            val derived = JSONObject((if (r7.isFile) r7 else File(root, "derived/$key.json")).readText())
             val expected = derived.getJSONArray("guidance")
             val segments = source.getJSONArray("segments")
             val pointSets = source.getJSONObject("points")
@@ -47,13 +48,13 @@ class RoadParityLocalTest {
             val evidence = NaviRoadMatcher(indexFile).match(index, groups)
             if (evidence.routeSha256 != derived.getJSONObject("mapGuidance").getString("routeSHA256"))
                 differences += "$key: route SHA differs"
-            // The r6 derived file predates signal wording; compare its map layer separately.
-            val actual = NaviGuidanceEngine.build(groups, stops, evidence.copy(visits = emptyList())).guidance.map { it.cue }
+            // r7 guidance has cranks but predates signal wording.
+            val actual = NaviGuidanceEngine.build(groups, stops, evidence.copy(visits = emptyList())).guidance
             val withSignals = NaviGuidanceEngine.build(groups, stops, evidence).guidance.map { it.cue }
-            println("$key 信号を付けた案内 ${withSignals.count { it.bandText?.startsWith("信号を") == true }} 件（web-lab の比較: 青123=16・赤91011=17・第一青バス遅2=7）")
+            println("$key 信号を付けた案内 ${withSignals.count { it.bandText?.startsWith("信号を") == true }} 件（r9: 青123=19・赤91011=19・第一青バス遅2=8）")
             if (actual.size != expected.length()) differences += "$key: count actual=${actual.size} expected=${expected.length()}"
             for (i in 0 until minOf(actual.size, expected.length())) {
-                val a = actual[i]; val e = expected.getJSONObject(i)
+                val guidance = actual[i]; val a = guidance.cue; val e = expected.getJSONObject(i)
                 val fields = mutableListOf<String>()
                 if (a.kind.name != e.getString("kind")) fields += "kind"
                 if (abs(a.chainageM - e.getDouble("chainageM")) > .5) fields += "chainageM"
@@ -62,6 +63,14 @@ class RoadParityLocalTest {
                 if (abs(a.preDistanceM - e.getDouble("preDistanceM")) > .5 || a.preText != e.optString("preText").takeUnless { e.isNull("preText") })
                     println("$key [$i] 予告の差 a=(${a.preDistanceM.toInt()},${a.preText}) e=(${e.getDouble("preDistanceM").toInt()},${e.optString("preText")})")
                 if (a.nearText != e.optString("nearText")) fields += "nearText"
+                if (r7.isFile) {
+                    val crank = guidance.evidence["crank"] as? Map<*, *>
+                    val expectedCrank = e.optJSONObject("crank")
+                    if (crank?.get("role") != expectedCrank?.optString("role")) fields += "crankRole"
+                    val expectedDisplay = expectedCrank?.let { it.optDouble(if (it.optString("role") == "entry") "entryM" else "exitM") }
+                        ?: e.getDouble("chainageM")
+                    if (abs(a.displayM - expectedDisplay) > .5) fields += "displayM"
+                }
                 if (fields.isNotEmpty()) differences += "$key [$i] ${fields.joinToString()}"
             }
         }

@@ -21,7 +21,8 @@ class NaviRoadMatcher(private val file: File) {
     private data class Span(val edge: Int, val start: Double, val end: Double)
     private data class Transition(val distance: Double, val spans: List<Span>)
     private data class Window(val status: String, val nodes: List<RoadVisit> = emptyList(),
-        val mean: Double = 0.0, val p95: Double = 0.0, val chord: Double = 0.0)
+        val mean: Double = 0.0, val p95: Double = 0.0, val chord: Double = 0.0,
+        val pathWays: List<Long> = emptyList())
     private val car = setOf("motorway", "motorway_link", "trunk", "trunk_link", "primary", "primary_link",
         "secondary", "secondary_link", "tertiary", "tertiary_link", "unclassified", "residential",
         "living_street", "service", "road", "track", "busway", "bus_guideway")
@@ -48,9 +49,11 @@ class NaviRoadMatcher(private val file: File) {
             for (group in groups) targets += targetVisits(group)
             progress(0, targets.size)
             val visits = mutableListOf<RoadVisit>()
+            val windows = mutableListOf<RoadCrankConnector.Window>()
             targets.forEachIndexed { i, (group, target) ->
                 currentCoroutineContext().ensureActive()
                 val window = matchWindow(group, target)
+                if (window.status == "CONNECTED_FIT") windows += RoadCrankConnector.Window(group.id, window.nodes, window.pathWays)
                 if (window.status == "CONNECTED_FIT") for (node in window.nodes) {
                     val row = node.copy(meanLateralM = window.mean, p95LateralM = window.p95, outerChordM = window.chord)
                     val prior = visits.indexOfFirst { it.nodeId == row.nodeId && it.segmentId == row.segmentId && abs(it.chainageM - row.chainageM) < 40 }
@@ -79,8 +82,12 @@ class NaviRoadMatcher(private val file: File) {
                 db.rawQuery("SELECT value FROM metadata WHERE name IN ('data_timestamp_utc','dataTimestampUTC') LIMIT 1", null).use {
                     if (it.moveToFirst()) it.getString(0) else null
                 } else null
+            val proposals = decided.filter { it.decision == "connected-crank" || it.decision == "isolated-geometry-and-GPS" }
+            val crank = RoadCrankConnector.build(proposals, windows, ways.mapValues { (_, w) ->
+                RoadCrankConnector.Way(w.nodes, w.tags["junction"], w.direction, w.origin)
+            }, coords.mapValues { (_, p) -> p.x to p.y })
             return RoadEvidence(index.regionId, index.mapSha256, index.sha256, timestamp,
-                RoadFingerprint.of(groups), decided, decided.filter { it.decision == "connected-crank" || it.decision == "isolated-geometry-and-GPS" })
+                RoadFingerprint.of(groups), decided, proposals, crank.cranks, crank.decisions)
         } finally { db.close() }
     }
 
@@ -329,7 +336,11 @@ class NaviRoadMatcher(private val file: File) {
                 listOf(ew, fw).map { mapOf("id" to it.id, "direction" to it.direction, "origin" to it.origin) }, 0.0, 0.0, 0.0)
         }
         val unique = visits.distinctBy { it.nodeId to round(it.chainageM / 10) }
-        return Window(if (fit) "CONNECTED_FIT" else "FIT_UNCERTAIN", unique, round3(mean), round3(p95), round3(chord))
+        return Window(if (fit) "CONNECTED_FIT" else "FIT_UNCERTAIN", unique, round3(mean), round3(p95), round3(chord),
+            joined.map { edges[it.edge].way }.fold(mutableListOf<Long>()) { ids, way ->
+                if (ids.lastOrNull() != way) ids += way
+                ids
+            })
     }
 
     private fun arm(id: Long, wayId: Long, position: Int, step: Int): Pair<Double, Double> {

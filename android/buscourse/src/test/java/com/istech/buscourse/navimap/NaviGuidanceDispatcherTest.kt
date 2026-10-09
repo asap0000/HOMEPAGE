@@ -69,4 +69,17 @@ class NaviGuidanceDispatcherTest {
             following = false, onCourse = true, voiceEnabled = false)
         assertThat(result.bandText).isEqualTo("保存した案内帯 80m")
     }
+
+    @Test fun bandUsesNearestRoadDisplayPositionWhileSpeechUsesCuePosition() {
+        val entry = cue.copy(chainageM = 95.0, kind = NaviGuidanceCues.Kind.RIGHT,
+            displayOverrideM = 100.0, bandText = "右折、すぐ左折")
+        val exit = cue.copy(chainageM = 110.0, displayOverrideM = 125.0, bandText = "左折")
+        val before = NaviGuidanceDispatcher.update(listOf(exit, entry), NaviGuidanceDispatcher.State(),
+            96.0, null, false, true, false)
+        assertThat(before.bandText).isEqualTo("右折、すぐ左折 0m")
+        val after = NaviGuidanceDispatcher.update(listOf(exit, entry), NaviGuidanceDispatcher.State(),
+            101.0, null, false, true, false)
+        assertThat(after.bandText).isEqualTo("左折 20m")
+        assertThat(entry.nearAtM).isEqualTo(85.0)
+    }
 }

@@ -27,13 +27,14 @@ class RoadEnrichmentTest {
         assertThat(result.summary["roadAdded"]).isEqualTo(1)
     }
 
-    @Test fun rejectsUnconfirmedCrankAndAcceptsConnectedPair() {
+    @Test fun rejectsCrankWithoutOriginalNodeConnector() {
         val first = visit(200.0, 101, 40.0, "DIAGONAL_RIGHT", outWay = 2,
             reason = "connected-crank", partner = 102)
         val second = visit(225.0, 102, -40.0, "DIAGONAL_LEFT", inWay = 2,
             reason = "connected-crank", partner = 101)
-        val accepted = NaviGuidanceEngine.build(listOf(group), emptyList(), road(first, second))
-        assertThat(accepted.summary["roadAdded"]).isEqualTo(2)
+        // 入口の出る道＝出口の入る道なら、70°未満でクランクの組にならなくても地図の案内として足す（r6／r7 と同じ）。
+        val connected = NaviGuidanceEngine.build(listOf(group), emptyList(), road(first, second))
+        assertThat(connected.summary["roadAdded"]).isEqualTo(2)
         val refused = NaviGuidanceEngine.build(listOf(group), emptyList(), road(first, second.copy(inWay = 3)))
         assertThat(refused.summary["roadAdded"]).isEqualTo(0)
         assertThat(refused.diagnostics.count { it["decision"] == "crank-connection-unconfirmed" }).isEqualTo(2)

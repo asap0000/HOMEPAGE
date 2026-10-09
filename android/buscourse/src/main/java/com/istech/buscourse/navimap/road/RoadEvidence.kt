@@ -37,6 +37,14 @@ data class RoadEvidence(
     val regionId: String, val mapSha256: String, val indexSha256: String,
     val dataTimestampUtc: String?, val routeSha256: String,
     val visits: List<RoadVisit>, val proposals: List<RoadVisit>,
+    val cranks: List<RoadCrank> = emptyList(),
+    val crankDecisions: List<Map<String, Any?>> = emptyList(),
+)
+
+data class RoadCrank(
+    val id: String, val segmentId: String, val entry: RoadVisit, val exit: RoadVisit,
+    val nodeIds: List<Long>, val wayIds: List<Long>, val lengthM: Double,
+    val legs: List<Map<String, Any?>>,
 )
 
 object RoadFingerprint {

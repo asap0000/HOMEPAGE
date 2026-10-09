@@ -1,6 +1,7 @@
 package com.istech.buscourse.navimap
 
 import com.istech.buscourse.navimap.road.RoadEvidence
+import com.istech.buscourse.navimap.road.RoadCrank
 import com.istech.buscourse.navimap.road.RoadVisit
 import kotlin.math.abs
 import kotlin.math.sign
@@ -12,6 +13,7 @@ object NaviGuidanceEngine {
     const val STATUS_APPLIED = "APPLIED"
     const val STATUS_ROAD_ERROR = "ROAD_ERROR"
     const val SIGNAL_POLICY_ID = "signal-landmark-wording-trial-v1"
+    const val CRANK_POLICY_ID = "road-structure-crank-v1"
     const val SIGNAL_MAXIMUM_CUE_GAP_M = 30.0
     const val SIGNAL_NODE_LATERAL_M = 20.0
     const val SIGNAL_MEAN_LATERAL_M = 12.0
@@ -93,18 +95,22 @@ object NaviGuidanceEngine {
         val formatted = NaviGuidanceCues.applyVariantsToCues(combined.map { it.cue }, points)
         val result = combined.mapIndexed { i, g -> g.copy(cue = formatted[i]) }
         val road = if (roadEvidence == null) RoadResult(result, 0, 0, emptyList()) else applyRoad(result, roadEvidence, points)
-        val signaled = if (roadEvidence == null) road.guidance to 0 else withSignalLandmarks(road.guidance, roadEvidence, groups)
+        val cranked = if (roadEvidence == null) CrankResult(road.guidance, 0, emptyList())
+            else applyRoadCranks(road.guidance, roadEvidence.cranks, points)
+        val signaled = if (roadEvidence == null) cranked.guidance to 0 else withSignalLandmarks(cranked.guidance, roadEvidence, groups)
         val counts = signaled.first.groupingBy { it.source }.eachCount() + mapOf(
             "diagnostics" to detections.count { it["decision"] != null }, "added" to (added.size + road.added),
-            "roadAdded" to road.added, "reanchored" to road.reanchored, "signal" to signaled.second,
+            "roadAdded" to road.added, "reanchored" to road.reanchored, "crank" to cranked.accepted,
+            "signal" to signaled.second,
             "visits" to (roadEvidence?.visits?.size ?: 0), "proposals" to (roadEvidence?.proposals?.size ?: 0))
         val state = if (roadEvidence == null) STATUS_GPS_ONLY else STATUS_APPLIED
         return Result(signaled.first, POLICY_ID, state, regionId = roadEvidence?.regionId,
             mapSha256 = roadEvidence?.mapSha256, routeSha256 = roadEvidence?.routeSha256,
-            summary = counts, diagnostics = detections.filter { it["decision"] != null } + road.decisions,
+            summary = counts, diagnostics = detections.filter { it["decision"] != null } + road.decisions +
+                (roadEvidence?.crankDecisions ?: emptyList()) + cranked.decisions,
             summaryDetails = if (roadEvidence == null) emptyMap() else mapOf("indexSha256" to roadEvidence.indexSha256,
                 "dataTimestampUTC" to roadEvidence.dataTimestampUtc, "mapSha256" to roadEvidence.mapSha256,
-                "roadPolicyId" to "map-connected-guidance-v1"))
+                "roadPolicyId" to "map-connected-guidance-v1", "crankPolicyId" to CRANK_POLICY_ID))
     }
 
     private data class RoadResult(val guidance: List<Guidance>, val added: Int, val reanchored: Int,
@@ -119,6 +125,8 @@ object NaviGuidanceEngine {
                 "angleDeg" to n.angleDeg, "reason" to n.decision)
             fun decision(value: String, extra: Map<String, Any?> = emptyMap()) { decisions += item + extra + ("decision" to value) }
             if (n.chainageM < 70) { decision("start-margin"); continue }
+            // 地図の案内を足すかどうかは r6／r7 と同じ条件（入口の出る道＝出口の入る道・向きが逆）。
+            // クランクの組（70〜150°・一意のつなぎ）に採用されたかどうかとは別（採用は後段 applyCranks で行う）。
             val partner = road.proposals.firstOrNull { it.nodeId == n.crankPartner && it.segmentId == n.segmentId && abs(it.chainageM - n.chainageM) <= 45 }
             val first = if (partner != null && partner.chainageM < n.chainageM) partner else n
             val last = if (first === n) partner else n
@@ -154,6 +162,102 @@ object NaviGuidanceEngine {
         val sorted = raw.sortedBy { it.cue.chainageM }
         val formatted = NaviGuidanceCues.applyVariantsToCues(sorted.map { it.cue }, points)
         return RoadResult(sorted.mapIndexed { i, g -> g.copy(cue = formatted[i]) }, added, reanchored, decisions)
+    }
+
+    private data class CrankResult(val guidance: List<Guidance>, val accepted: Int,
+        val decisions: List<Map<String, Any?>>)
+
+    private fun applyRoadCranks(base: List<Guidance>, pairs: List<RoadCrank>,
+        points: List<NaviGuidanceCues.TrackPoint>): CrankResult {
+        val raw = base.toMutableList()
+        val used = mutableSetOf<Guidance>()
+        val accepted = mutableListOf<RoadCrank>()
+        val decisions = mutableListOf<Map<String, Any?>>()
+        data class Choice(val cue: Guidance? = null, val reason: String? = null)
+        fun choose(n: RoadVisit): Choice {
+            val candidates = raw.filter { it.cue.kind != NaviGuidanceCues.Kind.STOP &&
+                cueSign(it) == n.angleDeg.sign && abs(it.cue.chainageM - n.chainageM) <= 20 }
+            val original = candidates.filter { it.source == "existing" }
+            if (original.isNotEmpty()) return if (original.size == 1) Choice(original.single()) else Choice(reason = "ambiguous-original-cues")
+            val exact = candidates.filter { it.evidence["mapNode"] == n.nodeId &&
+                it.evidence["segmentId"] == n.segmentId && abs(it.cue.chainageM - n.chainageM) < .01 }
+            if (exact.isNotEmpty()) return if (exact.size == 1) Choice(exact.single()) else Choice(reason = "ambiguous-map-cues")
+            if (candidates.isNotEmpty()) return if (candidates.size == 1) Choice(candidates.single()) else Choice(reason = "ambiguous-cues")
+            if (raw.any { it.cue.kind != NaviGuidanceCues.Kind.STOP && abs(it.cue.chainageM - n.chainageM) < 10 })
+                return Choice(reason = "opposite-cue-near-node")
+            return Choice()
+        }
+        for (pair in pairs) {
+            val one = choose(pair.entry); val two = choose(pair.exit)
+            val firstM = one.cue?.takeIf { it.source == "existing" }?.cue?.chainageM ?: pair.entry.chainageM
+            val lastM = two.cue?.takeIf { it.source == "existing" }?.cue?.chainageM ?: pair.exit.chainageM
+            val reason = one.reason ?: two.reason ?: when {
+                one.cue != null && one.cue in used || two.cue != null && two.cue in used ||
+                    one.cue != null && one.cue == two.cue -> "cue-already-bound"
+                maxOf(firstM, pair.entry.chainageM) >= lastM -> "cue-order-conflicts-with-road"
+                else -> null
+            }
+            if (reason != null) { decisions += mapOf("pairId" to pair.id, "decision" to reason); continue }
+            fun bind(n: RoadVisit, picked: Guidance?, role: String): Guidance {
+                val original = picked?.source == "existing"
+                val m = if (original) picked!!.cue.chainageM else n.chainageM
+                val kind = if (n.angleDeg > 0) NaviGuidanceCues.Kind.RIGHT else NaviGuidanceCues.Kind.LEFT
+                val prior = mapOf("kind" to (picked?.cue?.kind ?: kind).name,
+                    "chainageM" to (picked?.cue?.chainageM ?: n.chainageM))
+                val cue = (picked?.cue ?: NaviGuidanceCues.Cue(m, kind, NaviGuidanceCues.Variant.V1,
+                    0.0, 0.0, null, "")).copy(chainageM = m, kind = kind, displayOverrideM = n.chainageM)
+                val crank = mapOf("policyId" to CRANK_POLICY_ID, "pairId" to pair.id, "role" to role,
+                    "entryM" to pair.entry.chainageM, "exitM" to pair.exit.chainageM, "displayM" to n.chainageM,
+                    "nodeId" to n.nodeId, "connectorWays" to pair.wayIds, "connectorLengthM" to pair.lengthM,
+                    "original" to prior)
+                val evidence = (picked?.evidence ?: emptyMap()) + mapOf("crank" to crank) +
+                    (if (original) emptyMap() else mapOf("mapNode" to n.nodeId, "segmentId" to n.segmentId))
+                return Guidance(cue, "turn", if (original) picked!!.source else "map-connected", evidence)
+            }
+            val first = bind(pair.entry, one.cue, "entry"); val last = bind(pair.exit, two.cue, "exit")
+            one.cue?.let { raw.remove(it); used += it }
+            two.cue?.let { raw.remove(it); used += it }
+            raw += first; raw += last
+            used += first; used += last
+            accepted += pair
+            decisions += mapOf("pairId" to pair.id, "decision" to "applied", "entryCueM" to first.cue.chainageM,
+                "exitCueM" to last.cue.chainageM, "added" to listOf(one.cue, two.cue).count { it == null })
+        }
+        val sorted = raw.sortedBy { it.cue.chainageM }
+        val formatted = NaviGuidanceCues.applyVariantsToCues(sorted.map { it.cue }, points)
+        val result = sorted.mapIndexed { i, g -> g.copy(cue = formatted[i]) }.toMutableList()
+        for (pair in accepted) {
+            val entryIndex = result.indexOfFirst { (it.evidence["crank"] as? Map<*, *>)?.let { c ->
+                c["pairId"] == pair.id && c["role"] == "entry" } == true }
+            val exitIndex = result.indexOfFirst { (it.evidence["crank"] as? Map<*, *>)?.let { c ->
+                c["pairId"] == pair.id && c["role"] == "exit" } == true }
+            if (entryIndex < 0 || exitIndex < 0) continue
+            val first = result[entryIndex]; val last = result[exitIndex]
+            val text = "${first.cue.kind.phrase()}、その先すぐ${last.cue.kind.phrase()}"
+            val band = "${first.cue.kind.phrase()}、すぐ${last.cue.kind.phrase()}"
+            var pre = first.cue.preText
+            if (pre != null) pre = "${if (first.cue.variant == NaviGuidanceCues.Variant.V3) "続いて、" else ""}" +
+                "${kotlin.math.round(first.cue.preDistanceM / 10).toInt() * 10}メートル先、${text}です。"
+            else {
+                val head = (0 until entryIndex).lastOrNull { result[it].cue.preText != null }
+                if (head != null && first.cue.chainageM - result[head].cue.chainageM <= 90) {
+                    val q = result[head]; val prefix = if (q.cue.kind == NaviGuidanceCues.Kind.STOP)
+                        "この先、停留所です。停留所の先、すぐ" else
+                        q.cue.preText!!.removeSuffix("です。") + "、その先すぐ"
+                    val rewritten = prefix + text + "です。"
+                    result[head] = q.copy(cue = q.cue.copy(preText = rewritten, groupText = rewritten))
+                }
+            }
+            result[entryIndex] = first.copy(cue = first.cue.copy(preText = pre, groupText = "${text}です。",
+                nearText = "まもなく${first.cue.kind.phrase()}、すぐ${last.cue.kind.phrase()}です。", bandText = band))
+            val passedM = maxOf(pair.entry.chainageM, first.cue.chainageM) +
+                minOf(2.0, (last.cue.chainageM - maxOf(pair.entry.chainageM, first.cue.chainageM)) / 2)
+            val nearAt = maxOf(last.cue.chainageM - last.cue.nearDistanceM, passedM)
+            result[exitIndex] = last.copy(cue = last.cue.copy(preText = null, groupText = null, bandText = null,
+                nearDistanceM = (last.cue.chainageM - nearAt).coerceAtLeast(0.0),
+                nearText = "続いて、${last.cue.kind.phrase()}です。"))
+        }
+        return CrankResult(result, accepted.size, decisions)
     }
 
     fun withSignalLandmarks(guidance: List<Guidance>, road: RoadEvidence,

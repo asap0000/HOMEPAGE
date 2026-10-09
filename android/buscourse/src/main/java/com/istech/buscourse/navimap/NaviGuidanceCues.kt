@@ -62,7 +62,11 @@ object NaviGuidanceCues {
         val nearText: String,
         val groupText: String? = null,
         val bandText: String? = null,
+        /** 帯の表示に使う位置（クランクの入口・出口だけ道路上のノードの位置）。null なら案内の位置。 */
+        val displayOverrideM: Double? = null,
     ) {
+        /** copy で位置を動かしても古い値が残らないよう、上書きが無ければ常に案内の位置を返す。 */
+        val displayM: Double get() = displayOverrideM ?: chainageM
         val preAtM: Double get() = chainageM - preDistanceM
         val nearAtM: Double get() = chainageM - nearDistanceM
         val bandLabel: String get() = kind.label()
@@ -269,10 +273,10 @@ object NaviGuidanceDispatcher {
 
     fun update(cues: List<NaviGuidanceCues.Cue>, state: State, displayChainageM: Double, gpsChainageM: Double?, following: Boolean, onCourse: Boolean, voiceEnabled: Boolean): Result {
         if (!onCourse) return Result("コースに戻ると案内を再開します", null, state.copy(lastGpsM = gpsChainageM ?: state.lastGpsM, wasOnCourse = false))
-        val bandCue = cues.firstOrNull { it.chainageM > displayChainageM }
+        val bandCue = cues.filter { it.displayM > displayChainageM }.minByOrNull { it.displayM }
         val band = bandCue?.let {
             // 帯も 10m 単位（指示書）。
-            val remaining = ((it.chainageM - displayChainageM).coerceAtLeast(0.0) / 10.0).roundToInt() * 10
+            val remaining = ((it.displayM - displayChainageM).coerceAtLeast(0.0) / 10.0).roundToInt() * 10
             val special = it.bandText
             if (special != null) "$special ${remaining}m" else "${it.bandLabel} ${remaining}m"
         }

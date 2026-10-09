@@ -586,7 +586,9 @@ private fun savedCues(rows: List<com.istech.buscourse.core.data.NaviGuidanceEnti
         val kind = runCatching { NaviGuidanceCues.Kind.valueOf(row.kind) }.getOrDefault(NaviGuidanceCues.Kind.UNKNOWN)
         NaviGuidanceCues.Cue(row.chainageM, kind,
             runCatching { NaviGuidanceCues.Variant.valueOf(row.variant) }.getOrDefault(NaviGuidanceCues.Variant.V1),
-            row.preDistanceM, row.nearDistanceM, row.preText, row.nearText, row.groupText, row.bandText)
+            row.preDistanceM, row.nearDistanceM, row.preText, row.nearText, row.groupText, row.bandText,
+            runCatching { org.json.JSONObject(row.evidenceJson).optJSONObject("crank")?.optDouble("displayM") }
+                .getOrNull()?.takeIf { it.isFinite() })
     }
 
 /**
