@@ -66,7 +66,10 @@ class ArchiveStoreTest {
     }
 
     @Test fun doneIsLastManifestMatchesAndSecondExportKeepsFiles() = runTest {
+        assertThat(store.isExported(run)).isFalse()
         assertThat(store.export(run)).isTrue()
+        // 書き出し済みは「取り込み待ち」に数える（画面で書き出す対象から外し、押し直しを生まない）
+        assertThat(store.isExported(run)).isTrue()
         val folder = File(store.outDir, store.runKey(run))
         val done = File(folder, "DONE")
         assertThat(done.isFile).isTrue()

@@ -53,6 +53,9 @@ class ArchiveStore(private val context: Context, private val db: BusCourseDataba
         .filter { it.status != "RECORDING" && ArchiveReceipt.matches(receipt, it, frameCount(it.id)) == null }
         .sortedBy { it.startedAt }
 
+    /** 書き出しは済んでいて（DONE あり）、PC の取り込み（受領票）を待っている走行か。 */
+    fun isExported(run: RecordingSessionEntity): Boolean = File(File(outDir, runKey(run)), "DONE").isFile
+
     suspend fun protectedIds(): Set<Long> {
         val maps = db.naviMapDao().getAllActiveMaps()
         return maps.flatMap { db.naviMapDao().getSegments(it.id) }.mapNotNull { it.sessionId }.toSet()

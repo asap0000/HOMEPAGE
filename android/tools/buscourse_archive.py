@@ -56,6 +56,17 @@ def work_dir(root):
     return path
 
 
+def pull_stage_dir(root):
+    """adb で引き取る先。Windows の adb には日本語のパスを渡すと名前が途中で切れて失敗するものがある
+    （実測: AirDroid Cast 同梱の版40）ので、保管庫の場所が英字でなければ同じドライブの英字のフォルダを使う。"""
+    root = Path(root)
+    if str(root.resolve()).isascii():
+        return work_dir(root)
+    path = Path(root.resolve().anchor) / 'buscourse_archive_work'
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def run_key(started):
     stamp = dt.datetime.fromtimestamp(started / 1000).strftime('%Y%m%d-%H%M%S')
     return f'{stamp}_{started}'
@@ -434,7 +445,7 @@ def adb_call(adb, serial, *args):
 def pull(root, serial, adb):
     counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0}
     listing = adb_call(adb, serial, 'shell', 'ls', '-1', DEVICE_PATH + '/archive_out').stdout.splitlines()
-    with tempfile.TemporaryDirectory(dir=work_dir(root)) as temp:
+    with tempfile.TemporaryDirectory(dir=pull_stage_dir(root)) as temp:
         stage = Path(temp)
         devices = set()
         accepted = []
