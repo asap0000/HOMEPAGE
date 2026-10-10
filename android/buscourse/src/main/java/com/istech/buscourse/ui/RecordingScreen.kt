@@ -285,6 +285,10 @@ private fun RecordingSetupContent(
     }
 
     fun startRecording(noCamera: Boolean = false) {
+        if (!com.istech.buscourse.recording.RecordingStartPolicy.canStart(context.filesDir.usableSpace)) {
+            Toast.makeText(context, "空きが足りません（500MB 未満）。PC の保管庫へ退避してから撮影してください", Toast.LENGTH_LONG).show()
+            return
+        }
         if (!cameraGranted || !locationGranted) {
             Toast.makeText(context, "カメラと位置情報の権限を許可してください", Toast.LENGTH_LONG).show()
             permissionLauncher.launch(

@@ -1,109 +1,62 @@
 package com.istech.buscourse.recording
 
 import android.content.Context
-import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
-import com.istech.buscourse.core.data.BusCourseDatabase
-import com.istech.buscourse.core.data.RecordingSessionEntity
-import kotlinx.coroutines.test.runTest
-import org.junit.After
-import org.junit.Before
+import com.istech.buscourse.archive.ArchiveDeletionPlan
+import com.istech.buscourse.archive.ArchiveRunState
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/**
- * セッション保持ルール（日数による自動削除）の単体テスト。
- *
- * 2026-08-03 に既定を無期限へ変えた（[RecordingConfigRepository.retentionDays] のKDoc参照＝
- * 運行記録の参照は年2回の繁忙期に集中し、日数の固定窓とライフサイクルが噛み合わないため）。
- * **「何もしない」は目に見えないので、テストで固定しないと静かに戻る**——ここで押さえる。
- */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = android.app.Application::class)
 class SessionRetentionTest {
+    private val context: Context = ApplicationProvider.getApplicationContext()
+    private val gb = 1024L * 1024 * 1024
+    private fun run(id: Long, bytes: Long = gb, received: Boolean = false,
+                    protected: Boolean = false, recording: Boolean = false,
+                    startup: Boolean = false): ArchiveRunState =
+        ArchiveRunState(id, id, bytes, recording, protected, received, startup)
 
-    private lateinit var context: Context
-    private lateinit var db: BusCourseDatabase
-    private lateinit var repository: RecordingSessionRepository
-
-    @Before
-    fun setUp() {
-        context = ApplicationProvider.getApplicationContext()
-        db = Room.inMemoryDatabaseBuilder(context, BusCourseDatabase::class.java)
-            .allowMainThreadQueries()
-            .build()
-        repository = RecordingSessionRepository(context, db)
-    }
-
-    @After
-    fun tearDown() {
-        repository.shutdown()
-        db.close()
-    }
-
-    private suspend fun insertSessionStartedDaysAgo(days: Int): Long {
-        val startedAt = System.currentTimeMillis() - days * 24L * 60 * 60 * 1000
-        return db.recordingSessionDao().insert(
-            RecordingSessionEntity(
-                courseId = null,
-                type = RecordingSessionType.FULL_RUN.name,
-                targetFromStopCardId = null,
-                targetToStopCardId = null,
-                vehicleId = null,
-                driverId = null,
-                deviceModel = null,
-                startedAt = startedAt,
-                endedAt = startedAt + 60_000,
-                gpsRawLogRelPath = "sessions/dummy/gps_raw.jsonl",
-                frameDirRelPath = "sessions/dummy/frames/",
-                baseFrameIntervalMs = 1000,
-                frameCount = 0,
-                totalDistanceM = null,
-                status = RecordingSessionStatus.COMPLETED.name,
-            )
-        )
-    }
-
-    private suspend fun sessionCount(): Int = db.recordingSessionDao().count()
-
-    @Test
-    fun retentionDays_defaultIsUnlimited() {
+    @Test fun defaultRetentionIsUnlimited() {
         assertThat(RecordingConfigRepository(context).retentionDays)
             .isEqualTo(RecordingConfigRepository.RETENTION_UNLIMITED)
     }
 
-    @Test
-    fun deleteSessionsOlderThan_unlimited_deletesNothing() = runTest {
-        insertSessionStartedDaysAgo(400)
-        insertSessionStartedDaysAgo(31)
-        insertSessionStartedDaysAgo(1)
-
-        repository.deleteSessionsOlderThan(RecordingConfigRepository.RETENTION_UNLIMITED)
-
-        assertThat(sessionCount()).isEqualTo(3)
+    @Test fun receiptAndQuotaStopAtTwoGb() {
+        val runs = listOf(run(1, received = true), run(2, received = true), run(3, received = true))
+        assertThat(ArchiveDeletionPlan.select(runs)).containsExactly(1L)
     }
 
-    @Test
-    fun deleteSessionsOlderThan_negative_deletesNothing() = runTest {
-        insertSessionStartedDaysAgo(400)
-
-        repository.deleteSessionsOlderThan(-1)
-
-        assertThat(sessionCount()).isEqualTo(1)
+    @Test fun unreceivedAndProtectedAndRecordingSurvive() {
+        val runs = listOf(run(1, 3 * gb), run(2, 3 * gb, received = true, protected = true),
+            run(3, 3 * gb, received = true, recording = true))
+        assertThat(ArchiveDeletionPlan.select(runs)).isEmpty()
     }
 
-    /** 明示的に日数を与えたときは従来どおり効く（撤廃は既定値の話であって、機能を壊してはいない）。 */
-    @Test
-    fun deleteSessionsOlderThan_explicitDays_stillDeletes() = runTest {
-        insertSessionStartedDaysAgo(400)
-        val recent = insertSessionStartedDaysAgo(1)
+    @Test fun archivedNaviMapRunIsEligible() {
+        assertThat(ArchiveDeletionPlan.select(listOf(run(1, 3 * gb, received = true)))).containsExactly(1L)
+    }
 
-        repository.deleteSessionsOlderThan(30)
+    @Test fun startupAndRetentionRequireReceipt() {
+        val runs = listOf(run(1, received = false, startup = true),
+            run(2, received = true, startup = true), run(3, received = true))
+        assertThat(ArchiveDeletionPlan.select(runs, retentionCutoff = 4)).containsExactly(2L, 3L).inOrder()
+    }
 
-        assertThat(sessionCount()).isEqualTo(1)
-        assertThat(db.recordingSessionDao().getById(recent)).isNotNull()
+    /** 新しい起動テストを先に消して枠に収まれば、古い本物の走行は消さない。 */
+    @Test fun startupTestGoesFirstSoOlderRealRunSurvives() {
+        val mb = 1024L * 1024
+        val runs = listOf(run(1, 1400 * mb, received = true), run(2, 600 * mb, received = true),
+            run(3, 100 * mb, received = true, startup = true))
+        assertThat(ArchiveDeletionPlan.select(runs)).containsExactly(3L)
+    }
+
+    @Test fun minimumFreeToRecordIsInclusive() {
+        val limit = RecordingConfigRepository.MIN_FREE_TO_RECORD_BYTES
+        assertThat(RecordingStartPolicy.canStart(limit - 1)).isFalse()
+        assertThat(RecordingStartPolicy.canStart(limit)).isTrue()
     }
 }

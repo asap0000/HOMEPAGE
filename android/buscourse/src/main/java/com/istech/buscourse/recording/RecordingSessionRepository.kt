@@ -530,29 +530,6 @@ class RecordingSessionRepository(
     // ------------------------------------------------------------------
 
     /**
-     * 保持日数を超えたセッションを削除する。個々の削除失敗（FK制約）はスキップして継続する。
-     *
-     * **[days] が 0 以下なら1件も削除しない**（[RecordingConfigRepository.RETENTION_UNLIMITED]＝既定）。
-     * ガードを呼び出し元でなくここに置くのは、**呼び出し元が増えても無期限の約束が破れないようにする**ため。
-     */
-    suspend fun deleteSessionsOlderThan(days: Int) {
-        if (days <= 0) return
-        val cutoffMs = System.currentTimeMillis() - days * MILLIS_PER_DAY
-        val old = recordingSessionDao.getStartedBefore(cutoffMs)
-        for (s in old) {
-            try {
-                deleteSession(s.id)
-            } catch (e: SQLiteConstraintException) {
-                Log.w(TAG, "保持期間ローテーション: FK制約によりセッション削除をスキップ id=${s.id}", e)
-            }
-        }
-    }
-
-    /** [excludeIds] を除いた最も古いセッションを1件返す（空き容量ローテーションのループ用、§4.10.3）。 */
-    suspend fun findOldestSession(excludeIds: Set<Long>): RecordingSessionEntity? =
-        recordingSessionDao.findOldestExcluding(excludeIds.toList())
-
-    /**
      * セッションを削除する。Room側は `recording_session` 行の削除に伴い、子テーブル
      * （`timelapse_frame` / `gps_point` / `stop_visit_event` / `shock_event`）がON DELETE
      * CASCADEで連動削除される。DB削除に成功した場合のみファイルも削除する。

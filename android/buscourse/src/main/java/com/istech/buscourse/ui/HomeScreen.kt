@@ -29,7 +29,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
+import com.istech.buscourse.BusCourseApplication
+import com.istech.buscourse.archive.ArchiveStore
+import com.istech.buscourse.recording.RecordingConfigRepository
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,8 +82,23 @@ fun HomeScreen(
     onOpenBackupRestore: () -> Unit,
     onOpenNaviRuns: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val archiveStore = remember { ArchiveStore(context, (context.applicationContext as BusCourseApplication).database) }
+    var showArchiveExport by remember { mutableStateOf(false) }
+    var showArchiveWarning by remember { mutableStateOf(false) }
+    LaunchedEffect(showArchiveExport) {
+        val runs = (context.applicationContext as BusCourseApplication).database.recordingSessionDao().getAll()
+        val protected = archiveStore.protectedIds()
+        showArchiveWarning = archiveStore.nonProtectedSize(runs, protected) > RecordingConfigRepository.ARCHIVE_QUOTA_BYTES &&
+            archiveStore.pending().any { it.id !in protected }
+    }
     var showExportRun by remember { mutableStateOf(false) }
     BackHandler(enabled = showExportRun) { showExportRun = false }
+    BackHandler(enabled = showArchiveExport) { showArchiveExport = false }
+    if (showArchiveExport) {
+        ArchiveExportScreen(onBack = { showArchiveExport = false })
+        return
+    }
     if (showExportRun) {
         ExportRunScreen(onBack = { showExportRun = false })
         return
@@ -111,6 +131,11 @@ fun HomeScreen(
             // その走行からコースを創る → 創ったコースを直す → カードを整える。
             // POC は操作性の調整段階だが、ワークフローの組み換え自体は v20 の鋳造を待たずとも
             // 既定路線に乗っている、というオーナー判断による。
+            if (showArchiveWarning) {
+                Card(onClick = { showArchiveExport = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("記録が 2GB を超えています。PC につないで保管庫へ退避してください", Modifier.padding(16.dp))
+                }
+            }
             HomeMenuCard(
                 icon = Icons.Filled.FiberManualRecord,
                 title = "運行記録",
@@ -169,6 +194,12 @@ fun HomeScreen(
                 title = "EX用書き出し",
                 description = "選んだ走行を、EXで読める1つの.isrunファイルに書き出します",
                 onClick = { showExportRun = true },
+            )
+            HomeMenuCard(
+                icon = Icons.Filled.SaveAlt,
+                title = "保管庫へ書き出す",
+                description = "まだ PC の保管庫に入っていない走行を書き出します。PC につないで取り込んでください",
+                onClick = { showArchiveExport = true },
             )
             HomeMenuCard(
                 icon = Icons.Filled.Route,
