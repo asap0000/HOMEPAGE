@@ -1,6 +1,5 @@
 package com.istech.buscourse.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,12 +14,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.AddCircle
-import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -29,16 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
-import com.istech.buscourse.BusCourseApplication
-import com.istech.buscourse.archive.ArchiveStore
-import com.istech.buscourse.recording.RecordingConfigRepository
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -79,30 +67,7 @@ fun HomeScreen(
     onOpenCourseCreate: () -> Unit,
     onOpenWorkLog: () -> Unit,
     onOpenMapImport: () -> Unit,
-    onOpenBackupRestore: () -> Unit,
-    onOpenNaviRuns: () -> Unit = {},
 ) {
-    val context = LocalContext.current
-    val archiveStore = remember { ArchiveStore(context, (context.applicationContext as BusCourseApplication).database) }
-    var showArchiveExport by remember { mutableStateOf(false) }
-    var showArchiveWarning by remember { mutableStateOf(false) }
-    LaunchedEffect(showArchiveExport) {
-        val runs = (context.applicationContext as BusCourseApplication).database.recordingSessionDao().getAll()
-        val protected = archiveStore.protectedIds()
-        showArchiveWarning = archiveStore.nonProtectedSize(runs, protected) > RecordingConfigRepository.ARCHIVE_QUOTA_BYTES &&
-            archiveStore.pending().any { it.id !in protected }
-    }
-    var showExportRun by remember { mutableStateOf(false) }
-    BackHandler(enabled = showExportRun) { showExportRun = false }
-    BackHandler(enabled = showArchiveExport) { showArchiveExport = false }
-    if (showArchiveExport) {
-        ArchiveExportScreen(onBack = { showArchiveExport = false })
-        return
-    }
-    if (showExportRun) {
-        ExportRunScreen(onBack = { showExportRun = false })
-        return
-    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -120,10 +85,6 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .padding(16.dp)
-                // 2026-07-26追加：「バックアップ」を足したことで実機（OPPO Reno3A実測）では
-                // 一覧が画面下に収まりきらず最下段が到達不能になったため、スクロール可能にする
-                // （既存6項目でも将来また増える前提。バックアップ機能自体のスコープではなく、
-                // 新規メニュー項目を実際に押せるようにするための最小修正）。
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -131,11 +92,6 @@ fun HomeScreen(
             // その走行からコースを創る → 創ったコースを直す → カードを整える。
             // POC は操作性の調整段階だが、ワークフローの組み換え自体は v20 の鋳造を待たずとも
             // 既定路線に乗っている、というオーナー判断による。
-            if (showArchiveWarning) {
-                Card(onClick = { showArchiveExport = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text("記録が 2GB を超えています。PC につないで保管庫へ退避してください", Modifier.padding(16.dp))
-                }
-            }
             HomeMenuCard(
                 icon = Icons.Filled.FiberManualRecord,
                 title = "運行記録",
@@ -180,39 +136,12 @@ fun HomeScreen(
                 description = "オフライン地図パッケージ（.iscmap）を取り込み、使用するパッケージを切り替えます",
                 onClick = onOpenMapImport,
             )
-            // 2026-07-27 統合（オーナー指示「バックアップと復元は1つのボタンで」）: 「退避」と「戻す」は
-            // 機種変更という1つの用事の往路と復路なので、入口を分けると探す場所が2箇所になる。
-            // 遷移先の [BackupRestoreScreen] で往路/復路を選ぶ。
-            HomeMenuCard(
-                icon = Icons.Filled.Backup,
-                title = "バックアップと復元",
-                description = "端末のデータを1つのZIPへ退避します。退避したZIPを別の端末へ戻すのもここです",
-                onClick = onOpenBackupRestore,
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.SaveAlt,
-                title = "EX用書き出し",
-                description = "選んだ走行を、EXで読める1つの.isrunファイルに書き出します",
-                onClick = { showExportRun = true },
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.SaveAlt,
-                title = "保管庫へ書き出す",
-                description = "まだ PC の保管庫に入っていない走行を書き出します。PC につないで取り込んでください",
-                onClick = { showArchiveExport = true },
-            )
-            HomeMenuCard(
-                icon = Icons.Filled.Route,
-                title = "ナビの走った跡",
-                description = "全部入りのナビで走った回と、コースを外れた所を見ます",
-                onClick = onOpenNaviRuns,
-            )
         }
     }
 }
 
 @Composable
-private fun HomeMenuCard(
+internal fun HomeMenuCard(
     icon: ImageVector,
     title: String,
     description: String,

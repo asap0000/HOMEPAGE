@@ -38,6 +38,9 @@ import com.istech.buscourse.ui.StopCardRetakeScreen
 import com.istech.buscourse.ui.TopScreen
 import com.istech.buscourse.ui.BundleInstallScreen
 import com.istech.buscourse.ui.DistributionExportScreen
+import com.istech.buscourse.ui.DataOutputScreen
+import com.istech.buscourse.ui.ExportRunScreen
+import com.istech.buscourse.ui.ArchiveExportScreen
 import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.ui.WorkLogScreen
 import com.istech.buscourse.ui.theme.BusCourseTheme
@@ -70,6 +73,9 @@ class MainActivity : ComponentActivity() {
 private object Routes {
     const val TOP = "top"
     const val HOME = "home"
+    const val DATA_OUTPUT = "data_output"
+    const val EXPORT_RUN = "export_run"
+    const val ARCHIVE_EXPORT = "archive_export"
     const val WORK_LOG = "worklog"
     const val RECORDING = "recording"
     const val STOP_CARDS = "stopcards"
@@ -130,6 +136,8 @@ private fun AppNavHost() {
                     onOpenNavi = { navController.navigate(Routes.NAVI_PICK) },
                     onOpenNaviSettings = { navController.navigate(Routes.NAVI_SETTINGS) },
                     onOpenBundleInstall = { navController.navigate(Routes.BUNDLE_INSTALL) },
+                    onOpenDataOutput = {},
+                    onOpenArchiveExport = {},
                 )
             }
             composable(Routes.BUNDLE_INSTALL) {
@@ -165,6 +173,12 @@ private fun AppNavHost() {
                 onOpenNavi = { navController.navigate(Routes.NAVI_PICK) },
                 onOpenNaviSettings = { navController.navigate(Routes.NAVI_SETTINGS) },
                 onOpenBundleInstall = {},
+                onOpenDataOutput = { navController.navigate(Routes.DATA_OUTPUT) },
+                // 知らせから開いた「保管庫へ書き出す」を閉じると、データ出力の一覧へ戻る（紙芝居の既定）
+                onOpenArchiveExport = {
+                    navController.navigate(Routes.DATA_OUTPUT)
+                    navController.navigate(Routes.ARCHIVE_EXPORT)
+                },
             )
         }
         composable(Routes.HOME) {
@@ -176,9 +190,23 @@ private fun AppNavHost() {
                 onOpenCourseCreate = { navController.navigate(Routes.COURSE_CREATE) },
                 onOpenWorkLog = { navController.navigate(Routes.WORK_LOG) },
                 onOpenMapImport = { navController.navigate(Routes.MAP_IMPORT) },
+            )
+        }
+        composable(Routes.DATA_OUTPUT) {
+            DataOutputScreen(
+                onBack = { navController.popBackStack() },
                 onOpenBackupRestore = { navController.navigate(Routes.BACKUP_RESTORE) },
+                onOpenExportRun = { navController.navigate(Routes.EXPORT_RUN) },
+                onOpenArchiveExport = { navController.navigate(Routes.ARCHIVE_EXPORT) },
+                onOpenDistributionExport = { navController.navigate(Routes.DISTRIBUTION_EXPORT) },
                 onOpenNaviRuns = { navController.navigate(Routes.NAVI_RUNS) },
             )
+        }
+        composable(Routes.EXPORT_RUN) {
+            ExportRunScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.ARCHIVE_EXPORT) {
+            ArchiveExportScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.NAVI_RUNS) {
             NaviRunListScreen(onBack = { navController.popBackStack() })
@@ -320,7 +348,6 @@ private fun AppNavHost() {
             AllowRotationWhileVisible()
             NaviSettingsScreen(
                 onBack = { navController.popBackStack() },
-                onOpenDistributionExport = { navController.navigate(Routes.DISTRIBUTION_EXPORT) },
             )
         }
         composable(Routes.DISTRIBUTION_EXPORT) {

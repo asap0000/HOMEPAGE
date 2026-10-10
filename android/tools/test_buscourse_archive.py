@@ -6,7 +6,9 @@ from pathlib import Path
 import sqlite3
 import tarfile
 import tempfile
+import threading
 import unittest
+from unittest import mock
 import zipfile
 
 spec = importlib.util.spec_from_file_location('buscourse_archive', Path(__file__).with_name('buscourse_archive.py'))
@@ -43,6 +45,79 @@ class ArchiveTests(unittest.TestCase):
 
     def folder(self):
         return next(folder for folder, _ in archive.archive_runs(self.root))
+
+    def export(self, device, started):
+        base = device / 'archive_out'
+        base.mkdir(parents=True, exist_ok=True)
+        key = archive.run_key(started)
+        folder = base / key
+        folder.mkdir()
+        run = {'schema': archive.SCHEMA, 'startedAt': started, 'endedAt': started + 1000,
+               'deviceModel': 'SyntheticDevice', 'runUid': None, 'type': 'FULL_RUN',
+               'status': 'COMPLETED', 'totalDistanceM': 400, 'appVersion': 'test',
+               'dbVersion': 24, 'session': {'id': 1}, 'gps': [], 'frames': [],
+               'stopVisits': [], 'shocks': [], 'missingFiles': []}
+        archive.dump(folder / 'run.json', run)
+        (folder / 'frames').mkdir()
+        (folder / 'frames' / 'synthetic.bin').write_bytes(b'synthetic bytes')
+        archive.write_manifest(folder)
+        (folder / 'DONE').touch()
+        return folder
+
+    def fake_adb(self, devices, stalled=()):
+        script = self.base / ('fake_' + str(len(list(self.base.glob('fake_*.py')))) + '.py')
+        script.write_text('''#!/usr/bin/env python3
+import pathlib, shutil, sys, time
+devices = {devices!r}
+stalled = {stalled!r}
+counter = pathlib.Path({counter!r})
+argv = sys.argv[1:]
+if argv == ['devices']:
+    print('List of devices attached')
+    for serial in devices: print(serial + '\\tdevice')
+    sys.exit(0)
+serial = argv[1]
+args = argv[2:]
+base = pathlib.Path(devices[serial])
+def local(remote):
+    return base / pathlib.Path(remote).relative_to('/sdcard/Android/data/com.istech.buscourse/files')
+if args[:2] == ['shell', 'ls']:
+    folder = local(args[-1])
+    if not folder.is_dir(): sys.exit(1)
+    print('\\n'.join(p.name for p in folder.iterdir()))
+elif args[:2] == ['shell', 'test']:
+    sys.exit(0 if local(args[3]).is_file() else 1)
+elif args[:2] == ['shell', 'getprop']:
+    print('SyntheticDevice')
+elif args[:2] == ['shell', 'pm']:
+    if base.name == 'empty': print('package:synthetic')
+elif args[:2] == ['shell', 'du']:
+    size = sum(p.stat().st_size for p in local(args[-1]).rglob('*') if p.is_file())
+    print(str((size + 1023) // 1024) + '\\t' + args[-1])
+elif args[:2] == ['shell', 'cat']:
+    print(local(args[-1]).read_text())
+elif args[0] == 'pull':
+    source = local(args[1])
+    target = pathlib.Path(args[2]) / source.name
+    if source.name in stalled:
+        counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
+        target.mkdir()
+        (target / 'partial').write_bytes(b'x')
+        time.sleep(3)
+    else:
+        shutil.copytree(source, target)
+elif args[0] == 'push':
+    shutil.copy2(args[1], local(args[2]))
+elif args[:2] == ['shell', 'rm']:
+    shutil.rmtree(local(args[3]))
+'''.format(devices={k: str(v) for k, v in devices.items()}, stalled=list(stalled),
+           counter=str(self.base / 'pull_count.txt')))
+        script.chmod(0o755)
+        if os.name == 'nt':
+            wrapper = script.with_suffix('.cmd')
+            wrapper.write_text(f'@"{sys.executable}" "{script}" %*\n')
+            return str(wrapper)
+        return str(script)
 
     def test_versions_eras_and_source_unchanged(self):
         a = self.base / 'old.db'; b = self.base / 'new.db'
@@ -205,6 +280,81 @@ elif args[:2] == ['shell', 'rm']:
         self.assertTrue(archive.verify_manifest(folder))
         (folder / 'run.json').write_text('bad')
         self.assertFalse(archive.verify_manifest(folder))
+
+    def test_receipt_per_run_and_cancel_before_second(self):
+        device = self.base / 'device'
+        folders = [self.export(device, self.new + i * 2000) for i in range(3)]
+        adb = self.fake_adb({'SER_A': device})
+        stop = threading.Event()
+        def progress(info):
+            if info['number'] == 2:
+                stop.set()
+        result = archive.pull(self.root, 'SER_A', adb, cancel=stop, progress=progress)
+        self.assertEqual(result['ingested'], 1)
+        self.assertTrue(result['cancelled'])
+        self.assertFalse(folders[0].exists())
+        self.assertTrue(all(folder.exists() for folder in folders[1:]))
+        self.assertEqual(len(archive.load(device / 'archive_receipt.json')['runs']), 1)
+
+    def test_stall_retries_three_times_then_next_run(self):
+        device = self.base / 'device'
+        stuck = self.export(device, self.new)
+        next_run = self.export(device, self.new + 2000)
+        adb = self.fake_adb({'SER_A': device}, stalled=[stuck.name])
+        result = archive.pull(self.root, 'SER_A', adb, stall_seconds=0.15)
+        self.assertEqual(result['not_pulled'], 1)
+        self.assertEqual(result['ingested'], 1)
+        self.assertEqual((self.base / 'pull_count.txt').read_text(), '3')
+        self.assertTrue(stuck.exists())
+        self.assertFalse(next_run.exists())
+
+    def test_bad_run_kept_while_next_advances(self):
+        device = self.base / 'device'
+        bad = self.export(device, self.new)
+        (bad / 'frames' / 'synthetic.bin').write_bytes(b'wrong')
+        good = self.export(device, self.new + 2000)
+        result = archive.pull(self.root, 'SER_A', self.fake_adb({'SER_A': device}))
+        self.assertEqual((result['mismatch'], result['ingested']), (1, 1))
+        self.assertTrue(bad.exists())
+        self.assertFalse(good.exists())
+
+    def test_adb_choice_and_device_filter_and_selection(self):
+        first = self.base / 'first'; second = self.base / 'second'; empty = self.base / 'empty'
+        self.export(first, self.new)
+        self.export(second, self.new + 2000)
+        empty.mkdir()
+        good_adb = self.fake_adb({'SER_A': first, 'SER_B': second, 'SER_EMPTY': empty})
+        mismatch = self.base / 'mismatch.py'
+        mismatch.write_text("#!/usr/bin/env python3\nprint('server version doesn\\'t match')\nprint('List of devices attached')\n")
+        mismatch.chmod(0o755)
+        if os.name == 'nt':
+            wrapper = mismatch.with_suffix('.cmd')
+            wrapper.write_text(f'@"{sys.executable}" "{mismatch}" %*\n')
+            mismatch = wrapper
+        with mock.patch.dict(os.environ, {'BUSCOURSE_ADB': good_adb}):
+            adb, serials = archive.choose_adb(str(mismatch))
+        self.assertEqual(adb, good_adb)
+        self.assertEqual(len(serials), 3)
+        selected = archive.discover(adb, serials, lambda choices: choices[1])
+        self.assertEqual(selected['serial'], 'SER_B')
+        self.assertEqual(len(archive.discover(adb, serials, lambda choices: choices)), 2)
+        self.assertEqual(archive.discover(adb, ['SER_EMPTY'])['ready'], [])
+
+    def test_second_pull_does_not_hash_existing_vault_file(self):
+        device = self.base / 'device'
+        self.export(device, self.new)
+        adb = self.fake_adb({'SER_A': device})
+        archive.pull(self.root, 'SER_A', adb)
+        self.export(device, self.new)
+        real_sha = archive.sha
+        vault_reads = []
+        def counted(path):
+            if self.root in path.parents and '.work' not in path.parts and path.name == 'synthetic.bin':
+                vault_reads.append(path)
+            return real_sha(path)
+        with mock.patch.object(archive, 'sha', side_effect=counted):
+            archive.pull(self.root, 'SER_A', adb)
+        self.assertEqual(vault_reads, [])
 
 
 if __name__ == '__main__':

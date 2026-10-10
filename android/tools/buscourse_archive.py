@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -176,40 +177,56 @@ def files_from_legacy(run, base, sid):
     return files
 
 
-def write_manifest(folder):
+def read_manifest(folder):
+    path = folder / 'manifest.sha256'
+    if not path.is_file():
+        return {}
+    result = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not re.fullmatch(r'[0-9a-f]{64}  .+', line):
+            return {}
+        name = line[66:]
+        try:
+            safe_member(name)
+        except ValueError:
+            return {}
+        if name in result:
+            return {}
+        result[name] = line[:64]
+    return result
+
+
+def write_manifest(folder, known_hashes=None, prior_hashes=None):
+    known_hashes = known_hashes or {}
+    prior_hashes = prior_hashes or {}
     files = sorted(p for p in folder.rglob('*') if p.is_file() and p.name not in ('manifest.sha256', 'provenance.json'))
-    text = ''.join(f'{sha(p)}  {p.relative_to(folder).as_posix()}\n' for p in files)
+    text = ''.join(f'{known_hashes.get(p.relative_to(folder).as_posix()) or prior_hashes.get(p.relative_to(folder).as_posix()) or sha(p)}  {p.relative_to(folder).as_posix()}\n' for p in files)
     manifest = folder / 'manifest.sha256'
     if not manifest.exists() or manifest.read_text(encoding='utf-8') != text:
         manifest.write_text(text, encoding='utf-8')
 
 
-def verify_manifest(folder):
+def verified_hashes(folder):
     manifest = folder / 'manifest.sha256'
     if not (folder / 'DONE').is_file() or (folder / 'DONE').stat().st_size != 0 or not manifest.is_file():
-        return False
-    expected = {}
-    for line in manifest.read_text(encoding='utf-8').splitlines():
-        if not re.fullmatch(r'[0-9a-f]{64}  .+', line):
-            return False
-        digest, name = line[:64], line[66:]
-        try:
-            rel = safe_member(name)
-        except ValueError:
-            return False
-        if name in expected:
-            return False
-        expected[name] = digest
+        return None
+    expected = read_manifest(folder)
     actual = {p.relative_to(folder).as_posix(): sha(p) for p in folder.rglob('*')
               if p.is_file() and p.name not in ('manifest.sha256', 'DONE')}
-    return actual == expected
+    return actual if actual == expected else None
 
 
-def ingest_run(root, run, files, source, preferred_key=None):
+def verify_manifest(folder):
+    return verified_hashes(folder) is not None
+
+
+def ingest_run(root, run, files, source, preferred_key=None, verified=None):
     folder = archive_dir(root, run, preferred_key)
     folder.mkdir(parents=True, exist_ok=True)
     run_file = folder / 'run.json'
     old = load(run_file) if run_file.exists() else None
+    prior_hashes = read_manifest(folder)
+    known_hashes = {}
     if old is not None and (old.get('startedAt'), old.get('deviceModel')) != (run.get('startedAt'), run.get('deviceModel')):
         raise ValueError('run identity mismatch')
     merged = dict(old) if old is not None else dict(run)
@@ -243,13 +260,21 @@ def ingest_run(root, run, files, source, preferred_key=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             shutil.copy2(src, target)
+            if verified and rel in verified:
+                known_hashes[rel] = verified[rel]
             added += 1
-        elif sha(target) != sha(src):
-            alt = target.with_name(target.name + '.alt-' + sha(src)[:8])
+        else:
+            source_hash = verified.get(rel) if verified else sha(src)
+            target_hash = (prior_hashes.get(rel) if target.stat().st_size == src.stat().st_size else None) or sha(target)
+            if target_hash == source_hash:
+                known_hashes[rel] = target_hash
+                continue
+            alt = target.with_name(target.name + '.alt-' + source_hash[:8])
             if not alt.exists():
                 shutil.copy2(src, alt)
+                known_hashes[alt.relative_to(folder).as_posix()] = source_hash
                 added += 1
-            conflicts.append({'file': rel, 'alternate': alt.relative_to(folder).as_posix(), 'sha256': sha(src)})
+            conflicts.append({'file': rel, 'alternate': alt.relative_to(folder).as_posix(), 'sha256': source_hash})
     merged['missingFiles'] = sorted({Path(frame.get('file_rel_path') or '').name for frame in merged.get('frames', [])
                                      if frame.get('file_rel_path') and
                                      not (folder / 'frames' / Path(frame['file_rel_path']).name).exists()})
@@ -259,6 +284,7 @@ def ingest_run(root, run, files, source, preferred_key=None):
             shutil.copy2(run_file, revision)
     if old is None or merged != old:
         dump(run_file, merged)
+        known_hashes['run.json'] = sha(run_file)
     provenance_file = folder / 'provenance.json'
     provenance = load(provenance_file) if provenance_file.exists() else {'sources': [], 'firstSeenDbVersion': run.get('dbVersion'), 'conflicts': []}
     old_provenance = json.loads(json.dumps(provenance))
@@ -271,7 +297,7 @@ def ingest_run(root, run, files, source, preferred_key=None):
             provenance['conflicts'].append(conflict)
     if provenance != old_provenance or not provenance_file.exists():
         dump(provenance_file, provenance)
-    write_manifest(folder)
+    write_manifest(folder, known_hashes, prior_hashes)
     return added + (1 if old is not None and merged != old else 0)
 
 
@@ -439,56 +465,209 @@ def make_receipt(root, device, out):
 
 
 def adb_call(adb, serial, *args):
-    return subprocess.run([adb, '-s', serial, *args], check=args[:2] != ('shell', 'test'), capture_output=True, text=True)
+    optional = args[:2] in (('shell', 'test'), ('shell', 'ls'), ('shell', 'du'),
+                            ('shell', 'cat'), ('shell', 'getprop'), ('shell', 'pm'))
+    return subprocess.run([adb, '-s', serial, *args], check=not optional, capture_output=True, text=True)
 
 
-def pull(root, serial, adb):
-    counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0}
-    listing = adb_call(adb, serial, 'shell', 'ls', '-1', DEVICE_PATH + '/archive_out').stdout.splitlines()
-    with tempfile.TemporaryDirectory(dir=pull_stage_dir(root)) as temp:
-        stage = Path(temp)
-        devices = set()
-        accepted = []
-        for name in listing:
-            if not re.fullmatch(r'\d{8}-\d{6}_\d+', name):
-                continue
-            remote = DEVICE_PATH + '/archive_out/' + name
-            if adb_call(adb, serial, 'shell', 'test', '-f', remote + '/DONE').returncode != 0:
-                counts['skipped'] += 1
-                continue
-            adb_call(adb, serial, 'pull', remote, str(stage))
-            folder = stage / name
+def export_list(adb, serial):
+    result = adb_call(adb, serial, 'shell', 'ls', '-1', DEVICE_PATH + '/archive_out')
+    if result.returncode:
+        return [], []
+    ready, pending = [], []
+    for name in result.stdout.splitlines():
+        if not re.fullmatch(r'\d{8}-\d{6}_\d+', name):
+            continue
+        remote = DEVICE_PATH + '/archive_out/' + name
+        (ready if adb_call(adb, serial, 'shell', 'test', '-f', remote + '/DONE').returncode == 0 else pending).append(name)
+    return sorted(ready), sorted(pending)
+
+
+def choose_adb(explicit=None):
+    candidates = [explicit, os.environ.get('BUSCOURSE_ADB'),
+                  r'C:\Program Files (x86)\AirDroid Cast\IncludeAdb\adb_helper.exe', 'adb']
+    for candidate in candidates:
+        if not candidate or (candidate.endswith('.exe') and not Path(candidate).is_file()):
+            continue
+        try:
+            result = subprocess.run([candidate, 'devices'], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        output = result.stdout + result.stderr
+        if result.returncode == 0 and "server version doesn't match" not in output.lower() and 'List of devices attached' in output:
+            return candidate, [line.split()[0] for line in result.stdout.splitlines()[1:]
+                               if len(line.split()) >= 2 and line.split()[1] == 'device']
+    raise RuntimeError('使える adb が見つかりません')
+
+
+def discover(adb, serials, chooser=None):
+    options = []
+    for serial in serials:
+        ready, pending = export_list(adb, serial)
+        installed = False
+        if not ready and not pending:
+            result = adb_call(adb, serial, 'shell', 'pm', 'path', 'com.istech.buscourse')
+            installed = result.returncode == 0 and 'package:' in result.stdout
+        if ready or pending or installed:
+            model = adb_call(adb, serial, 'shell', 'getprop', 'ro.product.model').stdout.strip() or '機種不明'
+            options.append({'serial': serial, 'model': model, 'ready': ready, 'pending': pending})
+    with_ready = [item for item in options if item['ready']]
+    choices = with_ready or options
+    if not choices:
+        return None
+    if len(choices) == 1:
+        return choices[0]
+    if chooser is None:
+        raise ValueError('端末が複数あります')
+    return chooser(choices)
+
+
+def remote_size(adb, serial, name):
+    remote = DEVICE_PATH + '/archive_out/' + name
+    result = adb_call(adb, serial, 'shell', 'du', '-sk', remote)
+    try:
+        return int(result.stdout.split()[0]) * 1024 if result.returncode == 0 else 0
+    except (IndexError, ValueError):
+        return 0
+
+
+def remote_run(adb, serial, name):
+    result = adb_call(adb, serial, 'shell', 'cat', DEVICE_PATH + '/archive_out/' + name + '/run.json')
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def tree_size(folder):
+    total = 0
+    if folder.exists():
+        for path in folder.rglob('*'):
             try:
-                if not verify_manifest(folder):
-                    counts['mismatch'] += 1
+                if path.is_file():
+                    total += path.stat().st_size
+            except FileNotFoundError:
+                pass
+    return total
+
+
+def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
+    folder = stage / name
+    for _ in range(3):
+        if cancel.is_set():
+            return 'cancelled'
+        shutil.rmtree(folder, ignore_errors=True)
+        process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(stage)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        last_size, last_change = 0, time.monotonic()
+        while process.poll() is None:
+            if cancel.is_set() or time.monotonic() - last_change >= stall_seconds:
+                if os.name == 'nt':
+                    # .cmd で包んだ偽 adb も含め、この引き取りの子プロセスだけを止める。
+                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                   capture_output=True, check=False)
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill(); process.wait()
+                break
+            size = tree_size(folder)
+            if size > last_size:
+                last_size, last_change = size, time.monotonic()
+            # 7,000 ほどのファイルを数え直すので、見張りは 2秒ごとで足りる（止まりの判定は 60秒）。
+            time.sleep(min(2.0, max(0.01, stall_seconds / 4)))
+        if cancel.is_set():
+            shutil.rmtree(folder, ignore_errors=True)
+            return 'cancelled'
+        if process.returncode == 0 and folder.is_dir():
+            return 'ok'
+        shutil.rmtree(folder, ignore_errors=True)
+    return 'failed'
+
+
+def log_pull(root, model, counts, elapsed):
+    stamp = dt.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')
+    line = (f"{stamp}\t{model}\t取り込んだ本数 {counts['ingested']}\t容量 {counts['bytes']}B"
+            f"\t合わなかった本数 {counts['mismatch']}\t引き取れなかった本数 {counts['not_pulled']}"
+            f"\t時間 {elapsed:.1f}秒\n")
+    with (root / '取り込みの記録.txt').open('a', encoding='utf-8') as out:
+        out.write(line)
+
+
+def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model='機種不明'):
+    cancel = cancel or threading.Event()
+    counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0, 'not_pulled': 0, 'bytes': 0, 'cancelled': False}
+    started = time.monotonic()
+    ready, pending = export_list(adb, serial)
+    counts['skipped'] = len(pending)
+    sizes = {name: remote_size(adb, serial, name) for name in ready}
+    total_bytes = sum(sizes.values())
+    def announce(number, name='', run=None):
+        elapsed = time.monotonic() - started
+        remaining = (elapsed * (total_bytes - counts['bytes']) / counts['bytes']) if counts['bytes'] else None
+        if progress:
+            progress({'total': len(ready), 'total_bytes': total_bytes, 'number': number,
+                      'ingested': counts['ingested'], 'ingested_bytes': counts['bytes'], 'current': name,
+                      'startedAt': run.get('startedAt') if run else None,
+                      'distanceM': run.get('totalDistanceM') if run else None,
+                      'remaining_seconds': max(0, remaining) if remaining is not None else None})
+    announce(0)
+    try:
+        with tempfile.TemporaryDirectory(dir=pull_stage_dir(root)) as temp:
+            stage = Path(temp)
+            for number, name in enumerate(ready, 1):
+                if cancel.is_set():
+                    counts['cancelled'] = True
+                    break
+                remote = DEVICE_PATH + '/archive_out/' + name
+                announce(number, name, remote_run(adb, serial, name))
+                outcome = pull_one(adb, serial, remote, stage, name, cancel, stall_seconds)
+                if outcome == 'cancelled':
+                    counts['cancelled'] = True
+                    break
+                if outcome == 'failed':
+                    counts['not_pulled'] += 1
                     continue
-                run = load(folder / 'run.json')
-                if run.get('schema') != SCHEMA:
+                folder = stage / name
+                try:
+                    if cancel.is_set():
+                        counts['cancelled'] = True
+                        break
+                    hashes = verified_hashes(folder)
+                    if hashes is None:
+                        counts['mismatch'] += 1
+                        continue
+                    if cancel.is_set():
+                        counts['cancelled'] = True
+                        break
+                    run = load(folder / 'run.json')
+                    if run.get('schema') != SCHEMA:
+                        counts['mismatch'] += 1
+                        continue
+                    announce(number, name, run)
+                    files = {p.relative_to(folder).as_posix(): p for p in folder.rglob('*')
+                             if p.is_file() and p.name not in ('run.json', 'manifest.sha256', 'DONE')}
+                    source = {'file': name, 'kind': 'export', 'dbVersion': run.get('dbVersion'), 'ingestedAt': int(time.time() * 1000)}
+                    existed = archive_dir(root, run, name).exists()
+                    added = ingest_run(root, run, files, source, name, hashes)
+                    receipt_path = stage / 'archive_receipt.json'
+                    make_receipt(root, run.get('deviceModel', ''), receipt_path)
+                    adb_call(adb, serial, 'push', str(receipt_path), DEVICE_PATH + '/archive_receipt.json')
+                    adb_call(adb, serial, 'shell', 'rm', '-r', remote)
+                    counts['ingested' if not existed or added else 'skipped'] += 1
+                    counts['bytes'] += sizes[name] or tree_size(folder)
+                    announce(number, name, run)
+                except (ValueError, KeyError, OSError, json.JSONDecodeError):
                     counts['mismatch'] += 1
-                    continue
-                files = {p.relative_to(folder).as_posix(): p for p in folder.rglob('*')
-                         if p.is_file() and p.name not in ('run.json', 'manifest.sha256', 'DONE')}
-                source = {'file': name, 'kind': 'export', 'dbVersion': run.get('dbVersion'), 'ingestedAt': int(time.time() * 1000)}
-                preferred = name
-                existed = archive_dir(root, run, preferred).exists()
-                added = ingest_run(root, run, files, source, preferred)
-                counts['ingested' if not existed or added else 'skipped'] += 1
-                devices.add(run.get('deviceModel', ''))
-                accepted.append(remote)
-            except (ValueError, KeyError, OSError, json.JSONDecodeError):
-                counts['mismatch'] += 1
-                continue
-        if devices:
-            receipt_path = stage / 'archive_receipt.json'
-            all_rows = []
-            for device in sorted(devices):
-                all_rows.extend(make_receipt(root, device, stage / ('receipt-' + safe_device(device) + '.json'))['runs'])
-            dump(receipt_path, {'schema': RECEIPT_SCHEMA, 'issuedAt': int(time.time() * 1000), 'runs': all_rows})
-            adb_call(adb, serial, 'push', str(receipt_path), DEVICE_PATH + '/archive_receipt.json')
-        # 端末上の書き出しコピーだけを、受領票送付後に片付ける。
-        for remote in accepted:
-            adb_call(adb, serial, 'shell', 'rm', '-r', remote)
-    build_index(root)
+                finally:
+                    shutil.rmtree(folder, ignore_errors=True)
+    finally:
+        build_index(root)
+        log_pull(root, model, counts, time.monotonic() - started)
     return counts
 
 
@@ -497,7 +676,7 @@ def main(argv=None):
     parser.add_argument('--root', type=Path, required=True)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('ingest-legacy').add_argument('files', nargs='+')
-    p = sub.add_parser('pull'); p.add_argument('--serial', required=True); p.add_argument('--adb', default='adb')
+    p = sub.add_parser('pull'); p.add_argument('--serial'); p.add_argument('--adb')
     p = sub.add_parser('receipt'); p.add_argument('--device', required=True); p.add_argument('--out', type=Path, required=True)
     sub.add_parser('index')
     args = parser.parse_args(argv)
@@ -507,7 +686,16 @@ def main(argv=None):
     if args.command == 'ingest-legacy':
         counts = ingest_legacy(args.root, args.files)
     elif args.command == 'pull':
-        counts = pull(args.root, args.serial, args.adb)
+        adb, serials = choose_adb(args.adb)
+        if args.serial:
+            serial = args.serial
+            model = adb_call(adb, serial, 'shell', 'getprop', 'ro.product.model').stdout.strip() or '機種不明'
+        else:
+            selected = discover(adb, serials)
+            if selected is None:
+                raise RuntimeError('書き出しのある端末が見つかりません')
+            serial, model = selected['serial'], selected['model']
+        counts = pull(args.root, serial, adb, model=model)
     elif args.command == 'receipt':
         make_receipt(args.root, args.device, args.out); counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0}
     else:

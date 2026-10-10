@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -26,17 +27,26 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.istech.buscourse.BuildConfig
+import com.istech.buscourse.BusCourseApplication
+import com.istech.buscourse.archive.ArchiveStore
+import com.istech.buscourse.archive.shouldShowArchiveWarning
+import com.istech.buscourse.recording.RecordingConfigRepository
 
 /**
  * 最上位トップ画面（依頼３ 2026-07-11）。
@@ -58,15 +68,35 @@ fun TopScreen(
     onOpenNavi: () -> Unit,
     onOpenNaviSettings: () -> Unit,
     onOpenBundleInstall: () -> Unit,
+    onOpenDataOutput: () -> Unit,
+    onOpenArchiveExport: () -> Unit,
 ) {
+    val context = LocalContext.current
     val selectedMap by viewModel.mapRepository.selectedPackage.collectAsState(initial = null)
     var courseCount by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
+    var showArchiveWarning by remember { mutableStateOf(false) }
+    suspend fun refreshArchiveWarning() = withContext(Dispatchers.IO) {
+        val app = context.applicationContext as BusCourseApplication
+        val database = app.database
+        val archiveStore = ArchiveStore(context, database)
+        val runs = database.recordingSessionDao().getAll()
+        val protected = archiveStore.protectedIds()
+        val show = shouldShowArchiveWarning(
+            nonProtectedBytes = archiveStore.nonProtectedSize(runs, protected),
+            quotaBytes = RecordingConfigRepository.ARCHIVE_QUOTA_BYTES,
+            hasUnreceivedRuns = archiveStore.pending().any { it.id !in protected },
+        )
+        withContext(Dispatchers.Main) { showArchiveWarning = show }
+    }
     LaunchedEffect(Unit) { courseCount = viewModel.repository.getCourses().size }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) scope.launch { courseCount = viewModel.repository.getCourses().size }
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch {
+                courseCount = viewModel.repository.getCourses().size
+                if (!BuildConfig.NAVI_ONLY) refreshArchiveWarning()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -110,7 +140,12 @@ fun TopScreen(
                 )
                 Button(onClick = onOpenBundleInstall, modifier = Modifier.fillMaxWidth()) { Text("束を入れる") }
             } else {
-                // 正式版の配置・表示は従来のまま。
+                // 記録が 2GB を超えたときの知らせは一番上（紙芝居 2026-10-10）。
+                if (showArchiveWarning) {
+                    Card(onClick = onOpenArchiveExport, modifier = Modifier.fillMaxWidth()) {
+                        Text("記録が 2GB を超えています。PC につないで保管庫へ退避してください", Modifier.padding(16.dp))
+                    }
+                }
                 TopMenuCard(
                     title = "ナビ",
                     icon = { Icon(Icons.Filled.Navigation, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
@@ -137,6 +172,12 @@ fun TopScreen(
                         modifier = Modifier.weight(1f),
                     )
                 }
+                HomeMenuCard(
+                    icon = Icons.Filled.SaveAlt,
+                    title = "データ出力",
+                    description = "バックアップ・EX・保管庫・ナビ用の束",
+                    onClick = onOpenDataOutput,
+                )
             }
 
             Spacer(Modifier.weight(1f))

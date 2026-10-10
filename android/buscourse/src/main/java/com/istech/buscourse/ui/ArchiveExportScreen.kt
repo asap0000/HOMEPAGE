@@ -99,7 +99,7 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                     if (done == null) {
                         Card(Modifier.fillMaxWidth()) {
                             Text(if (waiting.isEmpty()) "保管庫に入っていない走行はありません"
-                                 else "書き出しは済んでいます。PC につないで取り込んでください",
+                                 else "書き出しは済んでいます。PC につないで、デスクトップの『保管庫へ取り込む』を開いてください",
                                 Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
                         }
                     }
@@ -123,7 +123,7 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                                 "${written}本（${writtenBytes / mb}MB）を書き出しました。空きが足りないため ${runs.size - written}本を残しました。" +
                                     "PC につないで取り込んでから、もう一度書き出してください"
                             else
-                                "書き出しが終わりました（${written}本・${writtenBytes / mb}MB）。PC につないで取り込んでください。" +
+                                "書き出しが終わりました（${written}本・${writtenBytes / mb}MB）。PC につないで、デスクトップの『保管庫へ取り込む』を開いてください。" +
                                     "もう一度押す必要はありません"
                             reload()
                         } catch (e: Exception) {
