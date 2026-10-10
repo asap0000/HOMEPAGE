@@ -59,6 +59,7 @@ def view_state(kind, **values):
 
 def selftest():
     assert view_state('searching')[0] == '探しています'
+    dt.datetime.strptime(archive.BUILT_AT, '%Y-%m-%d %H:%M')  # 作成日時が焼き込まれている
     assert view_state('found', model='合成機種', total=1, bytes=1000, root='vault')[2] == '取り込む'
     assert 'USB を抜かないで' in view_state('running', total=1, total_bytes=1000)[1]
     assert 'USB を抜いてかまいません' in view_state('done', ingested=1, bytes=1000, elapsed=1)[1]
@@ -82,7 +83,7 @@ def main(argv=None):
     from tkinter import messagebox, simpledialog, ttk
 
     window = tk.Tk()
-    window.title('保管庫へ取り込む')
+    window.title(f'保管庫へ取り込む（{archive.BUILT_AT} 作成）')
     window.geometry('640x390')
     window.minsize(560, 330)
     window.option_add('*Font', ('Yu Gothic UI', 12))
@@ -94,6 +95,7 @@ def main(argv=None):
     bar.pack(padx=24, pady=16)
     button = ttk.Button(window)
     button.pack(padx=24, pady=8, anchor='e')
+    ttk.Label(window, text=f'この道具: {archive.BUILT_AT} 作成', foreground='gray').pack(side='bottom', anchor='e', padx=12, pady=6)
     inbox = queue.Queue()
     cancel = threading.Event()
     state = {'kind': 'searching', 'selected': None, 'adb': None, 'working': False, 'closing': False}

@@ -18,6 +18,9 @@ import time
 import urllib.parse
 import zipfile
 
+# この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
+# オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
+BUILT_AT = '2026-10-10 21:55'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
@@ -597,7 +600,7 @@ def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
 
 def log_pull(root, model, counts, elapsed):
     stamp = dt.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')
-    line = (f"{stamp}\t{model}\t取り込んだ本数 {counts['ingested']}\t容量 {counts['bytes']}B"
+    line = (f"{stamp}\t{model}\t道具 {BUILT_AT} 作成\t取り込んだ本数 {counts['ingested']}\t容量 {counts['bytes']}B"
             f"\t合わなかった本数 {counts['mismatch']}\t引き取れなかった本数 {counts['not_pulled']}"
             f"\t時間 {elapsed:.1f}秒\n")
     with (root / '取り込みの記録.txt').open('a', encoding='utf-8') as out:
