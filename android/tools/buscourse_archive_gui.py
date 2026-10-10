@@ -49,6 +49,9 @@ def view_state(kind, **values):
     if kind == 'pending':
         return '書き出し中', (f"スマホで書き出し中の走行が {values['count']}本あります。"
                          "終わってから『もう一度探す』を押してください"), 'もう一度探す'
+    if kind == 'failed':
+        return '取り込みが途中で止まりました', ('入れた分は保管庫に残っています。もう一度探すと、残りから続けます。'
+                                     f"\n理由: {values.get('reason', '不明')}"), 'もう一度探す'
     if kind == 'empty':
         return '取り込む走行はありません', "スマホで先に『保管庫へ書き出す』を押してください", 'もう一度探す'
     return 'スマホが見つかりません', values.get('reason', NOT_FOUND), 'もう一度探す'
@@ -61,6 +64,7 @@ def selftest():
     assert 'USB を抜いてかまいません' in view_state('done', ingested=1, bytes=1000, elapsed=1)[1]
     assert 'スマホに残して' in view_state('partial', mismatch=1, not_pulled=0)[1]
     assert view_state('missing')[2] == 'もう一度探す'
+    assert '残りから続けます' in view_state('failed', reason='合成')[1]
 
 
 def main(argv=None):
@@ -144,7 +148,7 @@ def main(argv=None):
                                       progress=lambda info: inbox.put(('progress', info)), model=selected['model'])
                 inbox.put(('complete', result, time.monotonic() - started))
             except Exception as error:
-                inbox.put(('missing', str(error)))
+                inbox.put(('failed', f'{type(error).__name__}: {error}'))
         threading.Thread(target=worker, daemon=True).start()
 
     def poll():
@@ -181,6 +185,11 @@ def main(argv=None):
                         show('partial', **result)
                     else:
                         show('done', elapsed=elapsed, **result)
+                elif item[0] == 'failed':
+                    state['working'] = False
+                    if state['closing']:
+                        window.destroy(); return
+                    show('failed', reason=item[1])
                 elif item[0] == 'missing':
                     state['working'] = False
                     if state['closing']:

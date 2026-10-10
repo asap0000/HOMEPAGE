@@ -464,10 +464,16 @@ def make_receipt(root, device, out):
     return receipt
 
 
+# 窓（pythonw）から adb を呼ぶたびに黒い画面が出ないよう、Windows では子の画面を隠す。
+HIDE = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+# adb の出力は端末の UTF-8。Windows の既定（cp932）で読むと日本語を含む目録で落ちる（2026-10-10 実測）。
+TEXT = {'text': True, 'encoding': 'utf-8', 'errors': 'replace'}
+
+
 def adb_call(adb, serial, *args):
     optional = args[:2] in (('shell', 'test'), ('shell', 'ls'), ('shell', 'du'),
                             ('shell', 'cat'), ('shell', 'getprop'), ('shell', 'pm'))
-    return subprocess.run([adb, '-s', serial, *args], check=not optional, capture_output=True, text=True)
+    return subprocess.run([adb, '-s', serial, *args], check=not optional, capture_output=True, **TEXT, **HIDE)
 
 
 def export_list(adb, serial):
@@ -490,7 +496,7 @@ def choose_adb(explicit=None):
         if not candidate or (candidate.endswith('.exe') and not Path(candidate).is_file()):
             continue
         try:
-            result = subprocess.run([candidate, 'devices'], capture_output=True, text=True, timeout=15)
+            result = subprocess.run([candidate, 'devices'], capture_output=True, timeout=15, **TEXT, **HIDE)
         except (OSError, subprocess.TimeoutExpired):
             continue
         output = result.stdout + result.stderr
@@ -559,14 +565,14 @@ def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
         if cancel.is_set():
             return 'cancelled'
         shutil.rmtree(folder, ignore_errors=True)
-        process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(stage)],
+        process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(stage)], **HIDE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         last_size, last_change = 0, time.monotonic()
         while process.poll() is None:
             if cancel.is_set() or time.monotonic() - last_change >= stall_seconds:
                 if os.name == 'nt':
                     # .cmd で包んだ偽 adb も含め、この引き取りの子プロセスだけを止める。
-                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], **HIDE,
                                    capture_output=True, check=False)
                 else:
                     process.terminate()
@@ -658,7 +664,7 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     make_receipt(root, run.get('deviceModel', ''), receipt_path)
                     adb_call(adb, serial, 'push', str(receipt_path), DEVICE_PATH + '/archive_receipt.json')
                     adb_call(adb, serial, 'shell', 'rm', '-r', remote)
-                    counts['ingested' if not existed or added else 'skipped'] += 1
+                    counts['ingested'] += 1
                     counts['bytes'] += sizes[name] or tree_size(folder)
                     announce(number, name, run)
                 except (ValueError, KeyError, OSError, json.JSONDecodeError):
