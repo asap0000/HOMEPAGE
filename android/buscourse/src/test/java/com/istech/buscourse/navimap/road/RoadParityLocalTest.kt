@@ -49,9 +49,13 @@ class RoadParityLocalTest {
             if (evidence.routeSha256 != derived.getJSONObject("mapGuidance").getString("routeSHA256"))
                 differences += "$key: route SHA differs"
             // r7 guidance has cranks but predates signal wording.
+            // 道なり（road-following）はブラウザ版では案内の一覧の外の層なので、比べる相手から外す。
             val actual = NaviGuidanceEngine.build(groups, stops, evidence.copy(visits = emptyList())).guidance
-            val withSignals = NaviGuidanceEngine.build(groups, stops, evidence).guidance.map { it.cue }
+                .filter { it.cue.kind != NaviGuidanceCues.Kind.ROAD_FOLLOWING }
+            val full = NaviGuidanceEngine.build(groups, stops, evidence).guidance.map { it.cue }
+            val withSignals = full.filter { it.kind != NaviGuidanceCues.Kind.ROAD_FOLLOWING }
             println("$key 信号を付けた案内 ${withSignals.count { it.bandText?.startsWith("信号を") == true }} 件（r9: 青123=19・赤91011=19・第一青バス遅2=8）")
+            println("$key 道なりの区間 ${full.count { it.kind == NaviGuidanceCues.Kind.ROAD_FOLLOWING }} 件（道路の索引で確かめたもの）")
             if (actual.size != expected.length()) differences += "$key: count actual=${actual.size} expected=${expected.length()}"
             for (i in 0 until minOf(actual.size, expected.length())) {
                 val guidance = actual[i]; val a = guidance.cue; val e = expected.getJSONObject(i)

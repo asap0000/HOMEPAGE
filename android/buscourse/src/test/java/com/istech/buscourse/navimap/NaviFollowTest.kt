@@ -87,6 +87,24 @@ class NaviFollowTest {
         assertThat(result).isNull()
     }
 
+    @Test fun stoppedPoints_doNotTrapMovingFixBehindTheStop() {
+        val before = (0..10).map { m -> point(1, m, m * 10.0, 0.0, m * 10.0 / 111_195.0) }
+        val dwell = (1..60).map { n -> point(1, 10 + n, 100.0, 0.0, 100.0 / 111_195.0) }
+        val after = (11..30).map { m -> point(1, 60 + m, m * 10.0, 0.0, m * 10.0 / 111_195.0) }
+        val trackPoints = mapOf(1L to before + dwell + after)
+        var previous: Double? = 80.0
+        for (second in 1..12) {
+            val position = 80.0 + second * (30.0 / 3.6)
+            val fix = NaviFollow.chainageAt(listOf(track(1, 0, 0.0, 300.0)), trackPoints,
+                0.0, position / 111_195.0, previous)
+            assertThat(fix).isNotNull()
+            assertThat(fix!!.chainageM).isAtLeast(previous!!)
+            assertThat(fix.lateralOffsetM).isAtMost(40.0)
+            previous = fix.chainageM
+        }
+        assertThat(previous!!).isGreaterThan(170.0)
+    }
+
     /**
      * ★増分H 検収手直しの回帰: **コース外からの復帰（previous あり）は、同着の中で前回位置に
      * 最も近い chainage を選ぶ**（「早い方」だと、同じ道を複数回通るコースで過去の周回へ巻き戻り、

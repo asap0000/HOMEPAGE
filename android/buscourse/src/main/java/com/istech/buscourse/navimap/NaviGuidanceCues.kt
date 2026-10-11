@@ -28,7 +28,7 @@ object NaviGuidanceCues {
     enum class Kind {
         LEFT, RIGHT, SLIGHT_LEFT, SLIGHT_RIGHT, U_TURN, STOP,
         DIAGONAL_RIGHT, DIAGONAL_LEFT, RIGHT_DIRECTION, LEFT_DIRECTION,
-        RIGHT_FRONT, LEFT_FRONT, RIGHT_RETURN, LEFT_RETURN, RETURN, STRAIGHT, UNKNOWN;
+        RIGHT_FRONT, LEFT_FRONT, RIGHT_RETURN, LEFT_RETURN, RETURN, STRAIGHT, ROAD_FOLLOWING, UNKNOWN;
 
         fun label(): String = if (this == STOP) "停留所" else phrase()
         fun phrase(): String = when (this) {
@@ -48,6 +48,7 @@ object NaviGuidanceCues {
             LEFT_RETURN -> "左戻る方向"
             RETURN -> "戻る方向"
             STRAIGHT -> "直進方向"
+            ROAD_FOLLOWING -> "道なり"
             UNKNOWN -> ""
         }
     }
@@ -268,8 +269,23 @@ object NaviGuidanceDispatcher {
         val lastGpsM: Double? = null,
         val spoken: Set<String> = emptySet(),
         val wasOnCourse: Boolean? = null,
+        val roadFollowing: RoadFollowing.RuntimeState = RoadFollowing.RuntimeState(),
     )
     data class Result(val bandText: String?, val speechText: String?, val state: State, val bandKind: NaviGuidanceCues.Kind? = null)
+
+    fun update(cues: List<NaviGuidanceCues.Cue>, roadIntervals: List<RoadFollowing.Interval>,
+        state: State, displayChainageM: Double, gpsChainageM: Double?, following: Boolean,
+        onCourse: Boolean, voiceEnabled: Boolean, fix: RoadFollowing.RuntimeFix): Result {
+        val ordinary = update(cues, state, displayChainageM, gpsChainageM, following, onCourse, voiceEnabled)
+        val road = RoadFollowing.update(roadIntervals, state.roadFollowing, fix,
+            importantCueDue = ordinary.speechText != null || cues.any { cue ->
+                displayChainageM in cue.preAtM..cue.chainageM })
+        val next = ordinary.state.copy(roadFollowing = road.state)
+        if (!onCourse || !road.band) return ordinary.copy(state = next)
+        return ordinary.copy(bandText = RoadFollowing.TEXT,
+            speechText = ordinary.speechText ?: RoadFollowing.TEXT.takeIf { road.speak && voiceEnabled },
+            state = next, bandKind = NaviGuidanceCues.Kind.ROAD_FOLLOWING)
+    }
 
     fun update(cues: List<NaviGuidanceCues.Cue>, state: State, displayChainageM: Double, gpsChainageM: Double?, following: Boolean, onCourse: Boolean, voiceEnabled: Boolean): Result {
         if (!onCourse) return Result("コースに戻ると案内を再開します", null, state.copy(lastGpsM = gpsChainageM ?: state.lastGpsM, wasOnCourse = false))

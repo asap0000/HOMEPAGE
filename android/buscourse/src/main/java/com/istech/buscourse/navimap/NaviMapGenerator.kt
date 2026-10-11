@@ -293,10 +293,11 @@ class NaviMapGenerator(private val database: BusCourseDatabase, private val stor
             dao.insertGuidance(guidance.guidance.mapIndexed { index, item ->
                 val cue = item.cue
                 NaviGuidanceEntity(naviMapId = mapId, seq = index, role = item.role, kind = cue.kind.name,
-                    chainageM = cue.chainageM, variant = cue.variant.name, preDistanceM = cue.preDistanceM,
+                    chainageM = cue.chainageM, chainageEndM = item.chainageEndM, variant = cue.variant.name, preDistanceM = cue.preDistanceM,
                     nearDistanceM = cue.nearDistanceM, preText = cue.preText, nearText = cue.nearText,
                     groupText = cue.groupText, bandText = cue.bandText ?: cue.kind.phrase(), source = item.source,
-                    policyId = guidance.policyId, evidenceJson = org.json.JSONObject(item.evidence).toString())
+                    policyId = if (item.role == "road-following") RoadFollowing.POLICY_ID else guidance.policyId,
+                    evidenceJson = org.json.JSONObject(item.evidence).toString())
             })
             dao.insertGuidanceBuild(NaviGuidanceBuildEntity(mapId, guidance.policyId, guidanceStatus,
                 regionId = selected?.regionId, mapSha256 = selected?.mbtilesSha256, routeSha256 = routeSha,

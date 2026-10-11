@@ -11,9 +11,8 @@ import kotlin.math.abs
 /**
  * GPS fix をナビ用マップの経路距離程へ写像する、Android 非依存の純計算器。
  *
- * [previousChainageM] がある場合の窓は距離ではなく**点数**である。前回距離程に最も近い
- * TRACK point を中心に、[TrialParams.mapMatchWindowBack]/[TrialParams.mapMatchWindowForward]
- * 点の範囲に接する区間だけを探索する。したがって GAP をまたぐ区間は決して生成しない。
+ * [previousChainageM] がある場合は距離程で後方20m・前方150mに接する
+ * TRACK の実在区間だけを探索する。GAP をまたぐ区間は生成しない。
  */
 object NaviFollow {
     data class FollowFix(val chainageM: Double, val lateralOffsetM: Double)
@@ -36,13 +35,9 @@ object NaviFollow {
         val candidates = if (wholeRouteSearch) {
             route.edges
         } else {
-            val cursor = route.points.indices.minByOrNull { index ->
-                abs(route.points[index].point.chainageM - previousChainageM)
-            } ?: return null
-            val from = (cursor - params.mapMatchWindowBack.coerceAtLeast(0)).coerceAtLeast(0)
-            val to = (cursor + params.mapMatchWindowForward.coerceAtLeast(0)).coerceAtMost(route.points.lastIndex)
-            // 点窓に片端でも接する実在区間を対象にする。segmentId が違う点は edge 化していない。
-            route.edges.filter { it.startPointIndex <= to && it.endPointIndex >= from }
+            val from = previousChainageM - WINDOW_BACK_M
+            val to = previousChainageM + WINDOW_FORWARD_M
+            route.edges.filter { it.a.chainageM in from..to || it.b.chainageM in from..to }
         }
         if (candidates.isEmpty()) return null
 
@@ -120,6 +115,8 @@ object NaviFollow {
 
     // NaviRenderer.kt と同じ TRACK 判定。NaviRenderer の private const には依存させない。
     private const val TRACK_KIND = "TRACK"
+    private const val WINDOW_BACK_M = 20.0
+    private const val WINDOW_FORWARD_M = 150.0
 
     /**
      * ★全域探索で同等とみなす横ずれ。GPS実測の最悪精度15mを許容し、始点・終点が3.3mまで

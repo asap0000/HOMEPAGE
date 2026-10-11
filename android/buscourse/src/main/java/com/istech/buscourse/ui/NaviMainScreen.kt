@@ -84,6 +84,7 @@ import com.istech.buscourse.navimap.NaviSettingsRepository
 import com.istech.buscourse.navimap.NaviSelfFix
 import com.istech.buscourse.navimap.NaviGuidanceCues
 import com.istech.buscourse.navimap.NaviGuidanceDispatcher
+import com.istech.buscourse.navimap.RoadFollowing
 import com.istech.buscourse.guidance.NaviSpeechGuide
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -129,6 +130,8 @@ fun NaviMainScreen(
         mutableStateOf<Map<Long, List<NaviTrackPointEntity>>>(emptyMap())
     }
     var guidanceCues by remember(courseId) { mutableStateOf<List<NaviGuidanceCues.Cue>>(emptyList()) }
+    var roadFollowingIntervals by remember(courseId) { mutableStateOf<List<RoadFollowing.Interval>>(emptyList()) }
+    var guidanceAccuracyM by remember(courseId) { mutableStateOf<Double?>(null) }
     var guidanceState by remember(courseId) { mutableStateOf(NaviGuidanceDispatcher.State()) }
     var guidanceResult by remember(courseId) { mutableStateOf(NaviGuidanceDispatcher.Result(null, null, NaviGuidanceDispatcher.State())) }
     var speechGuide by remember(courseId) { mutableStateOf<NaviSpeechGuide?>(null) }
@@ -151,6 +154,7 @@ fun NaviMainScreen(
                 .sortedBy { it.chainageM }.map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
             val saved = database.naviMapDao().getGuidance(map.id)
             guidanceCues = withContext(Dispatchers.Default) { if (saved.isNotEmpty()) savedCues(saved) else NaviGuidanceCues.build(points, events.filter { it.category.equals("stop", true) }.mapNotNull { it.chainageStartM }) }
+            roadFollowingIntervals = savedRoadFollowing(saved)
             segments = loadedSegments; trackPointsBySegmentId = loadedPoints; maxChainageM = naviMainMaxChainageM(loadedSegments)
             followState = NaviMainFollowState(mode = NaviMainMode.PREVIEW)
             readiness = NaviMainReadiness.Ready(map.id, NaviMapDisplayHint(map.displayOrientation, map.displayPitchDeg), map.busId, map.courseNo, map.year)
@@ -174,6 +178,7 @@ fun NaviMainScreen(
             .filter { it.kind == TRACK_KIND }
             .associate { segment -> segment.id to database.naviMapDao().getTrackPoints(segment.id).sortedBy { it.seq } }
         val events = database.naviMapDao().getEvents(naviMap.id)
+        val savedGuidance = database.naviMapDao().getGuidance(naviMap.id)
         val loadedCues = withContext(Dispatchers.Default) {
             val points = loadedSegments.filter { it.kind == TRACK_KIND }
                 .flatMap { segment -> loadedTrackPointsBySegmentId[segment.id].orEmpty() }
@@ -181,8 +186,7 @@ fun NaviMainScreen(
                 .map { NaviGuidanceCues.TrackPoint(it.chainageM, it.tRelS, it.lat, it.lon) }
             val stops = events.filter { it.category.equals("stop", ignoreCase = true) }
                 .mapNotNull { it.chainageStartM }
-            val saved = database.naviMapDao().getGuidance(naviMap.id)
-            if (saved.isNotEmpty()) savedCues(saved) else NaviGuidanceCues.build(points, stops)
+            if (savedGuidance.isNotEmpty()) savedCues(savedGuidance) else NaviGuidanceCues.build(points, stops)
         }
         maxChainageM = naviMainMaxChainageM(loadedSegments)
         // ★state更新は読み込みが揃った最後にまとめて行う（segments/trackPointsBySegmentIdがreadiness=Ready
@@ -191,6 +195,7 @@ fun NaviMainScreen(
         segments = loadedSegments
         trackPointsBySegmentId = loadedTrackPointsBySegmentId
         guidanceCues = loadedCues
+        roadFollowingIntervals = savedRoadFollowing(savedGuidance)
         guidanceState = NaviGuidanceDispatcher.State()
         followState = NaviMainFollowState(mode = if (checkMode) NaviMainMode.PREVIEW else NaviMainMode.FOLLOWING)
         readiness = NaviMainReadiness.Ready(
@@ -268,6 +273,7 @@ fun NaviMainScreen(
         val started = try {
             source.start(
                 onLocation = { location ->
+                    guidanceAccuracyM = location.accuracy.toDouble().takeIf { location.hasAccuracy() }
                     val fix = NaviFollow.chainageAt(
                         segments = segments,
                         trackPointsBySegmentId = trackPointsBySegmentId,
@@ -338,15 +344,26 @@ fun NaviMainScreen(
                 val patch by settingsRepository.patchFlow.collectAsState(initial = NaviSettingsPatch())
                 val settings = remember(patch, state.hint) { NaviDisplayResolver.resolve(patch, state.hint) }
 
-                LaunchedEffect(guidanceCues, followState.lastFixChainageM, followState.chainageM, followState.mode, followState.onCourse, patch.voiceGuidance, followUnavailable) {
+                LaunchedEffect(guidanceCues, roadFollowingIntervals, followState.lastFixChainageM, followState.chainageM, followState.mode, followState.onCourse, followState.fixElapsedRealtimeMs, guidanceAccuracyM, patch.voiceGuidance, followUnavailable) {
                     val result = NaviGuidanceDispatcher.update(
                         cues = guidanceCues,
+                        roadIntervals = roadFollowingIntervals,
                         state = guidanceState,
                         displayChainageM = followState.chainageM.toDouble(),
                         gpsChainageM = if (checkMode) null else followState.lastFixChainageM?.toDouble(),
                         following = !checkMode && followState.mode == NaviMainMode.FOLLOWING && !followUnavailable,
                         onCourse = checkMode || followState.onCourse,
                         voiceEnabled = !checkMode && settings.voiceGuidance,
+                        fix = RoadFollowing.RuntimeFix(
+                            chainageM = if (checkMode || followState.mode != NaviMainMode.FOLLOWING) followState.chainageM.toDouble()
+                                else followState.lastFixChainageM?.toDouble(),
+                            onCourse = checkMode || followState.onCourse,
+                            following = !checkMode && followState.mode == NaviMainMode.FOLLOWING && !followUnavailable,
+                            checkMode = checkMode || followState.mode != NaviMainMode.FOLLOWING,
+                            ageMs = followState.fixElapsedRealtimeMs.takeIf { it > 0 }?.let { android.os.SystemClock.elapsedRealtime() - it },
+                            accuracyM = guidanceAccuracyM, speedMps = followState.speedMps,
+                            timestampMs = android.os.SystemClock.elapsedRealtime(),
+                        ),
                     )
                     guidanceState = result.state
                     guidanceResult = result
@@ -563,7 +580,7 @@ private fun NaviGuidanceBand(text: String, kind: NaviGuidanceCues.Kind?, modifie
                     NaviGuidanceCues.Kind.RIGHT_FRONT -> Icons.Filled.TurnSharpRight
                     NaviGuidanceCues.Kind.LEFT_FRONT -> Icons.Filled.TurnSharpLeft
                     NaviGuidanceCues.Kind.RIGHT_RETURN, NaviGuidanceCues.Kind.LEFT_RETURN, NaviGuidanceCues.Kind.RETURN -> Icons.Filled.UTurnRight
-                    NaviGuidanceCues.Kind.STRAIGHT, NaviGuidanceCues.Kind.UNKNOWN -> null
+                    NaviGuidanceCues.Kind.STRAIGHT, NaviGuidanceCues.Kind.ROAD_FOLLOWING, NaviGuidanceCues.Kind.UNKNOWN -> null
                 }
                 if (icon != null) Icon(icon, contentDescription = kind.label(), tint = Color.White, modifier = Modifier.padding(start = 16.dp).size(24.dp))
             }
@@ -579,6 +596,10 @@ private fun NaviGuidanceBand(text: String, kind: NaviGuidanceCues.Kind?, modifie
         }
     }
 }
+
+private fun savedRoadFollowing(rows: List<com.istech.buscourse.core.data.NaviGuidanceEntity>): List<RoadFollowing.Interval> = rows
+    .filter { it.role == "road-following" && it.kind == "ROAD_FOLLOWING" }
+    .mapNotNull { row -> row.chainageEndM?.takeIf { it > row.chainageM }?.let { RoadFollowing.Interval(row.chainageM, it) } }
 
 private fun savedCues(rows: List<com.istech.buscourse.core.data.NaviGuidanceEntity>): List<NaviGuidanceCues.Cue> = rows
     .filter { it.role == "turn" || it.role == "stop" }

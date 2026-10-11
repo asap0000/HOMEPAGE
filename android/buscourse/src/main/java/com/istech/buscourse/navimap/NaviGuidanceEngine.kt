@@ -34,6 +34,7 @@ object NaviGuidanceEngine {
         val role: String,
         val source: String,
         val evidence: Map<String, Any?>,
+        val chainageEndM: Double? = null,
     )
     data class Result(
         val guidance: List<Guidance>, val policyId: String, val status: String,
@@ -98,19 +99,31 @@ object NaviGuidanceEngine {
         val cranked = if (roadEvidence == null) CrankResult(road.guidance, 0, emptyList())
             else applyRoadCranks(road.guidance, roadEvidence.cranks, points)
         val signaled = if (roadEvidence == null) cranked.guidance to 0 else withSignalLandmarks(cranked.guidance, roadEvidence, groups)
+        val roadFollowingDecisions = RoadFollowing.derive(groups, signaled.first, roadEvidence)
+        val roadFollowing = roadFollowingDecisions.filter { it.adopted }.map { decision ->
+            Guidance(NaviGuidanceCues.Cue(decision.startM, NaviGuidanceCues.Kind.ROAD_FOLLOWING,
+                NaviGuidanceCues.Variant.V1, 0.0, 0.0, null, RoadFollowing.TEXT,
+                bandText = RoadFollowing.TEXT), "road-following", RoadFollowing.POLICY_ID,
+                decision.evidence(), decision.endM)
+        }
         val counts = signaled.first.groupingBy { it.source }.eachCount() + mapOf(
             "diagnostics" to detections.count { it["decision"] != null }, "added" to (added.size + road.added),
             "roadAdded" to road.added, "reanchored" to road.reanchored, "crank" to cranked.accepted,
             "signal" to signaled.second,
-            "visits" to (roadEvidence?.visits?.size ?: 0), "proposals" to (roadEvidence?.proposals?.size ?: 0))
+            "visits" to (roadEvidence?.visits?.size ?: 0), "proposals" to (roadEvidence?.proposals?.size ?: 0),
+            "roadFollowingAdopted" to roadFollowing.size,
+            "roadFollowingExcluded" to roadFollowingDecisions.count { !it.adopted })
         val state = if (roadEvidence == null) STATUS_GPS_ONLY else STATUS_APPLIED
-        return Result(signaled.first, POLICY_ID, state, regionId = roadEvidence?.regionId,
+        return Result(signaled.first + roadFollowing, POLICY_ID, state, regionId = roadEvidence?.regionId,
             mapSha256 = roadEvidence?.mapSha256, routeSha256 = roadEvidence?.routeSha256,
             summary = counts, diagnostics = detections.filter { it["decision"] != null } + road.decisions +
                 (roadEvidence?.crankDecisions ?: emptyList()) + cranked.decisions,
-            summaryDetails = if (roadEvidence == null) emptyMap() else mapOf("indexSha256" to roadEvidence.indexSha256,
+            summaryDetails = (if (roadEvidence == null) emptyMap() else mapOf("indexSha256" to roadEvidence.indexSha256,
                 "dataTimestampUTC" to roadEvidence.dataTimestampUtc, "mapSha256" to roadEvidence.mapSha256,
-                "roadPolicyId" to "map-connected-guidance-v1", "crankPolicyId" to CRANK_POLICY_ID))
+                "roadPolicyId" to "map-connected-guidance-v1", "crankPolicyId" to CRANK_POLICY_ID)) +
+                mapOf("roadFollowingPolicyId" to RoadFollowing.POLICY_ID,
+                    "roadFollowingReasons" to roadFollowingDecisions.flatMap { it.reasons }.groupingBy { it }.eachCount(),
+                    "roadFollowingDecisions" to roadFollowingDecisions.map { it.evidence() }))
     }
 
     private data class RoadResult(val guidance: List<Guidance>, val added: Int, val reanchored: Int,

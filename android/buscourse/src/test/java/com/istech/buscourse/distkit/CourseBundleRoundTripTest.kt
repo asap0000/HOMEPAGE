@@ -100,7 +100,9 @@ class CourseBundleRoundTripTest {
         val guidance = targetDb.naviMapDao().getGuidance(importedMap.id)
         assertThat(guidance.map { listOf(it.seq, it.role, it.kind, it.chainageM, it.bandText, it.source, it.evidenceJson) })
             .containsExactly(listOf(0, "turn", "RIGHT", 10.0, "右折", "existing", "{\"synthetic\":true}"),
-                listOf(1, "future-role", "future-kind", 15.0, "保存された帯", "research", "{}"))
+                listOf(1, "future-role", "future-kind", 15.0, "保存された帯", "research", "{}"),
+                listOf(2, "road-following", "ROAD_FOLLOWING", 16.0, "しばらく、道なりです", "road-following-v1", "{\"policyId\":\"road-following-v1\"}"))
+        assertThat(guidance.last().chainageEndM).isEqualTo(19.0)
         assertThat(targetDb.naviMapDao().getGuidanceBuild(importedMap.id)?.status).isEqualTo("GPS_ONLY")
         assertThat(importedMap.mediaCount).isEqualTo(11)
 
@@ -299,6 +301,11 @@ class CourseBundleRoundTripTest {
             NaviGuidanceEntity(naviMapId = mapId, seq = 1, role = "future-role", kind = "future-kind", chainageM = 15.0,
                 variant = "V1", preDistanceM = 0.0, nearDistanceM = 0.0, nearText = "将来案内", bandText = "保存された帯",
                 source = "research", policyId = "test"),
+            NaviGuidanceEntity(naviMapId = mapId, seq = 2, role = "road-following", kind = "ROAD_FOLLOWING",
+                chainageM = 16.0, chainageEndM = 19.0, variant = "V1", preDistanceM = 0.0,
+                nearDistanceM = 0.0, nearText = "しばらく、道なりです", bandText = "しばらく、道なりです",
+                source = "road-following-v1", policyId = "road-following-v1",
+                evidenceJson = "{\"policyId\":\"road-following-v1\"}"),
         ))
         sourceDb.naviMapDao().insertGuidanceBuild(NaviGuidanceBuildEntity(mapId, "test", "GPS_ONLY", createdAt = 200L, summaryJson = "{}"))
         val eventId = sourceDb.naviMapDao().insertEvent(
