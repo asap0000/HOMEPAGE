@@ -132,6 +132,15 @@ elif args[:2] == ['shell', 'rm']:
         self.assertNotIn('memo', next(r for _, r in runs if r['dbVersion'] == 1)['session'])
         self.assertEqual(len(next(r for _, r in runs)['gps']), 1)
 
+    def test_legacy_sensor_file_is_copied(self):
+        path = self.base / 'source.db'
+        make_db(path, 24, self.new, frame=False)
+        sensor = self.base / 'sessions' / '1' / 'sensors.jsonl.gz'
+        sensor.parent.mkdir(parents=True)
+        sensor.write_bytes(b'synthetic gzip bytes')
+        archive.ingest_legacy(self.root, [path])
+        self.assertEqual((self.folder() / sensor.name).read_bytes(), sensor.read_bytes())
+
     def test_db_frames_idempotent_increment_and_conflict(self):
         path = self.base / 'run.db'; make_db(path, 24, self.new)
         frames = self.base / 'sessions' / '1' / 'frames'; frames.mkdir(parents=True)

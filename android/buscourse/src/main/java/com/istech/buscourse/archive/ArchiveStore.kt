@@ -81,7 +81,7 @@ class ArchiveStore(private val context: Context, private val db: BusCourseDataba
             if (!input.isFile) { missing.put(name); continue }
             input.copyTo(File(frameDir, name))
         }
-        for (name in listOf("meta.json", "gps_raw.jsonl")) {
+        for (name in listOf("meta.json", "gps_raw.jsonl", "sensors.jsonl.gz")) {
             File(source, name).takeIf { it.isFile }?.copyTo(File(dir, name))
         }
         val json = JSONObject().apply {

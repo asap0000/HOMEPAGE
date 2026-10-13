@@ -95,8 +95,10 @@ class NaviRunLogTest {
 
     @Test fun under60sOrNoFix_isDiscarded_61sIsKept() {
         val short = File(temp.root, "1000000.jsonl")
+        val shortSensors = NaviRunLog.sensorFileOf(short).apply { writeBytes(byteArrayOf(1)) }
         assertThat(record(1_000_000L + 59_000, listOf(fix(1_010_000, 1.0, true)), short)).isNull()
         assertThat(short.exists()).isFalse()
+        assertThat(shortSensors.exists()).isFalse()
 
         val noFix = File(temp.root, "1000000.jsonl")
         assertThat(record(1_000_000L + 300_000, emptyList(), noFix)).isNull()
@@ -111,11 +113,11 @@ class NaviRunLogTest {
         val now = 400 * day
         val old = now - 181 * day
         val recent = now - 179 * day
-        val files = listOf("$old.jsonl", "$old.summary.json", "$recent.jsonl", "$recent.summary.json", "memo.txt", "x.jsonl")
+        val files = listOf("$old.jsonl", "$old.summary.json", "$old.sensors.jsonl.gz", "$recent.jsonl", "$recent.summary.json", "$recent.sensors.jsonl.gz", "memo.txt", "x.jsonl")
             .map { File(temp.root, it).apply { writeText("x") } }
         NaviRunLog.deleteExpired(temp.root, now)
         assertThat(files.filter { it.exists() }.map { it.name })
-            .containsExactly("$recent.jsonl", "$recent.summary.json", "memo.txt", "x.jsonl")
+            .containsExactly("$recent.jsonl", "$recent.summary.json", "$recent.sensors.jsonl.gz", "memo.txt", "x.jsonl")
     }
 
     @Test fun loadSummaries_rebuildsMissingSummary_andSortsNewestFirst() {

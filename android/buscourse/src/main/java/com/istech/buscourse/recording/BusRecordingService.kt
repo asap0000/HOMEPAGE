@@ -25,6 +25,7 @@ import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.R
 import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.geo.GeoMath
@@ -82,6 +83,7 @@ class BusRecordingService : LifecycleService() {
     private var gnssLocationSource: GnssLocationSource? = null
     private var shockDetector: ShockDetector? = null
     private var shockHandlerThread: HandlerThread? = null
+    private var sensorRecorder: SensorRecorder? = null
     private var thermalGuard: ThermalGuard? = null
 
     /** カメラ健全性チェック（S0-b、2026-07-15追加）の判定ロジック本体と定期実行ジョブ。 */
@@ -249,6 +251,13 @@ class BusRecordingService : LifecycleService() {
 
                 guard.start(thermalExecutor)
                 shock.start(handlerThread)
+                sensorRecorder = runCatching {
+                    SensorRecorder(
+                        SensorRecorder.AndroidSource(getSystemService(SENSOR_SERVICE) as SensorManager),
+                        BusCourseStorage.resolve(this@BusRecordingService, "${BusCourseStorage.DIR_SESSIONS}/${session.id}/sensors.jsonl.gz"),
+                        BuildConfig.VERSION_NAME,
+                    ).also { it.start() }
+                }.onFailure { Log.w(TAG, "センサー記録の開始に失敗: ${it.javaClass.simpleName}: ${it.message}") }.getOrNull()
 
                 // よーいドン式（2026-08-01）: 「映像なしで開始する」はカメラの失敗をこのセッションの
                 // 失敗として扱わない（ベストエフォート）。成功すれば onCameraFirstFrame が後から
@@ -801,6 +810,8 @@ class BusRecordingService : LifecycleService() {
         gnssLocationSource = null
         shockDetector?.stop()
         shockDetector = null
+        sensorRecorder?.stop()
+        sensorRecorder = null
         shockHandlerThread?.quitSafely()
         shockHandlerThread = null
         thermalGuard?.stop()

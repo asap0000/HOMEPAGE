@@ -71,6 +71,7 @@ import com.istech.buscourse.core.location.GnssLocationSource
 import com.istech.buscourse.navimap.NaviDisplayResolver
 import com.istech.buscourse.navimap.NaviFollow
 import com.istech.buscourse.navimap.NaviRunLog
+import com.istech.buscourse.recording.SensorRecorder
 import com.istech.buscourse.navimap.NaviRunWriter
 import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.core.data.BusCourseStorage
@@ -240,8 +241,9 @@ fun NaviMainScreen(
         } else {
             val startedAtMs = System.currentTimeMillis()
             val dir = File(BusCourseStorage.root(context), BusCourseStorage.DIR_NAVI_RUNS)
+            val body = File(dir, "$startedAtMs${NaviRunLog.BODY_SUFFIX}")
             NaviRunWriter(
-                body = File(dir, "$startedAtMs${NaviRunLog.BODY_SUFFIX}"),
+                body = body,
                 header = NaviRunLog.Header(
                     startedAtMs = startedAtMs,
                     busId = ready.busId,
@@ -253,6 +255,10 @@ fun NaviMainScreen(
                     offExitM = OFF_COURSE_EXIT_M,
                 ),
                 onError = { android.util.Log.w("NaviRunLog", "走った跡を書けませんでした（ナビは続ける）", it) },
+                sensorRecorder = SensorRecorder(
+                    SensorRecorder.AndroidSource(context.getSystemService(android.content.Context.SENSOR_SERVICE) as android.hardware.SensorManager),
+                    NaviRunLog.sensorFileOf(body), BuildConfig.VERSION_NAME,
+                ),
             )
         }
     }

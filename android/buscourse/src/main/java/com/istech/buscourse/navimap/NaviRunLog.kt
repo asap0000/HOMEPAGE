@@ -6,6 +6,7 @@ import java.io.FileWriter
 import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import com.istech.buscourse.recording.SensorRecorder
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -27,6 +28,7 @@ import org.json.JSONObject
 object NaviRunLog {
     const val BODY_SUFFIX = ".jsonl"
     const val SUMMARY_SUFFIX = ".summary.json"
+    const val SENSOR_SUFFIX = ".sensors.jsonl.gz"
 
     /** 開いていた時間がこれ未満の回は残さない。 */
     const val MIN_DURATION_MS = 60_000L
@@ -169,6 +171,7 @@ object NaviRunLog {
     // ---- ファイル ----
 
     fun summaryFileOf(body: File): File = File(body.parentFile, body.name.removeSuffix(BODY_SUFFIX) + SUMMARY_SUFFIX)
+    fun sensorFileOf(body: File): File = File(body.parentFile, body.name.removeSuffix(BODY_SUFFIX) + SENSOR_SUFFIX)
 
     fun writeSummary(body: File, s: Summary) {
         val outages = JSONArray()
@@ -214,12 +217,12 @@ object NaviRunLog {
     }.getOrNull()
 
     private fun startedAtOf(file: File): Long? =
-        file.name.removeSuffix(SUMMARY_SUFFIX).removeSuffix(BODY_SUFFIX).toLongOrNull()
+        file.name.removeSuffix(SENSOR_SUFFIX).removeSuffix(SUMMARY_SUFFIX).removeSuffix(BODY_SUFFIX).toLongOrNull()
 
     /** 180日より古い跡（本体と要約）を消す。**名前が `<開始ms>` でないファイルには触らない**。 */
     fun deleteExpired(dir: File, nowMs: Long) {
         dir.listFiles()?.forEach { file ->
-            val isRunFile = file.name.endsWith(BODY_SUFFIX) || file.name.endsWith(SUMMARY_SUFFIX)
+            val isRunFile = file.name.endsWith(BODY_SUFFIX) || file.name.endsWith(SUMMARY_SUFFIX) || file.name.endsWith(SENSOR_SUFFIX)
             val startedAt = startedAtOf(file) ?: return@forEach
             if (isRunFile && nowMs - startedAt > RETENTION_MS) file.delete()
         }
@@ -231,6 +234,7 @@ object NaviRunLog {
         if (summary == null || shouldDiscard(summary)) {
             body.delete()
             summaryFileOf(body).delete()
+            sensorFileOf(body).delete()
             return null
         }
         writeSummary(body, summary)
@@ -306,6 +310,7 @@ class NaviRunWriter(
     private val executor: Executor = SHARED_EXECUTOR,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val onError: (Throwable) -> Unit = {},
+    private val sensorRecorder: SensorRecorder? = null,
 ) {
     private var writer: BufferedWriter? = null
     private var lastFlushMs = 0L
@@ -316,6 +321,7 @@ class NaviRunWriter(
     private var lastOnCourseChainageM: Double? = null
 
     init {
+        runCatching { sensorRecorder?.start() }.onFailure(onError)
         submit {
             body.parentFile?.let { NaviRunLog.deleteExpired(it, header.startedAtMs) }
             body.parentFile?.mkdirs()
@@ -349,6 +355,7 @@ class NaviRunWriter(
     fun close() {
         if (closed) return
         closed = true
+        runCatching { sensorRecorder?.stop() }.onFailure(onError)
         submit {
             writer?.let {
                 it.write(NaviRunLog.endLine(nowMs()))

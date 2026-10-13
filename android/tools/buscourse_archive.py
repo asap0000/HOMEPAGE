@@ -20,7 +20,7 @@ import zipfile
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-10 21:55'
+BUILT_AT = '2026-10-13 19:22'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
@@ -172,7 +172,7 @@ def files_from_legacy(run, base, sid):
             files['frames/' + name] = src
         else:
             missing.append(name)
-    for name in ('meta.json', 'gps_raw.jsonl'):
+    for name in ('meta.json', 'gps_raw.jsonl', 'sensors.jsonl.gz'):
         src = locate_extra(base, sid, name)
         if src:
             files[name] = src

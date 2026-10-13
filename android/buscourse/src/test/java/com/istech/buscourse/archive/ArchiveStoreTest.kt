@@ -50,7 +50,12 @@ class ArchiveStoreTest {
             fileRelPath = rel, capturedAt = run.startedAt, latitude = null, longitude = null,
             width = null, height = null, sizeBytes = 3))
     }
-    @After fun tearDown() { db.close(); receiptFile.delete(); store.outDir.deleteRecursively() }
+    @After fun tearDown() {
+        db.close()
+        receiptFile.delete()
+        store.outDir.deleteRecursively()
+        BusCourseStorage.resolve(context, "sessions/${run.id}/sensors.jsonl.gz").delete()
+    }
 
     @Test fun receiptRequiresSchemaShapeAndFrameCount() = runTest {
         receiptFile.writeText("not json")
@@ -66,6 +71,8 @@ class ArchiveStoreTest {
     }
 
     @Test fun doneIsLastManifestMatchesAndSecondExportKeepsFiles() = runTest {
+        val sensors = BusCourseStorage.resolve(context, "sessions/${run.id}/sensors.jsonl.gz")
+        sensors.writeBytes(byteArrayOf(31, 32, 33))
         assertThat(store.isExported(run)).isFalse()
         assertThat(store.export(run)).isTrue()
         // 書き出し済みは「取り込み待ち」に数える（画面で書き出す対象から外し、押し直しを生まない）
@@ -74,6 +81,8 @@ class ArchiveStoreTest {
         val done = File(folder, "DONE")
         assertThat(done.isFile).isTrue()
         val manifest = File(folder, "manifest.sha256").readLines()
+        assertThat(File(folder, "sensors.jsonl.gz").readBytes().contentEquals(sensors.readBytes())).isTrue()
+        assertThat(manifest.any { it.endsWith("  sensors.jsonl.gz") }).isTrue()
         for (line in manifest) {
             val name = line.substring(66)
             val digest = MessageDigest.getInstance("SHA-256").digest(File(folder, name).readBytes())
