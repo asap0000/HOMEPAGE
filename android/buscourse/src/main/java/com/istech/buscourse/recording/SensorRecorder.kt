@@ -109,8 +109,10 @@ class SensorRecorder(
                     val units = JSONObject().put("t", "ns").put("w", "rad/s")
                         .put("g", "m/s2").put("a", "m/s2").put("yaw", "deg/s")
                     val started = elapsedNanos()
-                    writer!!.write(JSONObject().put("kind", "header").put("v", 1).put("rateHz", 20)
-                        .put("sensors", sensors).put("units", units).put("yawSign", "right-positive")
+                    // v2: 桁を丸めて残す（2026-10-13 オーナー裁定 A）。刻みはセンサー自体のばらつきより細かい。
+                    val decimals = JSONObject().put("w", DECIMALS_W).put("g", DECIMALS_G).put("a", DECIMALS_A).put("yaw", DECIMALS_YAW)
+                    writer!!.write(JSONObject().put("kind", "header").put("v", 2).put("rateHz", 20)
+                        .put("sensors", sensors).put("units", units).put("decimals", decimals).put("yawSign", "right-positive")
                         .put("deviceModel", deviceModel).put("appVersion", appVersion)
                         .put("startedElapsedNanos", started).toString())
                     writer!!.newLine()
@@ -231,15 +233,31 @@ class SensorRecorder(
             // Android の重力は画面上向きで +z。右手系の左正を反転し、案内と同じ右折正にする。
             val yaw = if (w != null && g != null && norm > 0.0)
                 -(0..2).sumOf { w[it] * g[it] } / norm * 180.0 / Math.PI else null
-            fun array(v: DoubleArray?): Any = v?.let { JSONArray().put(it[0]).put(it[1]).put(it[2]) } ?: JSONObject.NULL
-            return JSONObject().put("t", timestamp).put("w", array(w)).put("g", array(g))
-                .put("a", array(a)).put("yaw", yaw ?: JSONObject.NULL).put("stale", stale)
+            // yaw は丸める前の値から計算し、書くときだけ丸める。
+            fun array(v: DoubleArray?, digits: Int): Any =
+                v?.let { JSONArray().put(round(it[0], digits)).put(round(it[1], digits)).put(round(it[2], digits)) } ?: JSONObject.NULL
+            return JSONObject().put("t", timestamp).put("w", array(w, DECIMALS_W)).put("g", array(g, DECIMALS_G))
+                .put("a", array(a, DECIMALS_A)).put("yaw", yaw?.let { round(it, DECIMALS_YAW) } ?: JSONObject.NULL).put("stale", stale)
         }
     }
 
-    private companion object {
+    internal companion object {
         const val TAG = "SensorRecorder"
         const val WINDOW_MS = 50L
         val TYPES = listOf(Sensor.TYPE_GYROSCOPE, Sensor.TYPE_GRAVITY, Sensor.TYPE_LINEAR_ACCELERATION)
+
+        /**
+         * 残す桁（小数点以下）。刻みはセンサー自体のばらつき（ジャイロ約0.02°/s・加速度約0.006m/s²）より細かく、
+         * 人が感じ始める大きさ（約0.5°/s・約0.2m/s²）よりずっと細かい。文字列のまま 1/4 ほどになる（実測 2026-10-13）。
+         */
+        const val DECIMALS_W = 4    // rad/s → 0.0001 rad/s ≈ 0.006°/s
+        const val DECIMALS_G = 3    // m/s²
+        const val DECIMALS_A = 3    // m/s²
+        const val DECIMALS_YAW = 2  // °/s
+
+        fun round(v: Double, digits: Int): Double {
+            val scale = Math.pow(10.0, digits.toDouble())
+            return Math.round(v * scale) / scale
+        }
     }
 }

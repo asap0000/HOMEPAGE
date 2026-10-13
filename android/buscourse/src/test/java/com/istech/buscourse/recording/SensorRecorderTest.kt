@@ -71,14 +71,14 @@ class SensorRecorderTest {
         assertThat(first.getJSONArray("w").getDouble(2)).isEqualTo(-2.0)
         assertThat(first.getJSONArray("g").getDouble(2)).isEqualTo(10.0)
         assertThat(first.getJSONArray("a").getDouble(0)).isEqualTo(3.0)
-        assertThat(first.getDouble("yaw")).isWithin(0.0001).of(2 * 180 / Math.PI)
+        assertThat(first.getDouble("yaw")).isWithin(0.005).of(2 * 180 / Math.PI)  // 0.01°/s に丸めて残す
         assertThat(first.getJSONArray("stale").length()).isEqualTo(0)
 
         window.add(Sensor.TYPE_GYROSCOPE, floatArrayOf(0f, 0f, 1f))
         val second = window.end(100_000_000L)
         assertThat(second.getJSONArray("stale").toString()).isEqualTo("[\"g\",\"a\"]")
         assertThat(second.getJSONArray("g").getDouble(2)).isEqualTo(11.0)
-        assertThat(second.getDouble("yaw")).isWithin(0.0001).of(-180 / Math.PI)
+        assertThat(second.getDouble("yaw")).isWithin(0.005).of(-180 / Math.PI)
     }
 
     @Test fun absentGyroLeavesYawNull() {
@@ -112,6 +112,10 @@ class SensorRecorderTest {
         assertThat(header.getString("kind")).isEqualTo("header")
         assertThat(header.getInt("rateHz")).isEqualTo(20)
         assertThat(header.getString("yawSign")).isEqualTo("right-positive")
+        assertThat(header.getInt("v")).isEqualTo(2)
+        val decimals = header.getJSONObject("decimals")
+        assertThat(decimals.getInt("w")).isEqualTo(4)
+        assertThat(decimals.getInt("yaw")).isEqualTo(2)
         assertThat(header.getLong("startedElapsedNanos")).isEqualTo(123L)
         assertThat(header.getJSONObject("sensors").getBoolean("gyroscope")).isTrue()
         assertThat(rows.drop(1).any { it.getLong("t") == 123L + 50_000_000L }).isTrue()
@@ -146,5 +150,12 @@ class SensorRecorderTest {
     /** テスト側から窓だけ進める。センサー登録と時計の継ぎ目は偽物を渡す。 */
     private fun tick(recorder: SensorRecorder) {
         SensorRecorder::class.java.getDeclaredMethod("sampleWindow").apply { isAccessible = true }.invoke(recorder)
+    }
+
+    /** 桁を丸めて残す（オーナー裁定 A）。刻みの半分を超える差は出ない。 */
+    @Test fun valuesAreRoundedToDeclaredDecimals() {
+        assertThat(SensorRecorder.round(9.800000190734863, SensorRecorder.DECIMALS_G)).isEqualTo(9.8)
+        assertThat(SensorRecorder.round(0.123456, SensorRecorder.DECIMALS_W)).isEqualTo(0.1235)
+        assertThat(SensorRecorder.round(-57.29577951308232, SensorRecorder.DECIMALS_YAW)).isEqualTo(-57.3)
     }
 }
