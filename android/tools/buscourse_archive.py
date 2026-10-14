@@ -20,7 +20,7 @@ import zipfile
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-13 19:22'
+BUILT_AT = '2026-10-14 17:17'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
@@ -493,8 +493,10 @@ def export_list(adb, serial):
 
 
 def choose_adb(explicit=None):
-    candidates = [explicit, os.environ.get('BUSCOURSE_ADB'),
-                  r'C:\Program Files (x86)\AirDroid Cast\IncludeAdb\adb_helper.exe', 'adb']
+    # AirDroid Cast は使わない運用（2026-10-14 オーナー裁定）。常駐の adb（版40）と SDK の adb（版41）が
+    # サーバーを取り合い、エミュレータの登録が失敗し OPPO の接続も切れたため。SDK の adb を正とする。
+    sdk_adb = Path(os.environ.get('LOCALAPPDATA', '')) / 'Android' / 'Sdk' / 'platform-tools' / 'adb.exe'
+    candidates = [explicit, os.environ.get('BUSCOURSE_ADB'), str(sdk_adb), 'adb']
     for candidate in candidates:
         if not candidate or (candidate.endswith('.exe') and not Path(candidate).is_file()):
             continue
