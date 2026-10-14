@@ -33,8 +33,8 @@ object NaviRunLog {
     /** 開いていた時間がこれ未満の回は残さない。 */
     const val MIN_DURATION_MS = 60_000L
 
-    /** これより古い跡は消す（180日）。 */
-    const val RETENTION_MS = 180L * 24 * 60 * 60 * 1000
+    /** 本画面で現在書いている回。書き出しから除く。 */
+    @Volatile var openStartedAtMs: Long? = null
 
     /** 回廊の幅（コースの中心線から）。これより外の座標は残さない。 */
     const val CORRIDOR_M = 250.0
@@ -219,15 +219,6 @@ object NaviRunLog {
     private fun startedAtOf(file: File): Long? =
         file.name.removeSuffix(SENSOR_SUFFIX).removeSuffix(SUMMARY_SUFFIX).removeSuffix(BODY_SUFFIX).toLongOrNull()
 
-    /** 180日より古い跡（本体と要約）を消す。**名前が `<開始ms>` でないファイルには触らない**。 */
-    fun deleteExpired(dir: File, nowMs: Long) {
-        dir.listFiles()?.forEach { file ->
-            val isRunFile = file.name.endsWith(BODY_SUFFIX) || file.name.endsWith(SUMMARY_SUFFIX) || file.name.endsWith(SENSOR_SUFFIX)
-            val startedAt = startedAtOf(file) ?: return@forEach
-            if (isRunFile && nowMs - startedAt > RETENTION_MS) file.delete()
-        }
-    }
-
     /** 本体を閉じた（または落ちた回を後から拾った）ときの後始末: 短すぎれば消し、残すなら要約を書き置く。残したら要約を返す。 */
     fun finalize(body: File): Summary? {
         val summary = if (body.exists()) summarize(body.readLines()) else null
@@ -241,9 +232,8 @@ object NaviRunLog {
         return summary
     }
 
-    /** 一覧用: 古いものを消し、要約を新しい順に返す。要約の無い本体（落ちた回）はここで要約を作って書き置く。 */
-    fun loadSummaries(dir: File, nowMs: Long): List<Summary> {
-        deleteExpired(dir, nowMs)
+    /** 一覧用: 要約を新しい順に返す。要約の無い本体（落ちた回）はここで要約を作って書き置く。 */
+    fun loadSummaries(dir: File, @Suppress("UNUSED_PARAMETER") nowMs: Long): List<Summary> {
         val bodies = dir.listFiles { f -> f.name.endsWith(BODY_SUFFIX) && startedAtOf(f) != null }.orEmpty()
         return bodies.mapNotNull { body -> readSummary(summaryFileOf(body)) ?: finalize(body) }
             .sortedByDescending { it.startedAtMs }
@@ -312,6 +302,7 @@ class NaviRunWriter(
     private val onError: (Throwable) -> Unit = {},
     private val sensorRecorder: SensorRecorder? = null,
 ) {
+    private val startedAtMs = header.startedAtMs
     private var writer: BufferedWriter? = null
     private var lastFlushMs = 0L
     @Volatile private var closed = false
@@ -321,9 +312,9 @@ class NaviRunWriter(
     private var lastOnCourseChainageM: Double? = null
 
     init {
+        NaviRunLog.openStartedAtMs = header.startedAtMs
         runCatching { sensorRecorder?.start() }.onFailure(onError)
         submit {
-            body.parentFile?.let { NaviRunLog.deleteExpired(it, header.startedAtMs) }
             body.parentFile?.mkdirs()
             writer = BufferedWriter(FileWriter(body, false)).also {
                 it.write(NaviRunLog.headerLine(header))
@@ -363,7 +354,11 @@ class NaviRunWriter(
                 it.close()
             }
             writer = null
-            NaviRunLog.finalize(body)
+            try {
+                NaviRunLog.finalize(body)
+            } finally {
+                if (NaviRunLog.openStartedAtMs == startedAtMs) NaviRunLog.openStartedAtMs = null
+            }
         }
     }
 

@@ -10,6 +10,8 @@ import threading
 import unittest
 from unittest import mock
 import zipfile
+import hashlib
+import shutil
 
 spec = importlib.util.spec_from_file_location('buscourse_archive', Path(__file__).with_name('buscourse_archive.py'))
 archive = importlib.util.module_from_spec(spec)
@@ -118,6 +120,103 @@ elif args[:2] == ['shell', 'rm']:
             wrapper.write_text(f'@"{sys.executable}" "{script}" %*\n')
             return str(wrapper)
         return str(script)
+
+    def navi_package(self, parent, source='app', run_id='SyntheticDevice_1000', payload=b'{"kind":"header"}\n'):
+        folder = parent / (source + '-package')
+        folder.mkdir(parents=True, exist_ok=True)
+        raw = folder / '1000.jsonl'
+        raw.write_bytes(payload)
+        archive.dump(folder / 'candidate-meta.json', {'source': source, 'sourceRunId': run_id,
+                     'rawFile': raw.name, 'rawBytes': len(payload), 'rawSha256': hashlib.sha256(payload).hexdigest(),
+                     'endedEarly': True})
+        manifest = ''.join(f'{archive.sha(p)}  {p.name}\n' for p in sorted(folder.iterdir()))
+        (folder / 'manifest.sha256').write_text(manifest, encoding='utf-8', newline='\n')
+        (folder / 'DONE').touch()
+        return folder
+
+    def test_navi_samples_versions_receipts_and_origin_unchanged(self):
+        source = self.base / 'source'; source.mkdir()
+        # 契約の合成見本（web-lab の r3）がある環境では、その包みをそのまま受け入れられることも確かめる。
+        r3 = Path(os.environ.get('BUSCOURSE_NAVI_SAMPLES', '') or '/nonexistent')
+        if (r3 / 'sample-app').is_dir() and (r3 / 'sample-browser').is_dir():
+            for name in ('sample-app', 'sample-browser'):
+                shutil.copytree(r3 / name, source / name)
+        else:
+            self.navi_package(source, 'app', 'SyntheticDevice_1000').rename(source / 'sample-app')
+            self.navi_package(source, 'browser', 'synthetic-browser').rename(source / 'sample-browser')
+        before = {p.relative_to(source).as_posix(): archive.sha(p) for p in source.rglob('*') if p.is_file()}
+        counts = archive.ingest_folder(self.root, source)
+        self.assertEqual(counts['navi_archived'], 2)
+        self.assertEqual((counts['navi_app_archived'], counts['navi_browser_archived']), (1, 1))
+        for folder in source.iterdir():
+            meta = archive.load(folder / 'candidate-meta.json')
+            version = self.root / 'ナビの走った跡' / archive.navi_source(meta['source']) / archive.safe_navi(meta['sourceRunId']) / 'v1'
+            for original in folder.rglob('*'):
+                if original.is_file():
+                    self.assertEqual((version / original.relative_to(folder)).read_bytes(), original.read_bytes())
+            self.assertTrue((version / '_vault/provenance.json').is_file())
+            self.assertTrue((version / '_vault/vault.sha256').is_file())
+            receipt = archive.load(archive._navi_receipt(self.root, meta['source'], meta['sourceRunId'], 1))
+            self.assertEqual((receipt['schema'], receipt['stage'], receipt['phoneDeletionAllowed']),
+                             (archive.NAVI_SCHEMA, 'VAULT_ARCHIVED', False))
+        self.assertEqual(before, {p.relative_to(source).as_posix(): archive.sha(p) for p in source.rglob('*') if p.is_file()})
+        self.assertEqual(archive.ingest_folder(self.root, source)['navi_duplicate'], 2)
+        self.assertEqual(before, {p.relative_to(source).as_posix(): archive.sha(p) for p in source.rglob('*') if p.is_file()})
+
+    def test_navi_changed_same_id_creates_v2_without_touching_v1(self):
+        source = self.base / 'source'; source.mkdir()
+        one = self.navi_package(source)
+        self.assertEqual(archive.ingest_navi_package(self.root, one, 'synthetic'), 'archived')
+        base, versions = archive._navi_versions(self.root, 'app', 'SyntheticDevice_1000')
+        first = {p.relative_to(versions[0]).as_posix(): archive.sha(p) for p in versions[0].rglob('*') if p.is_file()}
+        two_parent = self.base / 'other'; two_parent.mkdir()
+        two = self.navi_package(two_parent, payload=b'{"kind":"header"}\n{"kind":"fix"}\n')
+        self.assertEqual(archive.ingest_navi_package(self.root, two, 'synthetic'), 'archived')
+        self.assertTrue((base / 'v2' / 'DONE').is_file())
+        self.assertEqual(first, {p.relative_to(versions[0]).as_posix(): archive.sha(p) for p in versions[0].rglob('*') if p.is_file()})
+
+    def test_navi_invalid_packages_are_held_without_receipts(self):
+        for case in ('no_done', 'bad_sha', 'extra', 'traversal', 'bad_source'):
+            with self.subTest(case=case):
+                parent = self.base / case; parent.mkdir()
+                folder = self.navi_package(parent, run_id=case)
+                if case == 'no_done': (folder / 'DONE').unlink()
+                if case == 'bad_sha': (folder / '1000.jsonl').write_bytes(b'changed')
+                if case == 'extra': (folder / 'extra.txt').write_text('extra')
+                if case == 'traversal':
+                    manifest = folder / 'manifest.sha256'
+                    manifest.write_text(manifest.read_text() + '0' * 64 + '  ../outside\n', newline='\n')
+                if case == 'bad_source':
+                    meta = archive.load(folder / 'candidate-meta.json'); meta['source'] = 'invalid'
+                    archive.dump(folder / 'candidate-meta.json', meta)
+                    (folder / 'manifest.sha256').write_text(''.join(f'{archive.sha(p)}  {p.name}\n' for p in sorted(folder.iterdir())
+                        if p.name not in ('manifest.sha256', 'DONE')), newline='\n')
+                before = {p.name: archive.sha(p) for p in folder.iterdir() if p.is_file()}
+                self.assertEqual(archive.ingest_navi_package(self.root, folder, 'synthetic'), 'held')
+                self.assertEqual(before, {p.name: archive.sha(p) for p in folder.iterdir() if p.is_file()})
+                self.assertFalse(archive._navi_receipt(self.root, 'app', case, 1).exists())
+        self.assertEqual(len(list((self.root / 'ナビの走った跡/受け入れ保留').glob('*.reason.txt'))), 5)
+
+    def test_navi_only_fake_adb_pull_and_receipt(self):
+        device = self.base / 'device'; out = device / 'navirun_out'; out.mkdir(parents=True)
+        good = self.navi_package(out, run_id='SyntheticDevice_1000')
+        bad_parent = self.base / 'bad'; bad_parent.mkdir()
+        bad = self.navi_package(bad_parent, run_id='SyntheticDevice_2000')
+        bad.rename(out / 'bad-package')
+        (out / 'bad-package' / 'DONE').unlink()
+        # 保留の試験では DONE が必要なので、SHA を壊す。
+        (out / 'bad-package' / 'DONE').touch()
+        (out / 'bad-package' / '1000.jsonl').write_bytes(b'bad')
+        fake = self.fake_adb({'SYNTHETIC_SERIAL': device})
+        selected = archive.discover(fake, ['SYNTHETIC_SERIAL'])
+        self.assertEqual(len(selected['navi_ready']), 2)
+        counts = archive.pull(self.root, 'SYNTHETIC_SERIAL', fake, model='SyntheticDevice')
+        self.assertEqual((counts['navi_archived'], counts['navi_held']), (1, 1))
+        self.assertFalse(good.exists())
+        self.assertTrue((out / 'bad-package').exists())
+        rows = archive.load(device / 'navirun_receipt.json')['rows']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['sourceRunId'], 'SyntheticDevice_1000')
 
     def test_versions_eras_and_source_unchanged(self):
         a = self.base / 'old.db'; b = self.base / 'new.db'

@@ -20,13 +20,208 @@ import zipfile
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-14 17:17'
+BUILT_AT = '2026-10-15 06:52'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
 DEVICE_PATH = '/sdcard/Android/data/com.istech.buscourse/files'
 TABLES = {'session': 'recording_session', 'gps': 'gps_point', 'frames': 'timelapse_frame',
           'stopVisits': 'stop_visit_event', 'shocks': 'shock_event'}
+NAVI_SCHEMA = 'buscourse-archive-receipt/2'
+
+
+def safe_navi(value):
+    value = re.sub(r'[^A-Za-z0-9._-]', '_', value)
+    return '_' if value in ('.', '..') else value
+
+
+def navi_base(root):
+    return Path(root) / 'ナビの走った跡'
+
+
+def navi_source(source):
+    return {'app': 'アプリ版', 'browser': 'ブラウザ版'}[source]
+
+
+def _navi_files(folder):
+    for path in folder.rglob('*'):
+        if path.is_symlink():
+            raise ValueError('symbolic link')
+        if path.is_file():
+            yield path
+
+
+def _navi_validate(folder):
+    folder = Path(folder)
+    if folder.is_symlink() or not folder.is_dir():
+        raise ValueError('package folder')
+    done = folder / 'DONE'
+    if not done.is_file() or done.is_symlink() or done.stat().st_size:
+        raise ValueError('DONE missing or nonempty')
+    manifest = folder / 'manifest.sha256'
+    if not manifest.is_file() or manifest.is_symlink():
+        raise ValueError('manifest missing')
+    data = manifest.read_bytes()
+    if not data or not data.endswith(b'\n') or b'\r' in data:
+        raise ValueError('manifest LF format')
+    try:
+        lines = data.decode('utf-8').splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError('manifest UTF-8') from exc
+    expected = {}
+    for line in lines:
+        if not re.fullmatch(r'[0-9a-f]{64}  [\x21-\x7e]+', line):
+            raise ValueError('manifest line format')
+        digest, name = line[:64], line[66:]
+        if ('\\' in name or name.startswith('/') or any(part in ('', '.', '..') for part in name.split('/'))
+                or name in ('DONE', 'manifest.sha256', '_vault') or name.startswith('_vault/') or name in expected):
+            raise ValueError('unsafe manifest path')
+        expected[name] = digest
+    if list(expected) != sorted(expected):
+        raise ValueError('manifest order')
+    actual = {p.relative_to(folder).as_posix(): sha(p) for p in _navi_files(folder)
+              if p.relative_to(folder).as_posix() not in ('DONE', 'manifest.sha256')}
+    if actual != expected or 'candidate-meta.json' not in expected:
+        raise ValueError('manifest files or SHA mismatch')
+    try:
+        meta = load(folder / 'candidate-meta.json')
+        source, run_id, raw = meta['source'], meta['sourceRunId'], meta['rawFile']
+        if source not in ('app', 'browser') or not isinstance(run_id, str) or not run_id:
+            raise ValueError('source or sourceRunId')
+        if not isinstance(raw, str) or raw not in expected:
+            raise ValueError('rawFile')
+        raw_path = folder / raw
+        if meta['rawSha256'] != sha(raw_path) or type(meta['rawBytes']) is not int or meta['rawBytes'] != raw_path.stat().st_size:
+            raise ValueError('raw SHA or bytes')
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError('candidate metadata') from exc
+    return meta, sha(manifest)
+
+
+def _navi_versions(root, source, run_id):
+    base = navi_base(root) / navi_source(source) / safe_navi(run_id)
+    return base, sorted((p for p in base.glob('v[0-9]*') if p.is_dir() and re.fullmatch(r'v[1-9][0-9]*', p.name)),
+                        key=lambda p: int(p.name[1:]))
+
+
+def _navi_receipt(root, source, run_id, version):
+    return navi_base(root) / '受領票' / navi_source(source) / f'{safe_navi(run_id)}_v{version}.json'
+
+
+def ingest_navi_package(root, folder, origin):
+    """送り手は読み取り専用。失敗した包みも原形のまま保留する。"""
+    root, folder = Path(root), Path(folder)
+    try:
+        meta, manifest_sha = _navi_validate(folder)
+    except (ValueError, OSError) as exc:
+        hold = navi_base(root) / '受け入れ保留'
+        hold.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+        name = f'{stamp}_{safe_navi(folder.name)}'
+        target = hold / name
+        index = 2
+        while target.exists():
+            target = hold / f'{name}_{index}'; index += 1
+        shutil.copytree(folder, target, symlinks=True)
+        target.with_name(target.name + '.reason.txt').write_text(str(exc).replace('\n', ' ') + '\n', encoding='utf-8', newline='\n')
+        return 'held'
+    base, versions = _navi_versions(root, meta['source'], meta['sourceRunId'])
+    for existing in versions:
+        if sha(existing / 'manifest.sha256') == manifest_sha:
+            receipt_path = _navi_receipt(root, meta['source'], meta['sourceRunId'], int(existing.name[1:]))
+            if not receipt_path.is_file():
+                prov = load(existing / '_vault/provenance.json')
+                _write_navi_receipt(receipt_path, meta, manifest_sha, prov['archivedAt'], int(existing.name[1:]))
+            return 'duplicate'
+    version = max((int(v.name[1:]) for v in versions), default=0) + 1
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / f'v{version}'
+    stage = Path(tempfile.mkdtemp(prefix='.navirun-', dir=base))
+    try:
+        for src in _navi_files(folder):
+            dest = stage / src.relative_to(folder)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+            if sha(dest) != sha(src):
+                raise ValueError('copy SHA mismatch')
+        if _navi_validate(stage)[1] != manifest_sha:
+            raise ValueError('staged package mismatch')
+        vault = stage / '_vault'; vault.mkdir()
+        archived_at = int(time.time() * 1000)
+        dump(vault / 'provenance.json', {'archivedAt': archived_at, 'origin': str(origin),
+                                        'manifestSha256': manifest_sha, 'rawSha256': meta['rawSha256'],
+                                        'endedEarly': meta.get('endedEarly'), 'builtAt': BUILT_AT})
+        files = sorted(_navi_files(stage), key=lambda p: p.relative_to(stage).as_posix())
+        (vault / 'vault.sha256').write_text(''.join(f'{sha(p)}  {p.relative_to(stage).as_posix()}\n' for p in files), encoding='utf-8', newline='\n')
+        if any(sha(stage / line[66:]) != line[:64] for line in (vault / 'vault.sha256').read_text(encoding='utf-8').splitlines()):
+            raise ValueError('vault SHA mismatch')
+        stage.rename(target)
+        _write_navi_receipt(_navi_receipt(root, meta['source'], meta['sourceRunId'], version),
+                            meta, manifest_sha, archived_at, version)
+        return 'archived'
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+
+def _write_navi_receipt(path, meta, manifest_sha, archived_at, version):
+    receipt = {'schema': NAVI_SCHEMA, 'kind': 'navirun', 'source': meta['source'],
+               'sourceRunId': meta['sourceRunId'], 'rawSha256': meta['rawSha256'],
+               'rawBytes': meta['rawBytes'], 'manifestSha256': manifest_sha,
+               'archivedAt': archived_at, 'version': version, 'stage': 'VAULT_ARCHIVED',
+               'endedEarly': meta.get('endedEarly'), 'formalReceipt': True,
+               'phoneDeletionAllowed': False, 'issuer': 'buscourse_archive ' + BUILT_AT}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_suffix('.tmp')
+    dump(staging, receipt)
+    staging.replace(path)
+
+
+def navi_counts():
+    return {'navi_archived': 0, 'navi_duplicate': 0, 'navi_held': 0,
+            'navi_app_archived': 0, 'navi_browser_archived': 0}
+
+
+def ingest_folder(root, path):
+    path = Path(path)
+    if not path.is_dir():
+        raise ValueError('folder missing')
+    markers = ('manifest.sha256', 'DONE', 'candidate-meta.json')
+    folders = [path] if any((path / name).exists() for name in markers) else [p for p in sorted(path.iterdir()) if p.is_dir() and any((p / name).exists() for name in markers)]
+    counts = navi_counts()
+    for folder in folders:
+        source = None
+        try:
+            source = load(folder / 'candidate-meta.json').get('source')
+        except (OSError, ValueError, AttributeError):
+            pass
+        outcome = ingest_navi_package(root, folder, str(folder.resolve()))
+        counts['navi_' + outcome] += 1
+        if outcome == 'archived':
+            counts['navi_' + source + '_archived'] += 1
+    build_index(root, counts)
+    log_navi(root, path, counts)
+    return counts
+
+
+def log_navi(root, origin, counts):
+    with (Path(root) / '取り込みの記録.txt').open('a', encoding='utf-8') as out:
+        out.write(f"{dt.datetime.now().astimezone():%Y-%m-%d %H:%M:%S}\tナビの走った跡\t{origin}\t"
+                  f"入れた {counts['navi_archived']}\t同じ中身 {counts['navi_duplicate']}\t保留 {counts['navi_held']}\n")
+
+
+def make_navi_receipt(root, model, out):
+    prefix = safe_navi(model) + '_'
+    rows = []
+    base = navi_base(root) / '受領票' / 'アプリ版'
+    for path in sorted(base.glob('*.json')) if base.is_dir() else []:
+        row = load(path)
+        version_dir = navi_base(root) / 'アプリ版' / safe_navi(row['sourceRunId']) / f"v{row['version']}"
+        prov = load(version_dir / '_vault/provenance.json')
+        if row['sourceRunId'].startswith(prefix) or prov.get('origin') == model:
+            rows.append({k: v for k, v in row.items() if k != 'issuer'})
+    dump(Path(out), {'schema': NAVI_SCHEMA, 'rows': rows})
+    return rows
 
 
 def dump(path, obj):
@@ -414,7 +609,7 @@ def archive_runs(root):
                     yield folder, load(folder / 'run.json')
 
 
-def build_index(root):
+def build_index(root, navi_import=None):
     result = []
     for folder, run in archive_runs(root):
         prov = load(folder / 'provenance.json')
@@ -423,8 +618,19 @@ def build_index(root):
                        'gpsPoints': len(run.get('gps', [])), 'frames': len(run.get('frames', [])),
                        'sizeBytes': sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()),
                        'firstSeenDbVersion': prov.get('firstSeenDbVersion')})
+    # 既存の配列と各走行行を維持し、ナビの集計だけ独立した行にする。
+    receipt_base = navi_base(root) / '受領票'
+    receipts = list(receipt_base.rglob('*.json')) if receipt_base.is_dir() else []
+    old = load(root / 'index.json') if (root / 'index.json').is_file() else []
+    previous = next((row['navirun'] for row in old if isinstance(row, dict) and 'navirun' in row), {})
+    if receipts or navi_import or previous:
+        result.append({'navirun': {'archived': len(receipts),
+                                   'app': sum(p.parent.name == 'アプリ版' for p in receipts),
+                                   'browser': sum(p.parent.name == 'ブラウザ版' for p in receipts),
+                                   'lastImport': {k: (navi_import or previous.get('lastImport', {})).get(k, 0)
+                                                  for k in ('navi_archived', 'navi_duplicate', 'navi_held')}}})
     dump(root / 'index.json', result)
-    return sum(row['sizeBytes'] for row in result)
+    return sum(row.get('sizeBytes', 0) for row in result)
 
 
 def path_length_m(run):
@@ -492,6 +698,14 @@ def export_list(adb, serial):
     return sorted(ready), sorted(pending)
 
 
+def navi_export_list(adb, serial):
+    result = adb_call(adb, serial, 'shell', 'ls', '-1', DEVICE_PATH + '/navirun_out')
+    if result.returncode:
+        return []
+    return sorted(name for name in result.stdout.splitlines() if re.fullmatch(r'[A-Za-z0-9._-]+', name)
+                  and adb_call(adb, serial, 'shell', 'test', '-f', DEVICE_PATH + '/navirun_out/' + name + '/DONE').returncode == 0)
+
+
 def choose_adb(explicit=None):
     # AirDroid Cast は使わない運用（2026-10-14 オーナー裁定）。常駐の adb（版40）と SDK の adb（版41）が
     # サーバーを取り合い、エミュレータの登録が失敗し OPPO の接続も切れたため。SDK の adb を正とする。
@@ -515,14 +729,15 @@ def discover(adb, serials, chooser=None):
     options = []
     for serial in serials:
         ready, pending = export_list(adb, serial)
+        navi_ready = navi_export_list(adb, serial)
         installed = False
-        if not ready and not pending:
+        if not ready and not pending and not navi_ready:
             result = adb_call(adb, serial, 'shell', 'pm', 'path', 'com.istech.buscourse')
             installed = result.returncode == 0 and 'package:' in result.stdout
-        if ready or pending or installed:
+        if ready or pending or navi_ready or installed:
             model = adb_call(adb, serial, 'shell', 'getprop', 'ro.product.model').stdout.strip() or '機種不明'
-            options.append({'serial': serial, 'model': model, 'ready': ready, 'pending': pending})
-    with_ready = [item for item in options if item['ready']]
+            options.append({'serial': serial, 'model': model, 'ready': ready, 'pending': pending, 'navi_ready': navi_ready})
+    with_ready = [item for item in options if item['ready'] or item['navi_ready']]
     choices = with_ready or options
     if not choices:
         return None
@@ -533,8 +748,8 @@ def discover(adb, serials, chooser=None):
     return chooser(choices)
 
 
-def remote_size(adb, serial, name):
-    remote = DEVICE_PATH + '/archive_out/' + name
+def remote_size(adb, serial, name, directory='archive_out'):
+    remote = DEVICE_PATH + '/' + directory + '/' + name
     result = adb_call(adb, serial, 'shell', 'du', '-sk', remote)
     try:
         return int(result.stdout.split()[0]) * 1024 if result.returncode == 0 else 0
@@ -572,9 +787,12 @@ def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
         shutil.rmtree(folder, ignore_errors=True)
         process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(stage)], **HIDE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        last_size, last_change = 0, time.monotonic()
+        last_size, last_change, seen_activity = 0, time.monotonic(), False
         while process.poll() is None:
-            if cancel.is_set() or time.monotonic() - last_change >= stall_seconds:
+            size = tree_size(folder)
+            if size > last_size:
+                last_size, last_change, seen_activity = size, time.monotonic(), True
+            if cancel.is_set() or time.monotonic() - last_change >= (stall_seconds if seen_activity else max(1.0, stall_seconds)):
                 if os.name == 'nt':
                     # .cmd で包んだ偽 adb も含め、この引き取りの子プロセスだけを止める。
                     subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], **HIDE,
@@ -586,9 +804,6 @@ def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
                 except subprocess.TimeoutExpired:
                     process.kill(); process.wait()
                 break
-            size = tree_size(folder)
-            if size > last_size:
-                last_size, last_change = size, time.monotonic()
             # 7,000 ほどのファイルを数え直すので、見張りは 2秒ごとで足りる（止まりの判定は 60秒）。
             time.sleep(min(2.0, max(0.01, stall_seconds / 4)))
         if cancel.is_set():
@@ -604,7 +819,8 @@ def log_pull(root, model, counts, elapsed):
     stamp = dt.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')
     line = (f"{stamp}\t{model}\t道具 {BUILT_AT} 作成\t取り込んだ本数 {counts['ingested']}\t容量 {counts['bytes']}B"
             f"\t合わなかった本数 {counts['mismatch']}\t引き取れなかった本数 {counts['not_pulled']}"
-            f"\t時間 {elapsed:.1f}秒\n")
+            f"\t時間 {elapsed:.1f}秒\tナビの走った跡 入れた {counts['navi_archived']}"
+            f"\t同じ中身 {counts['navi_duplicate']}\t保留 {counts['navi_held']}\n")
     with (root / '取り込みの記録.txt').open('a', encoding='utf-8') as out:
         out.write(line)
 
@@ -612,17 +828,21 @@ def log_pull(root, model, counts, elapsed):
 def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model='機種不明'):
     cancel = cancel or threading.Event()
     counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0, 'not_pulled': 0, 'bytes': 0, 'cancelled': False}
+    counts.update(navi_counts())
     started = time.monotonic()
     ready, pending = export_list(adb, serial)
+    navi_ready = navi_export_list(adb, serial)
     counts['skipped'] = len(pending)
     sizes = {name: remote_size(adb, serial, name) for name in ready}
-    total_bytes = sum(sizes.values())
+    navi_sizes = {name: remote_size(adb, serial, name, 'navirun_out') for name in navi_ready}
+    total_bytes = sum(sizes.values()) + sum(navi_sizes.values())
     def announce(number, name='', run=None):
         elapsed = time.monotonic() - started
         remaining = (elapsed * (total_bytes - counts['bytes']) / counts['bytes']) if counts['bytes'] else None
         if progress:
-            progress({'total': len(ready), 'total_bytes': total_bytes, 'number': number,
-                      'ingested': counts['ingested'], 'ingested_bytes': counts['bytes'], 'current': name,
+            progress({'total': len(ready) + len(navi_ready), 'total_bytes': total_bytes, 'number': number,
+                      'ingested': counts['ingested'] + counts['navi_archived'] + counts['navi_duplicate'],
+                      'ingested_bytes': counts['bytes'], 'current': name,
                       'startedAt': run.get('startedAt') if run else None,
                       'distanceM': run.get('totalDistanceM') if run else None,
                       'remaining_seconds': max(0, remaining) if remaining is not None else None})
@@ -676,26 +896,67 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     counts['mismatch'] += 1
                 finally:
                     shutil.rmtree(folder, ignore_errors=True)
+            if not cancel.is_set():
+                for navi_number, name in enumerate(navi_ready, len(ready) + 1):
+                    remote = DEVICE_PATH + '/navirun_out/' + name
+                    announce(navi_number, name)
+                    outcome = pull_one(adb, serial, remote, stage, name, cancel, stall_seconds)
+                    if outcome == 'cancelled':
+                        counts['cancelled'] = True; break
+                    if outcome == 'failed':
+                        counts['not_pulled'] += 1; continue
+                    folder = stage / name
+                    try:
+                        source = None
+                        try:
+                            source = load(folder / 'candidate-meta.json').get('source')
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        result = ingest_navi_package(root, folder, model)
+                        counts['navi_' + result] += 1
+                        if result == 'archived':
+                            counts['navi_' + source + '_archived'] += 1
+                        if result != 'held':
+                            adb_call(adb, serial, 'shell', 'rm', '-r', remote)
+                            counts['bytes'] += navi_sizes[name] or tree_size(folder)
+                        announce(navi_number, name)
+                    finally:
+                        shutil.rmtree(folder, ignore_errors=True)
+                receipt_path = stage / 'navirun_receipt.json'
+                make_navi_receipt(root, model, receipt_path)
+                adb_call(adb, serial, 'push', str(receipt_path), DEVICE_PATH + '/navirun_receipt.json')
     finally:
-        build_index(root)
+        build_index(root, counts)
         log_pull(root, model, counts, time.monotonic() - started)
     return counts
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=Path, required=True)
-    sub = parser.add_subparsers(dest='command', required=True)
+    parser.add_argument('--root', type=Path)
+    parser.add_argument('--selftest', action='store_true')
+    sub = parser.add_subparsers(dest='command')
     sub.add_parser('ingest-legacy').add_argument('files', nargs='+')
     p = sub.add_parser('pull'); p.add_argument('--serial'); p.add_argument('--adb')
     p = sub.add_parser('receipt'); p.add_argument('--device', required=True); p.add_argument('--out', type=Path, required=True)
     sub.add_parser('index')
+    sub.add_parser('ingest-folder').add_argument('path', type=Path)
     args = parser.parse_args(argv)
+    if args.selftest:
+        import unittest
+        suite = unittest.defaultTestLoader.discover(str(Path(__file__).parent), pattern='test_buscourse_archive.py')
+        result = unittest.TextTestRunner(verbosity=1).run(suite)
+        print(f'Python selftest: {result.testsRun}件・失敗 {len(result.failures) + len(result.errors)}件')
+        return 0 if result.wasSuccessful() else 1
+    parser.error('--root とコマンドが必要です') if args.root is None or args.command is None else None
     args.root.mkdir(parents=True, exist_ok=True)
     for category in ('安定前', '安定後'):
         (args.root / category).mkdir(exist_ok=True)
     if args.command == 'ingest-legacy':
         counts = ingest_legacy(args.root, args.files)
+    elif args.command == 'ingest-folder':
+        counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0}
+        counts.update(ingest_folder(args.root, args.path))
     elif args.command == 'pull':
         adb, serials = choose_adb(args.adb)
         if args.serial:
@@ -712,7 +973,9 @@ def main(argv=None):
     else:
         build_index(args.root); counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0}
     total = build_index(args.root)
-    print(f"取り込んだ数 {counts['ingested']}・飛ばした数 {counts['skipped']}・合わなかった数 {counts['mismatch']}・保管庫の合計 {total}B")
+    print(f"取り込んだ数 {counts['ingested']}・飛ばした数 {counts['skipped']}・合わなかった数 {counts['mismatch']}・"
+          f"ナビの走った跡 入れた {counts.get('navi_archived', 0)}・同じ中身 {counts.get('navi_duplicate', 0)}・"
+          f"保留 {counts.get('navi_held', 0)}・保管庫の合計 {total}B")
     return 0
 
 

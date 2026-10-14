@@ -22,12 +22,15 @@ NOT_FOUND = 'USB の線・スマホの「USB デバッグを許可」・画面�
 
 
 def view_state(kind, **values):
+    if kind == 'folder_running':
+        return 'フォルダから取り込んでいます', f"フォルダ: {values['path']}\n終わるまでお待ちください。取り込み元のフォルダは書き換えません", None
     if kind == 'searching':
         return '探しています', 'USB でつないで、スマホの画面のロックを外してください', None
     if kind == 'found':
         pending = f"\n書き出し中 {values['pending']}本" if values.get('pending') else ''
+        navi = f"\nナビの走った跡 {values['navi']}本" if values.get('navi') else ''
         return '見つかりました', (f"{values['model']}\n取り込み待ち {values['total']}本・{gb(values['bytes'])}"
-                             f"{pending}\n保管庫: {values['root']}"), '取り込む'
+                             f"{navi}{pending}\n保管庫: {values['root']}"), '取り込む'
     if kind == 'running':
         remaining = values.get('remaining_seconds')
         eta = f'残り約{max(1, round(remaining / 60))}分' if remaining is not None else '残り時間を計算中'
@@ -39,11 +42,22 @@ def view_state(kind, **values):
                          f" / {gb(values['total_bytes'])}\n{eta}\nいまの走行: {when}{distance_text}"
                          '\nUSB を抜かないでください。閉じても入れた分は残ります'), None
     if kind == 'done':
+        navi = f"\nナビの走った跡 {values['navi_archived']}本を入れました" if values.get('navi_archived') else ''
         return '終わりました', (f"{values['ingested']}本を保管庫に入れました（{gb(values['bytes'])}・{minutes(values['elapsed'])}）"
-                          '\nスマホに受領票を渡しました\nUSB を抜いてかまいません'), '閉じる'
+                          f'{navi}\nスマホに受領票を渡しました\nUSB を抜いてかまいません'), '閉じる'
+    if kind == 'folder_done':
+        message = (f"フォルダ: {values['path']}\nブラウザ版 {values['navi_browser_archived']}本・"
+                   f"アプリ版 {values['navi_app_archived']}本を入れました")
+        if values['navi_held']:
+            message += f"\n揃っていない {values['navi_held']}本 → 受け入れ保留"
+        if values['navi_duplicate']:
+            message += f"\n同じ中身ですでに入っていた {values['navi_duplicate']}本（そのまま）"
+        return '終わりました', message, '閉じる'
     if kind == 'partial':
+        navi = f"\nナビの走った跡 {values['navi_held']}本 → 受け入れ保留" if values.get('navi_held') else ''
         return '一部が合わない／引き取れなかった', (f"{values.get('ingested', 0)}本を保管庫に入れました\n"
                                       f"合わなかった {values['mismatch']}本・引き取れなかった {values['not_pulled']}本"
+                                      f'{navi}'
                                       '\nスマホに残してあります。もう一度開くとやり直します'
                                       '\nUSB を抜いてかまいません'), '閉じる'
     if kind == 'pending':
@@ -66,6 +80,11 @@ def selftest():
     assert 'スマホに残して' in view_state('partial', mismatch=1, not_pulled=0)[1]
     assert view_state('missing')[2] == 'もう一度探す'
     assert '残りから続けます' in view_state('failed', reason='合成')[1]
+    assert view_state('folder_running', path='synthetic')[2] is None
+    assert 'ナビの走った跡 2本' in view_state('found', model='合成機種', total=0, bytes=0, root='vault', navi=2)[1]
+    assert 'ナビの走った跡 1本を入れました' in view_state('done', ingested=0, bytes=0, elapsed=1, navi_archived=1)[1]
+    assert 'ブラウザ版 1本・アプリ版 1本' in view_state('folder_done', path='synthetic', navi_browser_archived=1,
+        navi_app_archived=1, navi_held=1, navi_duplicate=1)[1]
 
 
 def main(argv=None):
@@ -80,7 +99,7 @@ def main(argv=None):
         return 0
 
     import tkinter as tk
-    from tkinter import messagebox, simpledialog, ttk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
 
     window = tk.Tk()
     window.title(f'保管庫へ取り込む（{archive.BUILT_AT} 作成）')
@@ -95,10 +114,28 @@ def main(argv=None):
     bar.pack(padx=24, pady=16)
     button = ttk.Button(window)
     button.pack(padx=24, pady=8, anchor='e')
+    folder_button = ttk.Button(window, text='フォルダから取る…')
+    folder_button.pack(padx=24, pady=4, anchor='e')
     ttk.Label(window, text=f'この道具: {archive.BUILT_AT} 作成', foreground='gray').pack(side='bottom', anchor='e', padx=12, pady=6)
     inbox = queue.Queue()
     cancel = threading.Event()
     state = {'kind': 'searching', 'selected': None, 'adb': None, 'working': False, 'closing': False}
+
+    def from_folder():
+        if state['working']:
+            return
+        path = filedialog.askdirectory(parent=window, title='取り込むフォルダを選ぶ')
+        if not path:
+            return
+        state['working'] = True
+        show('folder_running', path=path)
+        def worker():
+            try:
+                inbox.put(('folder_complete', path, archive.ingest_folder(args.root, Path(path))))
+            except Exception as error:
+                inbox.put(('failed', f'{type(error).__name__}: {error}'))
+        threading.Thread(target=worker, daemon=True).start()
+    folder_button.config(command=from_folder)
 
     def show(kind, **values):
         state['kind'] = kind
@@ -112,7 +149,7 @@ def main(argv=None):
             bar.config(value=0)
         if action:
             button.config(text=action, command=(start if kind == 'found' else
-                                                 window.destroy if kind in ('done', 'partial') else search))
+                                                 window.destroy if kind in ('done', 'partial', 'folder_done') else search))
             button.pack(padx=24, pady=8, anchor='e')
         else:
             button.pack_forget()
@@ -127,7 +164,8 @@ def main(argv=None):
                     inbox.put(('missing', NOT_FOUND))
                     return
                 for item in selected if isinstance(selected, list) else ([selected] if selected else []):
-                    item['total_bytes'] = sum(archive.remote_size(adb, item['serial'], n) for n in item['ready'])
+                    item['total_bytes'] = (sum(archive.remote_size(adb, item['serial'], n) for n in item['ready']) +
+                                           sum(archive.remote_size(adb, item['serial'], n, 'navirun_out') for n in item['navi_ready']))
                 inbox.put(('found', adb, selected))
             except Exception as error:
                 inbox.put(('missing', str(error)))
@@ -140,7 +178,7 @@ def main(argv=None):
         state['working'] = True
         cancel.clear()
         started = time.monotonic()
-        show('running', total=len(selected['ready']), total_bytes=state['total_bytes'])
+        show('running', total=len(selected['ready']) + len(selected.get('navi_ready', [])), total_bytes=state['total_bytes'])
         def worker():
             try:
                 args.root.mkdir(parents=True, exist_ok=True)
@@ -168,10 +206,11 @@ def main(argv=None):
                     state['adb'], state['selected'] = adb, selected
                     if selected is None:
                         show('missing', reason='スマホを選んでください。')
-                    elif selected['ready']:
+                    elif selected['ready'] or selected.get('navi_ready'):
                         state['total_bytes'] = selected['total_bytes']
                         show('found', model=selected['model'], total=len(selected['ready']),
-                             bytes=state['total_bytes'], pending=len(selected['pending']), root=args.root)
+                             bytes=state['total_bytes'], pending=len(selected['pending']), root=args.root,
+                             navi=len(selected.get('navi_ready', [])))
                     elif selected['pending']:
                         show('pending', count=len(selected['pending']))
                     else:
@@ -183,10 +222,13 @@ def main(argv=None):
                     if state['closing']:
                         window.destroy(); return
                     result, elapsed = item[1:]
-                    if result['mismatch'] or result['not_pulled']:
+                    if result['mismatch'] or result['not_pulled'] or result['navi_held']:
                         show('partial', **result)
                     else:
                         show('done', elapsed=elapsed, **result)
+                elif item[0] == 'folder_complete':
+                    state['working'] = False
+                    show('folder_done', path=item[1], **item[2])
                 elif item[0] == 'failed':
                     state['working'] = False
                     if state['closing']:

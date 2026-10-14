@@ -109,15 +109,16 @@ class NaviRunLogTest {
         assertThat(kept.exists()).isTrue()
     }
 
-    @Test fun retention_removesOlderThan180Days_keeps179_andLeavesForeignFiles() {
+    @Test fun oldRunSurvivesStartingAnotherAndOpeningList() {
         val now = 400 * day
-        val old = now - 181 * day
-        val recent = now - 179 * day
-        val files = listOf("$old.jsonl", "$old.summary.json", "$old.sensors.jsonl.gz", "$recent.jsonl", "$recent.summary.json", "$recent.sensors.jsonl.gz", "memo.txt", "x.jsonl")
-            .map { File(temp.root, it).apply { writeText("x") } }
-        NaviRunLog.deleteExpired(temp.root, now)
-        assertThat(files.filter { it.exists() }.map { it.name })
-            .containsExactly("$recent.jsonl", "$recent.summary.json", "$recent.sensors.jsonl.gz", "memo.txt", "x.jsonl")
+        val old = now - 200 * day
+        val body = File(temp.root, "$old.jsonl")
+        NaviRunWriter(body, header(old), executor = direct, nowMs = { old + 90_000 }).apply {
+            onFix(fix(old + 1000, 1.0, true)); close()
+        }
+        NaviRunWriter(File(temp.root, "$now.jsonl"), header(now), executor = java.util.concurrent.Executor { it.run() }, nowMs = { now + 90_000 }).close()
+        assertThat(body.exists()).isTrue()
+        assertThat(NaviRunLog.loadSummaries(temp.root, now).map { it.startedAtMs }).contains(old)
     }
 
     @Test fun loadSummaries_rebuildsMissingSummary_andSortsNewestFirst() {

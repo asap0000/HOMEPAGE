@@ -34,8 +34,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.archive.ArchiveStore
+import com.istech.buscourse.archive.NaviRunArchive
+import com.istech.buscourse.archive.NaviArchiveCandidate
 import com.istech.buscourse.core.data.RecordingSessionEntity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 保管庫へ書き出す。押し直しを生まないよう、状態を3つに分けて見せる（2026-10-10 オーナー指摘
@@ -48,9 +52,14 @@ import kotlinx.coroutines.launch
 fun ArchiveExportScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val store = remember { ArchiveStore(context, (context.applicationContext as BusCourseApplication).database) }
+    val navi = remember { NaviRunArchive(context) }
     val scope = rememberCoroutineScope()
     var toExport by remember { mutableStateOf<List<RecordingSessionEntity>?>(null) }
     var waiting by remember { mutableStateOf<List<RecordingSessionEntity>>(emptyList()) }
+    var naviToExport by remember { mutableStateOf<List<NaviArchiveCandidate>?>(null) }
+    var naviWaiting by remember { mutableStateOf<List<NaviArchiveCandidate>>(emptyList()) }
+    var naviReceived by remember { mutableStateOf(0) }
+    var naviBytes by remember { mutableStateOf(0L) }
     var busy by remember { mutableStateOf(false) }
     var fraction by remember { mutableFloatStateOf(0f) }
     var progress by remember { mutableStateOf("") }
@@ -59,10 +68,21 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
     val mb = 1024L * 1024
 
     suspend fun reload() {
-        store.outDir.mkdirs()
-        val pending = store.pending()
-        waiting = pending.filter(store::isExported)
-        toExport = pending.filterNot(store::isExported)
+        withContext(Dispatchers.IO) {
+            store.outDir.mkdirs()
+            val pending = store.pending()
+            val naviPending = navi.pending()
+            val allNaviBytes = navi.candidates().sumOf { it.bytes }
+            val received = navi.receivedCount()
+            withContext(Dispatchers.Main) {
+                waiting = pending.filter(store::isExported)
+                toExport = pending.filterNot(store::isExported)
+                naviWaiting = naviPending.filter(navi::isExported)
+                naviToExport = naviPending.filterNot(navi::isExported)
+                naviReceived = received
+                naviBytes = allNaviBytes
+            }
+        }
     }
     LaunchedEffect(Unit) { reload() }
     BackHandler(enabled = busy) { /* 書き出し中は戻らない（途中の走行は次回に書き直しになる） */ }
@@ -72,10 +92,17 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
         Column(Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("まだ PC の保管庫に入っていない走行を書き出します。書き出したあと PC につないで取り込んでください")
             val runs = toExport
-            if (runs == null) { CircularProgressIndicator(); return@Column }
+            val naviRuns = naviToExport
+            if (runs == null || naviRuns == null) { CircularProgressIndicator(); return@Column }
             val total = runs.sumOf(store::size)
             Text("書き出す走行 ${runs.size}本・${total / mb}MB")
             if (waiting.isNotEmpty()) Text("書き出し済み・PC の取り込み待ち ${waiting.size}本")
+            val naviCount = naviRuns.size + naviWaiting.size + naviReceived
+            if (naviCount > 0) {
+                val received = if (naviReceived > 0) "（保管庫に入った跡 ${naviReceived}本・スマホにも残しています）" else ""
+                Text("ナビの走った跡 ${naviCount}本・${naviBytes / mb}MB$received")
+            }
+            if (naviWaiting.isNotEmpty()) Text("ナビの走った跡 ${naviWaiting.size}本（取り込み待ち）")
             Text("空き容量 ${store.outDir.usableSpace / mb}MB")
 
             if (busy) {
@@ -95,10 +122,10 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
             when {
                 busy -> Unit
                 // 終わった・書き出す物が無い＝閉じるだけ（押し直しの入口を残さない）
-                done != null || runs.isEmpty() -> {
+                done != null || (runs.isEmpty() && naviRuns.isEmpty()) -> {
                     if (done == null) {
                         Card(Modifier.fillMaxWidth()) {
-                            Text(if (waiting.isEmpty()) "保管庫に入っていない走行はありません"
+                            Text(if (waiting.isEmpty() && naviWaiting.isEmpty()) "保管庫に入っていない走行はありません"
                                  else "書き出しは済んでいます。PC につないで、デスクトップの『保管庫へ取り込む』を開いてください",
                                 Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
                         }
@@ -110,6 +137,7 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                     scope.launch {
                         var written = 0
                         var writtenBytes = 0L
+                        var naviWritten = 0
                         var shortage = false
                         try {
                             for ((i, run) in runs.withIndex()) {
@@ -119,11 +147,21 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                                 writtenBytes += store.size(run)
                                 fraction = if (total > 0) (writtenBytes.toFloat() / total).coerceIn(0f, 1f) else 1f
                             }
+                            if (!shortage) for (candidate in naviRuns) {
+                                progress = "ナビの走った跡 ${naviWritten + 1}/${naviRuns.size}本目"
+                                if (!navi.export(candidate)) { shortage = true; break }
+                                naviWritten++
+                                fraction = ((runs.size + naviWritten).toFloat() / (runs.size + naviRuns.size)).coerceIn(0f, 1f)
+                            }
                             finished = if (shortage)
-                                "${written}本（${writtenBytes / mb}MB）を書き出しました。空きが足りないため ${runs.size - written}本を残しました。" +
+                                (if (naviRuns.isEmpty())
+                                    "${written}本（${writtenBytes / mb}MB）を書き出しました。空きが足りないため ${runs.size - written}本を残しました。"
+                                 else "${written}本（${writtenBytes / mb}MB）とナビの走った跡 ${naviWritten}本を書き出しました。空きが足りないため残りを後にしました。") +
                                     "PC につないで取り込んでから、もう一度書き出してください"
                             else
-                                "書き出しが終わりました（${written}本・${writtenBytes / mb}MB）。PC につないで、デスクトップの『保管庫へ取り込む』を開いてください。" +
+                                (if (naviRuns.isEmpty()) "書き出しが終わりました（${written}本・${writtenBytes / mb}MB）。"
+                                 else "書き出しが終わりました（${written}本・${writtenBytes / mb}MB）。ナビの走った跡 ${naviWritten}本（取り込み待ち）。") +
+                                    "PC につないで、デスクトップの『保管庫へ取り込む』を開いてください。" +
                                     "もう一度押す必要はありません"
                             reload()
                         } catch (e: Exception) {
@@ -131,7 +169,11 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                             reload()
                         } finally { busy = false }
                     }
-                }) { Text("書き出す（${runs.size}本）") }
+                }) { Text(when {
+                    naviRuns.isEmpty() -> "書き出す（${runs.size}本）"
+                    runs.isEmpty() -> "書き出す（跡${naviRuns.size}本）"
+                    else -> "書き出す（${runs.size}本＋跡${naviRuns.size}本）"
+                }) }
             }
         }
     }
