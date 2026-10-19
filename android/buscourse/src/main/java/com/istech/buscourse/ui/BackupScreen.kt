@@ -1,5 +1,6 @@
 package com.istech.buscourse.ui
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.backup.BackupEstimate
 import com.istech.buscourse.backup.BackupExporter
+import com.istech.buscourse.backup.BackupFileRecord
+import com.istech.buscourse.backup.BackupFileRegistry
 import com.istech.buscourse.backup.BackupInventory
 import com.istech.buscourse.backup.BackupProgress
 import com.istech.buscourse.backup.BackupResult
@@ -72,6 +75,8 @@ fun BackupScreen(onBack: () -> Unit) {
     val exporter = remember {
         BackupExporter(context, (context.applicationContext as BusCourseApplication).database)
     }
+    // 作ったバックアップの覚え（空き容量の窓に「消してよいか確かめる一覧」として並べる。2026-10-20 委託指示書 K）。
+    val registry = remember { BackupFileRegistry(context) }
 
     var step by remember { mutableStateOf(BackupStep.CONFIRM) }
     var estimate by remember { mutableStateOf<BackupEstimate?>(null) }
@@ -79,6 +84,8 @@ fun BackupScreen(onBack: () -> Unit) {
     var progress by remember { mutableStateOf<BackupProgress?>(null) }
     var result by remember { mutableStateOf<BackupResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    // microSD に記録した運行のうち、カードが抜けていてバックアップに入らない本数（0 でなければ実行しない）。
+    var missingSdRuns by remember { mutableStateOf(0) }
 
     // 画面の生存期間に紐づくスコープ（意図的にviewModelScopeを使わない、上記クラスKDoc参照）。
     val scope = rememberCoroutineScope()
@@ -86,6 +93,7 @@ fun BackupScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         estimate = exporter.estimate()
         suggestedFileName = exporter.previewFileName()
+        missingSdRuns = exporter.missingSdRunCount()
     }
 
     val createDocLauncher = rememberLauncherForActivityResult(
@@ -97,12 +105,29 @@ fun BackupScreen(onBack: () -> Unit) {
         } else {
             step = BackupStep.RUNNING
             progress = null
+            // 保存先が決まったとき、あとから窓の一覧に出せるよう、読む権限を取って名前・日時を覚える。
+            // 権限が取れない保存先は覚えない（一覧に出しても、あとで開けず外れるだけ）。
+            val uriText = uri.toString()
+            val remembered = runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }.isSuccess
+            if (remembered) {
+                registry.record(
+                    BackupFileRecord(uriText, suggestedFileName ?: "buscourse_backup.zip", 0L, System.currentTimeMillis()),
+                )
+            }
             scope.launch {
                 try {
                     val r = exporter.createBackup(uri) { p -> progress = p }
                     result = r
+                    // 書き終わったら、実際の名前と大きさに直す。
+                    if (remembered) registry.record(BackupFileRecord(uriText, r.fileName, r.actualZipBytes, System.currentTimeMillis()))
                     step = BackupStep.DONE
                 } catch (e: Exception) {
+                    // 失敗した保存先は書き出し側が消している。覚えからも外す。
+                    registry.remove(uriText)
                     errorMessage = e.message ?: "不明なエラーで失敗しました"
                     step = BackupStep.FAILED
                 }
@@ -135,6 +160,7 @@ fun BackupScreen(onBack: () -> Unit) {
             when (step) {
                 BackupStep.CONFIRM -> ConfirmContent(
                     isRecording = isRecording,
+                    missingSdRuns = missingSdRuns,
                     estimate = estimate,
                     suggestedFileName = suggestedFileName,
                     onStart = { createDocLauncher.launch(suggestedFileName ?: "buscourse_backup.zip") },
@@ -153,6 +179,7 @@ fun BackupScreen(onBack: () -> Unit) {
 @Composable
 private fun ConfirmContent(
     isRecording: Boolean,
+    missingSdRuns: Int,
     estimate: BackupEstimate?,
     suggestedFileName: String?,
     onStart: () -> Unit,
@@ -167,6 +194,16 @@ private fun ConfirmContent(
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Text(
                 "運行記録中はバックアップを実行できません。記録を終了してからお試しください。",
+                modifier = Modifier.padding(12.dp),
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
+    }
+    if (missingSdRuns > 0) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Text(
+                "microSD が見当たりません。microSD に記録した運行（${missingSdRuns}本）がバックアップに入らないため、" +
+                    "カードを挿してからお試しください。",
                 modifier = Modifier.padding(12.dp),
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
@@ -198,7 +235,7 @@ private fun ConfirmContent(
     CategoryList(BackupInventory.EXCLUDED_CATEGORIES)
     Button(
         onClick = onStart,
-        enabled = !isRecording && estimate != null && suggestedFileName != null,
+        enabled = !isRecording && missingSdRuns == 0 && estimate != null && suggestedFileName != null,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Icon(Icons.Filled.Backup, contentDescription = null)

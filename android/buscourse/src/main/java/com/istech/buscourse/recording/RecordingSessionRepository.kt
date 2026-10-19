@@ -11,6 +11,7 @@ import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.GpsPointEntity
 import com.istech.buscourse.core.data.RecordingSessionEntity
+import com.istech.buscourse.core.data.StorageSettings
 import com.istech.buscourse.core.data.StopVisitEventEntity
 import com.istech.buscourse.core.data.ShockEventEntity
 import com.istech.buscourse.core.data.TimelapseFrameEntity
@@ -87,6 +88,13 @@ class RecordingSessionRepository(
     @Volatile private var session: RecordingSessionEntity? = null
     private var gpsRawWriter: BufferedWriter? = null
 
+    /**
+     * 進行中の運行の置き場所（運行番号と、その下に `sessions/{id}/` を持つルート）。microSD に作った運行なら
+     * microSD のルート。記録中に毎回「どちらにあるか」を探し直さず、開始時に決めた置き場所に書き続けるための控え。
+     * 運行の締め・消去など他の運行は [BusCourseStorage.sessionDir]（実在する側）で解く。
+     */
+    @Volatile private var activeBase: Pair<Long, File>? = null
+
     private val gpsSeq = AtomicInteger(0)
     private val frameSeq = AtomicInteger(0)
     private val hiResStopSeq = AtomicInteger(0)
@@ -104,6 +112,9 @@ class RecordingSessionRepository(
     /**
      * 新規セッションを開始する。`sessions/{id}/` ディレクトリ作成、`gps_raw.jsonl` オープン、
      * `meta.json` 初回スナップショット書き込みまでを行う（§3.3・§4.7）。
+     *
+     * **置き場所（2026-10-20 委託指示書 K）**: microSD が挿さっていれば microSD のルート、無ければ本体。
+     * DB の相対パスは本体と同じ `sessions/{id}/...` のまま（解くのは [BusCourseStorage.resolve]）。
      */
     suspend fun startSession(
         courseId: Long?,
@@ -140,8 +151,23 @@ class RecordingSessionRepository(
         val finalized = draft.copy(id = id, gpsRawLogRelPath = gpsRawRelPath, frameDirRelPath = frameDirRelPath)
         recordingSessionDao.update(finalized)
 
+        var target = BusCourseStorage.recordingTarget(context)
+        activeBase = id to target.root
         framesDir(id).mkdirs()
-        val gpsFile = BusCourseStorage.resolve(context, gpsRawRelPath)
+        if (target.onSd && !framesDir(id).isDirectory) {
+            // microSD に作れなかった（読み取り専用・抜けかけ）。記録を始められないよりは本体に倒す。
+            Log.w(TAG, "microSD に運行のフォルダを作れませんでした。本体に記録します sessionId=$id")
+            target = BusCourseStorage.RecordingTarget(BusCourseStorage.root(context), onSd = false)
+            activeBase = id to target.root
+            framesDir(id).mkdirs()
+        }
+        if (target.onSd) {
+            // 「microSD に記録したことがある」「この運行はカードの中にある」を覚える（抜けたときの案内と誤書き出しの防止）。
+            val settings = StorageSettings(context)
+            settings.usedSd = true
+            settings.addSdSessionId(id)
+        }
+        val gpsFile = File(sessionDir(id), BusCourseStorage.FILE_SESSION_GPS_RAW)
         gpsRawWriter = BufferedWriter(OutputStreamWriter(FileOutputStream(gpsFile, true), Charsets.UTF_8))
 
         session = finalized
@@ -179,6 +205,7 @@ class RecordingSessionRepository(
             recordingSessionDao.update(updated)
             writeMetaSnapshotBlocking(updated)
             session = null
+            activeBase = null
             updated
         }
 
@@ -532,27 +559,32 @@ class RecordingSessionRepository(
     /**
      * セッションを削除する。Room側は `recording_session` 行の削除に伴い、子テーブル
      * （`timelapse_frame` / `gps_point` / `stop_visit_event` / `shock_event`）がON DELETE
-     * CASCADEで連動削除される。DB削除に成功した場合のみファイルも削除する。
+     * CASCADEで連動削除される。DB削除に成功した場合のみファイルも削除する
+     * （microSD にあればそちら、本体にも残っていればそちらも消す）。
      * `SQLiteConstraintException` は呼び出し元（`StorageRotationWorker`）でスキップ処理するため
      * ここでは握りつぶさずそのまま伝播させる。
      */
     suspend fun deleteSession(id: Long) {
         recordingSessionDao.deleteById(id)
-        sessionDir(id).deleteRecursively()
+        BusCourseStorage.existingSessionDirs(context, id).forEach { it.deleteRecursively() }
     }
 
     // ------------------------------------------------------------------
     // ファイルパス・meta.jsonヘルパー
     // ------------------------------------------------------------------
 
+    /** 運行のフォルダ。進行中の運行は開始時に決めた置き場所、それ以外は実在する側（microSD→本体）。 */
     private fun sessionDir(sessionId: Long): File =
-        File(BusCourseStorage.resolve(context, BusCourseStorage.DIR_SESSIONS), sessionId.toString())
+        activeBase?.takeIf { it.first == sessionId }
+            ?.let { File(it.second, "${BusCourseStorage.DIR_SESSIONS}/$sessionId") }
+            ?: BusCourseStorage.sessionDir(context, sessionId)
 
     private fun framesDir(sessionId: Long): File =
         File(sessionDir(sessionId), BusCourseStorage.DIR_SESSION_FRAMES)
 
+    /** DB に入れる相対パス（`sessions/{id}/...`）。置き場所が microSD でも本体でも同じ形になる。 */
     private fun relPathOf(file: File): String =
-        file.relativeTo(BusCourseStorage.root(context)).path.replace(File.separatorChar, '/')
+        file.relativeTo(activeBase?.second ?: BusCourseStorage.root(context)).path.replace(File.separatorChar, '/')
 
     /**
      * `meta.json` を一時ファイル書き込み→リネームで擬似アトミックに更新する（§3.3、
@@ -561,6 +593,11 @@ class RecordingSessionRepository(
      */
     private fun writeMetaSnapshotBlocking(row: RecordingSessionEntity) {
         val dir = sessionDir(row.id)
+        if (!dir.isDirectory && row.id in StorageSettings(context).sdSessionIds()) {
+            // microSD の運行で、カードが抜けている。本体に空のフォルダと meta.json だけを作らない（カードが戻れば元の場所に書ける）。
+            Log.w(TAG, "microSD が見当たらないため meta.json を書きません sessionId=${row.id}")
+            return
+        }
         dir.mkdirs()
         val json = JSONObject().apply {
             put("id", row.id)

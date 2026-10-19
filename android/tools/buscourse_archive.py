@@ -20,11 +20,14 @@ import zipfile
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-15 06:52'
+BUILT_AT = '2026-10-20 07:14'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
-DEVICE_PATH = '/sdcard/Android/data/com.istech.buscourse/files'
+APP_ID = 'com.istech.buscourse'
+DEVICE_PATH = '/sdcard/Android/data/' + APP_ID + '/files'
+# microSD は /storage/<ボリューム名>/ に見える（本体の内部ストレージは emulated、self はその別名）。
+SKIPPED_VOLUMES = ('emulated', 'self')
 TABLES = {'session': 'recording_session', 'gps': 'gps_point', 'frames': 'timelapse_frame',
           'stopVisits': 'stop_visit_event', 'shocks': 'shock_event'}
 NAVI_SCHEMA = 'buscourse-archive-receipt/2'
@@ -685,17 +688,38 @@ def adb_call(adb, serial, *args):
     return subprocess.run([adb, '-s', serial, *args], check=not optional, capture_output=True, **TEXT, **HIDE)
 
 
-def export_list(adb, serial):
-    result = adb_call(adb, serial, 'shell', 'ls', '-1', DEVICE_PATH + '/archive_out')
-    if result.returncode:
-        return [], []
-    ready, pending = [], []
-    for name in result.stdout.splitlines():
-        if not re.fullmatch(r'\d{8}-\d{6}_\d+', name):
+def device_bases(adb, serial):
+    """archive_out を探す端末側の files ディレクトリ。本体（先頭）と、`ls /storage` で見つかる microSD など。
+    microSD にある走行は、アプリが同じカードの Android/data/<pkg>/files/archive_out に書き出す（2026-10-20）。"""
+    bases = [DEVICE_PATH]
+    result = adb_call(adb, serial, 'shell', 'ls', '/storage')
+    if result.returncode == 0:
+        for name in result.stdout.split():
+            if name not in SKIPPED_VOLUMES and re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+                bases.append('/storage/' + name + '/Android/data/' + APP_ID + '/files')
+    return bases
+
+
+def export_entries(adb, serial):
+    """書き出された走行を (名前, その走行がある files ディレクトリ, 取り込めるか=DONE あり) で返す。
+    同じ名前が複数の場所に見えても（端末によっては /storage の別名が本体を指す）、最初の1つだけ数える。"""
+    entries, seen = [], set()
+    for base in device_bases(adb, serial):
+        result = adb_call(adb, serial, 'shell', 'ls', '-1', base + '/archive_out')
+        if result.returncode:
             continue
-        remote = DEVICE_PATH + '/archive_out/' + name
-        (ready if adb_call(adb, serial, 'shell', 'test', '-f', remote + '/DONE').returncode == 0 else pending).append(name)
-    return sorted(ready), sorted(pending)
+        for name in result.stdout.splitlines():
+            if name in seen or not re.fullmatch(r'\d{8}-\d{6}_\d+', name):
+                continue
+            seen.add(name)
+            done = adb_call(adb, serial, 'shell', 'test', '-f', base + '/archive_out/' + name + '/DONE').returncode == 0
+            entries.append((name, base, done))
+    return entries
+
+
+def export_list(adb, serial):
+    entries = export_entries(adb, serial)
+    return sorted(name for name, _, done in entries if done), sorted(name for name, _, done in entries if not done)
 
 
 def navi_export_list(adb, serial):
@@ -748,17 +772,21 @@ def discover(adb, serials, chooser=None):
     return chooser(choices)
 
 
-def remote_size(adb, serial, name, directory='archive_out'):
-    remote = DEVICE_PATH + '/' + directory + '/' + name
-    result = adb_call(adb, serial, 'shell', 'du', '-sk', remote)
-    try:
-        return int(result.stdout.split()[0]) * 1024 if result.returncode == 0 else 0
-    except (IndexError, ValueError):
-        return 0
+def remote_size(adb, serial, name, directory='archive_out', base=None):
+    # base を渡さないときは、本体と microSD の順に探す（ナビの走った跡は本体だけ）。
+    bases = [base] if base else (device_bases(adb, serial) if directory == 'archive_out' else [DEVICE_PATH])
+    for candidate in bases:
+        result = adb_call(adb, serial, 'shell', 'du', '-sk', candidate + '/' + directory + '/' + name)
+        try:
+            if result.returncode == 0:
+                return int(result.stdout.split()[0]) * 1024
+        except (IndexError, ValueError):
+            pass
+    return 0
 
 
-def remote_run(adb, serial, name):
-    result = adb_call(adb, serial, 'shell', 'cat', DEVICE_PATH + '/archive_out/' + name + '/run.json')
+def remote_run(adb, serial, name, base=DEVICE_PATH):
+    result = adb_call(adb, serial, 'shell', 'cat', base + '/archive_out/' + name + '/run.json')
     if result.returncode == 0:
         try:
             return json.loads(result.stdout)
@@ -830,10 +858,13 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
     counts = {'ingested': 0, 'skipped': 0, 'mismatch': 0, 'not_pulled': 0, 'bytes': 0, 'cancelled': False}
     counts.update(navi_counts())
     started = time.monotonic()
-    ready, pending = export_list(adb, serial)
+    entries = export_entries(adb, serial)
+    ready = sorted(name for name, _, done in entries if done)
+    pending = sorted(name for name, _, done in entries if not done)
+    bases = {name: base for name, base, _ in entries}
     navi_ready = navi_export_list(adb, serial)
     counts['skipped'] = len(pending)
-    sizes = {name: remote_size(adb, serial, name) for name in ready}
+    sizes = {name: remote_size(adb, serial, name, base=bases[name]) for name in ready}
     navi_sizes = {name: remote_size(adb, serial, name, 'navirun_out') for name in navi_ready}
     total_bytes = sum(sizes.values()) + sum(navi_sizes.values())
     def announce(number, name='', run=None):
@@ -854,8 +885,8 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                 if cancel.is_set():
                     counts['cancelled'] = True
                     break
-                remote = DEVICE_PATH + '/archive_out/' + name
-                announce(number, name, remote_run(adb, serial, name))
+                remote = bases[name] + '/archive_out/' + name
+                announce(number, name, remote_run(adb, serial, name, bases[name]))
                 outcome = pull_one(adb, serial, remote, stage, name, cancel, stall_seconds)
                 if outcome == 'cancelled':
                     counts['cancelled'] = True

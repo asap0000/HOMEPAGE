@@ -47,6 +47,7 @@ import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.archive.ArchiveStore
 import com.istech.buscourse.archive.shouldShowArchiveWarning
 import com.istech.buscourse.recording.RecordingConfigRepository
+import com.istech.buscourse.storage.StorageNotice
 
 /**
  * 最上位トップ画面（依頼３ 2026-07-11）。
@@ -59,6 +60,10 @@ import com.istech.buscourse.recording.RecordingConfigRepository
  * - ナビ: 確定済みコースの映像付き案内（操作は距離スライダーのみ）。[NaviMainScreen]。
  * - 設計: 取材（運行記録・停留所カード）とコース編成・区間抽出。[HomeScreen]。
  * - ナビ設定: ナビ画面の見え方（傾き・映像・自車位置・昼夜など）。[NaviSettingsScreen]。
+ *
+ * **空き容量の窓（2026-10-20 委託指示書 K）**: 「設計」「データ出力」を押したとき、空きが目安を切っていれば
+ * 画面を開く前に [StorageSpaceDialog] を**毎回**出す（「今日はもう出さない」は無い）。知らせるだけで、
+ * 「このまま進む」で押した先へ進める。ナビ・ナビ設定のボタンでは出さない。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +82,25 @@ fun TopScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     var showArchiveWarning by remember { mutableStateOf(false) }
+    // 空き容量の窓。出すときは中身（[StorageNotice]）と、どちらのボタンから来たかを持つ。
+    var spaceNotice by remember { mutableStateOf<StorageNotice?>(null) }
+    var noticeFromDesign by remember { mutableStateOf(true) }
+    var checkingSpace by remember { mutableStateOf(false) }
+    fun openWithSpaceCheck(fromDesign: Boolean, open: () -> Unit) {
+        if (checkingSpace) return
+        checkingSpace = true
+        scope.launch {
+            // 窓の判定に失敗しても画面は開く（知らせるだけで、開けなくはしない）。
+            val notice = withContext(Dispatchers.IO) { runCatching { StorageNotice.load(context) }.getOrNull() }
+            checkingSpace = false
+            if (notice == null) {
+                open()
+            } else {
+                noticeFromDesign = fromDesign
+                spaceNotice = notice
+            }
+        }
+    }
     suspend fun refreshArchiveWarning() = withContext(Dispatchers.IO) {
         val app = context.applicationContext as BusCourseApplication
         val database = app.database
@@ -100,6 +124,16 @@ fun TopScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    spaceNotice?.let { notice ->
+        StorageSpaceDialog(
+            notice = notice,
+            fromDesign = noticeFromDesign,
+            // 「整理する」はどちらから押してもデータ出力へ（データ出力から押したときは窓を閉じてそこにとどまる）。
+            onOrganize = { spaceNotice = null; onOpenDataOutput() },
+            onProceed = { spaceNotice = null; if (noticeFromDesign) onOpenDesign() else onOpenDataOutput() },
+            onDismiss = { spaceNotice = null },
+        )
     }
     val naviState = naviTopState(selectedMap?.displayName, courseCount)
     Scaffold(
@@ -160,7 +194,7 @@ fun TopScreen(
                     TopMenuCard(
                         title = "設計",
                         icon = { Icon(Icons.Filled.Architecture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                        onClick = onOpenDesign,
+                        onClick = { openWithSpaceCheck(fromDesign = true, open = onOpenDesign) },
                         compact = true,
                         modifier = Modifier.weight(1f),
                     )
@@ -176,7 +210,7 @@ fun TopScreen(
                     icon = Icons.Filled.SaveAlt,
                     title = "データ出力",
                     description = "バックアップ・EX・保管庫・ナビ用の束",
-                    onClick = onOpenDataOutput,
+                    onClick = { openWithSpaceCheck(fromDesign = false, open = onOpenDataOutput) },
                 )
             }
 

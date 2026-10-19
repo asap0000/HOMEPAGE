@@ -16,11 +16,18 @@ import org.json.JSONObject
 import java.io.File
 import java.io.OutputStream
 
-/** Writes a course bundle without changing recording files or rows. */
+/**
+ * Writes a course bundle without changing recording files or rows.
+ *
+ * [frameFile] resolves a frame's DB-relative path (`sessions/{id}/frames/...`) to the real file. The default
+ * reads under [storageRoot]; the app passes `BusCourseStorage.resolve` so frames recorded on a microSD are found too
+ * (2026-10-20 委託指示書 K).
+ */
 class CourseBundleExporter(
     private val database: BusCourseDatabase,
     private val storageRoot: File,
     private val sourceVersionCode: Int,
+    private val frameFile: (String) -> File = { relPath -> File(storageRoot, relPath) },
 ) {
     suspend fun export(
         courseIds: List<Long>,
@@ -50,7 +57,7 @@ class CourseBundleExporter(
         }
         val nextIndex = mutableMapOf<String, Int>()
         val bundleFrames = pending.map { item ->
-            val source = File(storageRoot, item.frame.fileRelPath)
+            val source = frameFile(item.frame.fileRelPath)
             require(source.isFile) { "映像ファイルが見つかりません" }
             val frameIndex = nextIndex.getOrDefault(item.sessionKey, 0)
             nextIndex[item.sessionKey] = frameIndex + 1

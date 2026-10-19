@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -72,6 +73,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -79,14 +81,19 @@ import androidx.core.content.ContextCompat
 import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.core.data.BusCourseDatabase
+import com.istech.buscourse.core.data.BusCourseStorage
+import com.istech.buscourse.core.data.StorageSettings
 import com.istech.buscourse.core.data.CourseEntity
 import com.istech.buscourse.course.CourseKind
 import com.istech.buscourse.core.data.RecordingSessionEntity
 import com.istech.buscourse.course.CourseRepository
 import com.istech.buscourse.recording.BusRecordingService
+import com.istech.buscourse.recording.RecordingDestination
+import com.istech.buscourse.recording.RecordingDestinationPolicy
 import com.istech.buscourse.recording.RecordingNotificationManager
 import com.istech.buscourse.recording.RecordingSessionType
 import com.istech.buscourse.recording.RecordingStateStore
+import com.istech.buscourse.recording.StorageWarningPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.guava.await
@@ -216,6 +223,11 @@ private fun RecordingSetupContent(
     var vehicleId by vehicleIdState
     var showCoursePicker by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
+    // microSD を使ったことのある端末で、いまカードが抜けているとき、記録の開始前に出す窓（本体の空き bytes と、押された開始の種類）。
+    var askBodyDialog by remember { mutableStateOf<Pair<Long, Boolean>?>(null) }
+    // 端末の「空き容量不足」の警告が出る線（GB）。トップの「設計」「データ出力」の窓の目安に使う。
+    val storageSettings = remember { StorageSettings(context) }
+    var warningLineText by remember { mutableStateOf(formatWarningLineGb(storageSettings.deviceWarningLineGb)) }
 
     fun hasPermission(permission: String) =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -284,8 +296,19 @@ private fun RecordingSetupContent(
         onDispose { previewUseCase?.let { pu -> previewCameraProvider?.unbind(pu) } }
     }
 
-    fun startRecording(noCamera: Boolean = false) {
-        if (!com.istech.buscourse.recording.RecordingStartPolicy.canStart(context.filesDir.usableSpace)) {
+    fun startRecording(noCamera: Boolean = false, acceptBody: Boolean = false) {
+        // 記録の置き場所（2026-10-20 委託指示書 K）。microSD があれば自動でそちら。microSD を使ったことがあるのに
+        // 抜けていれば、開始の前に「本体に記録するか」を聞く（本体に記録した運行は、あとから microSD へは移さない）。
+        if (!acceptBody && RecordingDestinationPolicy.decide(
+                sdMounted = BusCourseStorage.sdFilesDirFresh(context) != null,
+                usedSdBefore = storageSettings.usedSd,
+            ) == RecordingDestination.ASK_BODY
+        ) {
+            askBodyDialog = context.filesDir.usableSpace to noCamera
+            return
+        }
+        // 空きは記録先（microSD があればそのカード、無ければ本体）で見る。
+        if (!com.istech.buscourse.recording.RecordingStartPolicy.canStart(BusCourseStorage.recordingFilesDir(context).usableSpace)) {
             Toast.makeText(context, "空きが足りません（500MB 未満）。PC の保管庫へ退避してから撮影してください", Toast.LENGTH_LONG).show()
             return
         }
@@ -430,6 +453,26 @@ private fun RecordingSetupContent(
             modifier = Modifier.fillMaxWidth(),
         )
 
+        OutlinedTextField(
+            value = warningLineText,
+            onValueChange = { text ->
+                warningLineText = text
+                // 範囲内の数のときだけ保存する（空欄や範囲外の途中の入力は保存せず、そのまま打ち続けられる）。
+                StorageWarningPolicy.parseDeviceWarningLineGb(text)?.let { storageSettings.deviceWarningLineGb = it }
+            },
+            label = { Text("端末の警告の線（GB）") },
+            supportingText = {
+                Text(
+                    "端末が「空き容量不足」の警告を出す線。トップの「設計」「データ出力」で、本体の空きが" +
+                        "この線＋1GB（microSD が無いときは全容量の10%）を切ると先に知らせます",
+                )
+            },
+            isError = StorageWarningPolicy.parseDeviceWarningLineGb(warningLineText) == null,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
         if (!cameraGranted || !locationGranted) {
             Text(
                 "カメラと位置情報の権限が必要です",
@@ -479,6 +522,28 @@ private fun RecordingSetupContent(
         }
     }
 
+    askBodyDialog?.let { (bodyFree, noCamera) ->
+        AlertDialog(
+            onDismissRequest = { askBodyDialog = null },
+            title = { Text("microSD が見当たりません") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("このまま本体に記録しますか。本体の空き ${formatGb(bodyFree)}")
+                    Text(
+                        "本体に記録した運行は、あとから microSD へは移しません",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { askBodyDialog = null; startRecording(noCamera = noCamera, acceptBody = true) }) {
+                    Text("本体に記録する")
+                }
+            },
+            dismissButton = { TextButton(onClick = { askBodyDialog = null }) { Text("やめる") } },
+        )
+    }
+
     if (showCoursePicker) {
         AlertDialog(
             onDismissRequest = { showCoursePicker = false },
@@ -501,6 +566,10 @@ private fun RecordingSetupContent(
         )
     }
 }
+
+/** 端末の警告の線（GB）の入力欄に出す文字。整数なら小数点を付けない（`6.8`・`7`）。 */
+private fun formatWarningLineGb(gb: Float): String =
+    if (gb == gb.toInt().toFloat()) gb.toInt().toString() else gb.toString()
 
 @Composable
 private fun SessionTypeOption(

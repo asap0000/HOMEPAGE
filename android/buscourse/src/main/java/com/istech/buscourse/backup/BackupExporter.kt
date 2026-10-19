@@ -9,6 +9,7 @@ import androidx.core.content.pm.PackageInfoCompat
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
+import com.istech.buscourse.core.data.StorageSettings
 import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
 import com.istech.buscourse.recording.RecordingStateStore
@@ -52,7 +53,9 @@ data class BackupResult(
  * 手順:
  * 1. 記録中でないことを確認する（[isRecording]・ボタン無効化はUI側、ここは防御的な二重チェック）。
  * 2. DBをWALチェックポイント（FULL）してから3点セット（db/-wal/-shm）を対象に含める（2026-07-14の実害の再発防止）。
- * 3. `filesDir/buscourse/` 配下を[BackupInventory]の棚卸し判定に従って集める。
+ * 3. `filesDir/buscourse/` 配下を[BackupInventory]の棚卸し判定に従って集める。microSD にある運行
+ *    （`sessions/{id}/`）も同じ判定で集め、ZIP の中では本体の運行と同じ `files/buscourse/sessions/{id}/...` の名前にする
+ *    （復元側は本体と microSD の区別を知らなくてよい。2026-10-20 委託指示書 K）。
  * 4. `manifest.json` を先頭エントリとしてZIPへ書き込み、以降DB→各対象ファイルの順に書き込む。
  * 5. SHA-256は書きながら計算する（`DigestOutputStream`相当の自前カウント実装。理由は下記[digestingCountingStream]参照）。
  * 6. 失敗（例外）または画面離脱によるキャンセルのいずれでも、SAFの出力先ドキュメントを削除してから例外を再送出する
@@ -72,6 +75,17 @@ class BackupExporter(
     private val backupStateStore = BackupStateStore(context)
 
     suspend fun isRecording(): Boolean = recordingStateStore.isRecordingFlow.first()
+
+    /**
+     * microSD に記録した運行のうち、いまカードが挿さっていないために**バックアップに入らない**ものの本数。
+     * 0 でなければバックアップは実行しない（走り直せない記録が黙って抜けるのを防ぐ）。
+     * カードが挿さっているときは 0（カードの中身が無くなっていても、それはバックアップでは直せない）。
+     */
+    suspend fun missingSdRunCount(): Int = withContext(Dispatchers.IO) {
+        val onSd = StorageSettings(context).sdSessionIds()
+        if (onSd.isEmpty() || BusCourseStorage.sdFilesDir(context) != null) return@withContext 0
+        database.recordingSessionDao().getAll().count { it.id in onSd }
+    }
 
     /** 確認画面用の推定サイズ（ZIP圧縮前の生バイト数の合計。実際のZIPサイズより大きくなりうる）。 */
     suspend fun estimate(): BackupEstimate = withContext(Dispatchers.IO) {
@@ -109,6 +123,9 @@ class BackupExporter(
         val fileName = BackupFileNaming.buildFileName(originId, newGen, now)
 
         try {
+            if (missingSdRunCount() > 0) {
+                throw BackupExportException("microSD が見当たりません。microSD に記録した運行がバックアップに入らないため、カードを挿してからお試しください")
+            }
             // WALチェックポイント（FULL）してからDBを固める（設計ドラフト§5・タスク指示書1-3手順2）。
             checkpointWal()
 
@@ -181,10 +198,20 @@ class BackupExporter(
         }
 
         val busCourseRoot = BusCourseStorage.root(context)
+        // microSD の運行（本体と同じ棚卸し判定。sessions だけが入っている）。同じ名前が本体にもあれば microSD を採る
+        // （[BusCourseStorage.resolve] が microSD を先に見るのと同じ）。
+        val sdRoot = BusCourseStorage.sdRoot(context)
+        val sdEntries = sdRoot?.let { root ->
+            BackupInventory.listIncludedFiles(root).map { f ->
+                "files/buscourse/${f.relativeTo(root).path.replace(File.separatorChar, '/')}" to f
+            }
+        }.orEmpty()
+        val sdNames = sdEntries.mapTo(HashSet()) { it.first }
         for (f in BackupInventory.listIncludedFiles(busCourseRoot)) {
             val relPath = f.relativeTo(busCourseRoot).path.replace(File.separatorChar, '/')
-            entries += "files/buscourse/$relPath" to f
+            if ("files/buscourse/$relPath" !in sdNames) entries += "files/buscourse/$relPath" to f
         }
+        entries += sdEntries
 
         for (relativePath in BackupWriteTargets.DATASTORE_PATHS) {
             val file = when (relativePath) {

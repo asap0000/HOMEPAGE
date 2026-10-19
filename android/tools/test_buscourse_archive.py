@@ -121,6 +121,58 @@ elif args[:2] == ['shell', 'rm']:
             return str(wrapper)
         return str(script)
 
+    def fake_adb_with_volumes(self, mounts, volumes):
+        """本体（/sdcard）に加えて /storage/<ボリューム> も見える偽 adb。mounts は {端末側の files ディレクトリ: 手元のフォルダ}。"""
+        script = self.base / ('fake_vol_' + str(len(list(self.base.glob('fake_vol_*.py')))) + '.py')
+        script.write_text('''#!/usr/bin/env python3
+import pathlib, shutil, sys
+mounts = {mounts!r}
+volumes = {volumes!r}
+argv = sys.argv[1:]
+if argv == ['devices']:
+    print('List of devices attached')
+    print('SER_VOL\\tdevice')
+    sys.exit(0)
+args = argv[2:]
+def local(remote):
+    for prefix, folder in mounts.items():
+        if remote == prefix or remote.startswith(prefix + '/'):
+            return pathlib.Path(folder) / pathlib.Path(remote).relative_to(prefix)
+    raise SystemExit(1)
+if args[:3] == ['shell', 'ls', '/storage']:
+    print(' '.join(volumes))
+elif args[:2] == ['shell', 'ls']:
+    folder = local(args[-1])
+    if not folder.is_dir(): sys.exit(1)
+    print('\\n'.join(p.name for p in folder.iterdir()))
+elif args[:2] == ['shell', 'test']:
+    sys.exit(0 if local(args[3]).is_file() else 1)
+elif args[:2] == ['shell', 'getprop']:
+    print('SyntheticDevice')
+elif args[:2] == ['shell', 'pm']:
+    sys.exit(1)
+elif args[:2] == ['shell', 'du']:
+    target = local(args[-1])
+    if not target.exists(): sys.exit(1)
+    size = sum(p.stat().st_size for p in target.rglob('*') if p.is_file())
+    print(str((size + 1023) // 1024) + '\\t' + args[-1])
+elif args[:2] == ['shell', 'cat']:
+    print(local(args[-1]).read_text())
+elif args[0] == 'pull':
+    source = local(args[1])
+    shutil.copytree(source, pathlib.Path(args[2]) / source.name)
+elif args[0] == 'push':
+    shutil.copy2(args[1], local(args[2]))
+elif args[:2] == ['shell', 'rm']:
+    shutil.rmtree(local(args[3]))
+'''.format(mounts={k: str(v) for k, v in mounts.items()}, volumes=list(volumes)))
+        script.chmod(0o755)
+        if os.name == 'nt':
+            wrapper = script.with_suffix('.cmd')
+            wrapper.write_text(f'@"{sys.executable}" "{script}" %*\n')
+            return str(wrapper)
+        return str(script)
+
     def navi_package(self, parent, source='app', run_id='SyntheticDevice_1000', payload=b'{"kind":"header"}\n'):
         folder = parent / (source + '-package')
         folder.mkdir(parents=True, exist_ok=True)
@@ -447,6 +499,36 @@ elif args[:2] == ['shell', 'rm']:
         self.assertEqual(selected['serial'], 'SER_B')
         self.assertEqual(len(archive.discover(adb, serials, lambda choices: choices)), 2)
         self.assertEqual(archive.discover(adb, ['SER_EMPTY'])['ready'], [])
+
+    def test_storage_volume_archive_out_is_also_pulled(self):
+        """microSD にある走行は /storage/<ボリューム>/Android/data/<pkg>/files/archive_out に書き出される（2026-10-20）。"""
+        body_files = archive.DEVICE_PATH
+        card_files = '/storage/ABCD-1234/Android/data/com.istech.buscourse/files'
+        device = self.base / 'device'; card = self.base / 'card'
+        on_body = self.export(device, self.new)
+        on_card = self.export(card, self.new + 5000)
+        adb = self.fake_adb_with_volumes({body_files: device, card_files: card}, ['emulated', 'self', 'ABCD-1234'])
+        self.assertEqual(archive.device_bases(adb, 'SER_VOL'), [body_files, card_files])
+        ready, pending = archive.export_list(adb, 'SER_VOL')
+        self.assertEqual(ready, sorted([on_body.name, on_card.name]))
+        self.assertEqual(pending, [])
+        # 置き場所を知らなくても大きさが取れる（GUI は名前だけで呼ぶ）。
+        self.assertGreater(archive.remote_size(adb, 'SER_VOL', on_card.name), 0)
+        result = archive.pull(self.root, 'SER_VOL', adb)
+        self.assertEqual(result['ingested'], 2)
+        self.assertEqual(result['mismatch'], 0)
+        self.assertEqual(result['not_pulled'], 0)
+        # 取り込んだ書き出しは、それぞれ元のボリュームから消える。受領票は本体側にだけ置く。
+        self.assertFalse(on_body.exists())
+        self.assertFalse(on_card.exists())
+        self.assertTrue((device / 'archive_receipt.json').is_file())
+        self.assertFalse((card / 'archive_receipt.json').exists())
+        self.assertEqual(len(archive.load(device / 'archive_receipt.json')['runs']), 2)
+
+    def test_storage_volume_emulated_and_self_are_not_searched(self):
+        adb = self.fake_adb_with_volumes({archive.DEVICE_PATH: self.base / 'device'}, ['emulated', 'self'])
+        self.assertEqual(archive.device_bases(adb, 'SER_VOL'), [archive.DEVICE_PATH])
+        self.assertEqual(archive.export_list(adb, 'SER_VOL'), ([], []))
 
     def test_second_pull_does_not_hash_existing_vault_file(self):
         device = self.base / 'device'

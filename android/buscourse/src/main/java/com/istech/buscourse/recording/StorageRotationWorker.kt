@@ -20,7 +20,6 @@ import com.istech.buscourse.core.data.WorkLogCategory
 import com.istech.buscourse.core.data.WorkLogEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -51,6 +50,8 @@ class StorageRotationWorker(appContext: Context, params: WorkerParameters) : Cor
             for (state in ArchiveDeletionPlan.order(states, cutoff)) {
                 val run = runs.first { it.id == state.id }
                 if (!ArchiveDeletionPlan.eligible(state, total, cutoff)) continue
+                // microSD が抜けている走行は中身が見えない。DB の行だけ消してカードにファイルを残さない（カードが戻ったら次回）。
+                if (archive.isUnavailable(run)) continue
                 try {
                     repo.deleteSession(run.id)
                     deleted++
@@ -65,7 +66,7 @@ class StorageRotationWorker(appContext: Context, params: WorkerParameters) : Cor
             }
             // 受領済みの書き出しは元セッションの削除結果に関係なく再利用しない。
             for (run in runs) if (matched[run.id] != null) {
-                File(archive.outDir, archive.runKey(run)).deleteRecursively()
+                archive.deleteExport(run)
             }
             val remaining = runs.size - deleted
             fun summary(predicate: (com.istech.buscourse.core.data.RecordingSessionEntity) -> Boolean): String {

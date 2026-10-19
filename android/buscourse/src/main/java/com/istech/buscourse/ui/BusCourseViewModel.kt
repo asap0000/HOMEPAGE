@@ -103,7 +103,12 @@ class BusCourseViewModel(application: Application) : AndroidViewModel(applicatio
                     val output = getApplication<BusCourseApplication>().contentResolver.openOutputStream(uri, "wt")
                         ?: error("保存先を開けません")
                     output.use {
-                        CourseBundleExporter(database, storageRoot, com.istech.buscourse.BuildConfig.VERSION_CODE).export(
+                        val app = getApplication<BusCourseApplication>()
+                        CourseBundleExporter(
+                            database, storageRoot, com.istech.buscourse.BuildConfig.VERSION_CODE,
+                            // 映像は microSD にある運行もある。保存先を決める [BusCourseStorage.resolve] で解く。
+                            frameFile = { relPath -> BusCourseStorage.resolve(app, relPath) },
+                        ).export(
                             courseIds, it,
                             onProgress = { done, total -> mainHandler.post { onProgress(done, total) } },
                             onPrepare = { done, total -> mainHandler.post { onPrepare(done, total) } },

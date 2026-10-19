@@ -56,6 +56,8 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var toExport by remember { mutableStateOf<List<RecordingSessionEntity>?>(null) }
     var waiting by remember { mutableStateOf<List<RecordingSessionEntity>>(emptyList()) }
+    // microSD が抜けていて中身が見えず、書き出せない走行（カードを挿せば次回に書き出せる）。
+    var missingSd by remember { mutableStateOf(0) }
     var naviToExport by remember { mutableStateOf<List<NaviArchiveCandidate>?>(null) }
     var naviWaiting by remember { mutableStateOf<List<NaviArchiveCandidate>>(emptyList()) }
     var naviReceived by remember { mutableStateOf(0) }
@@ -69,12 +71,14 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
 
     suspend fun reload() {
         withContext(Dispatchers.IO) {
-            store.outDir.mkdirs()
+            store.prepareOutDirs()
             val pending = store.pending()
+            val unavailable = store.unavailable().size
             val naviPending = navi.pending()
             val allNaviBytes = navi.candidates().sumOf { it.bytes }
             val received = navi.receivedCount()
             withContext(Dispatchers.Main) {
+                missingSd = unavailable
                 waiting = pending.filter(store::isExported)
                 toExport = pending.filterNot(store::isExported)
                 naviWaiting = naviPending.filter(navi::isExported)
@@ -103,7 +107,20 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                 Text("ナビの走った跡 ${naviCount}本・${naviBytes / mb}MB$received")
             }
             if (naviWaiting.isNotEmpty()) Text("ナビの走った跡 ${naviWaiting.size}本（取り込み待ち）")
-            Text("空き容量 ${store.outDir.usableSpace / mb}MB")
+            // 書き出し先ごとの空き（本体の走行は本体、microSD の走行は同じ microSD に作る）。
+            val sdOut = store.sdOutDir
+            if (sdOut == null) {
+                Text("空き容量 ${store.outDir.usableSpace / mb}MB")
+            } else {
+                val toBody = runs.any { store.outDirFor(it) == store.outDir }
+                val toSd = runs.any { store.outDirFor(it) == sdOut }
+                if (toBody || !toSd) Text("書き出し先（本体）の空き容量 ${store.outDir.usableSpace / mb}MB")
+                if (toSd || !toBody) Text("書き出し先（microSD）の空き容量 ${sdOut.usableSpace / mb}MB")
+            }
+            if (missingSd > 0) {
+                Text("microSD が見当たらないため書き出せない走行 ${missingSd}本（カードを挿すと書き出せます）",
+                    color = MaterialTheme.colorScheme.error)
+            }
 
             if (busy) {
                 LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
