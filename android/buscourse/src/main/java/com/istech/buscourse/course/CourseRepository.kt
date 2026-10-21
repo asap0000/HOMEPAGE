@@ -384,6 +384,8 @@ data class CourseStopView(
     /** 解決済み座標（coalesce(frame座標, event座標, card座標)、[CourseRepository.resolveStopPosition]）。 */
     val latitude: Double,
     val longitude: Double,
+    /** 出自（`course_stop.provenance` の [CourseStopProvenance] の name）。運行の記録から足した点は `HUMAN_CORRECTED`。 */
+    val provenance: String = CourseStopProvenance.RECORDED.name,
 ) {
     /** 状態ドット表示用: 映像（`frame_id`）を持つか（設計ドラフト§7.1「映像＝青」）。 */
     val hasFrame: Boolean get() = frameId != null
@@ -410,6 +412,33 @@ data class CourseStopEdit(
     val frameId: Long?,
     val eventId: Long?,
     val cardId: Long?,
+    /**
+     * 新しく足した点の出自（[CourseStopProvenance] の name）。**前身の無い点にだけ効く**——保存済みの点は
+     * 3ポインタ組で前身を引き当て、前身の出自・誤差・座標を引き継ぐ（[CourseRepository.setCourseStopsPreservingPointers]）。
+     * null＝既定（`RECORDED`）。運行の記録の時刻から足した点は `HUMAN_CORRECTED`（2026-10-22）。
+     */
+    val provenance: String? = null,
+    /** 新しく足した点の座標（[resolvedLongitude] と同時に非null／同時にnull）。前身が無い点にだけ効く。 */
+    val resolvedLatitude: Double? = null,
+    val resolvedLongitude: Double? = null,
+) {
+    /**
+     * 「同じ点か」の照合キー（frame/event/card の3ポインタ組）。出自・座標は含めない——
+     * 並べ替え・下書き復元・未保存判定は、足した点でも保存済みの点でも同じ組で突き合わせる。
+     */
+    val pointerKey: Triple<Long?, Long?, Long?> get() = Triple(frameId, eventId, cardId)
+}
+
+/** [CourseRepository.findRecordedStopCandidates] の1件。[frame] は停車区間の中で真ん中の時刻に一番近い LORES コマ（無ければ null＝写真が無いので足せない）。 */
+data class RecordedStopChoice(
+    val candidate: RecordedStopCandidate,
+    val frame: TimelapseFrameEntity?,
+)
+
+/** [CourseRepository.findRecordedStopCandidates] の結果（[RecordedStopCandidates] に写真を結んだもの）。 */
+data class RecordedStopChoices(
+    val listed: List<RecordedStopChoice>,
+    val others: List<RecordedStopChoice>,
 )
 
 /**
@@ -819,9 +848,41 @@ class CourseRepository(
                 errorSpaceM = stop.errorSpaceM,
                 latitude = lat,
                 longitude = lon,
+                provenance = stop.provenance,
             )
         }
         CourseEditDetails(course = course, stops = views)
+    }
+
+    /** 編集画面の下書き復元で、足したばかり（まだ保存していない）点の写真・時刻・位置を引き直すために使う。 */
+    suspend fun getTimelapseFrame(frameId: Long): TimelapseFrameEntity? = timelapseFrameDao.getById(frameId)
+
+    /**
+     * 運行の記録の時刻から、押し忘れた停留所の候補を拾う（コース編集画面の「停留所を追加」→「運行の記録から」、
+     * 2026-10-22、読み取り専用）。判定は純関数 [RecordedStopCandidatePicker.pick]——ここは材料を集めて
+     * 写真（停車区間の中で真ん中の時刻に一番近い LORES コマ）を結ぶだけ。
+     *
+     * - 測位・押したマーク＝[sessionId]（コースの元の運行）のもの。
+     * - ほかの運行のマーク＝この端末の DB にある全運行の `stop_visit_event` から [sessionId] 自身を除いたもの。
+     * - [stopPositions]＝`stop_positions.json`（[StopPositionsFile]）。無ければ空でよい。
+     * - [addedAtMs]＝すでに足した点の時刻。それを含む停車区間は出さない。
+     */
+    suspend fun findRecordedStopCandidates(
+        sessionId: Long,
+        stopPositions: List<LatLon>,
+        addedAtMs: Collection<Long> = emptyList(),
+    ): RecordedStopChoices = withContext(Dispatchers.IO) {
+        val fixes = gpsPointDao.getBySession(sessionId).map { SpeedFix(it.tsEpochMs, it.lat, it.lon, it.speedMps) }
+        val ownMarks = stopVisitEventDao.getBySession(sessionId).mapNotNull { e ->
+            if (e.lat != null && e.lon != null) LatLon(e.lat, e.lon) else null
+        }
+        val otherRunMarks = stopVisitEventDao.getMarkPositionsExcludingSession(sessionId).map { LatLon(it.lat, it.lon) }
+        val picked = RecordedStopCandidatePicker.pick(fixes, ownMarks, stopPositions, otherRunMarks, addedAtMs)
+        suspend fun choose(c: RecordedStopCandidate) = RecordedStopChoice(
+            candidate = c,
+            frame = timelapseFrameDao.findLoresNearestInRange(sessionId, c.startMs, c.endMs, c.midMs),
+        )
+        RecordedStopChoices(listed = picked.listed.map { choose(it) }, others = picked.others.map { choose(it) })
     }
 
     suspend fun createCourse(
@@ -941,6 +1002,14 @@ class CourseRepository(
      * `segment_track` 由来の再構築のみで足りるため、[confirmCourseRouteFromSession] は呼ばない。
      */
     suspend fun setCourseStopsPreservingPointers(courseId: Long, stops: List<CourseStopEdit>) {
+        stops.forEach { s ->
+            s.provenance?.let { name ->
+                require(CourseStopProvenance.values().any { it.name == name }) { "知らない出自です: $name" }
+            }
+            require((s.resolvedLatitude == null) == (s.resolvedLongitude == null)) {
+                "resolved の緯度と経度は同時に指定してください"
+            }
+        }
         database.withTransaction {
             // ★出自(provenance)・誤差(error_space_m)・解決済み座標は、全削除→再挿入で失われてはならない。
             // これらは記録・洗浄の産物で、編集画面には入力欄が無い＝人が入れ直せないため、消えると復元できない
@@ -964,10 +1033,11 @@ class CourseRepository(
                             eventId = s.eventId,
                             sequenceIndex = index,
                             expectedChainageM = null, // regenerate後にRoutePreprocessorが再計算
-                            // 編集画面で新しく足した点には前身が無いので既定値のまま（＝カード由来の点）。
-                            resolvedLatitude = previous?.resolvedLatitude,
-                            resolvedLongitude = previous?.resolvedLongitude,
-                            provenance = previous?.provenance ?: CourseStopProvenance.RECORDED.name,
+                            // 編集画面で新しく足した点には前身が無い。カードから足した点は既定値（RECORDED）のまま、
+                            // 運行の記録の時刻から足した点は編集の側が持つ出自（HUMAN_CORRECTED）と座標を書く。
+                            resolvedLatitude = if (previous != null) previous.resolvedLatitude else s.resolvedLatitude,
+                            resolvedLongitude = if (previous != null) previous.resolvedLongitude else s.resolvedLongitude,
+                            provenance = previous?.provenance ?: s.provenance ?: CourseStopProvenance.RECORDED.name,
                             errorSpaceM = previous?.errorSpaceM,
                         )
                     }

@@ -166,6 +166,9 @@ interface CourseDao {
 }
 
 /** 他コースでの使用状況の集約結果（コース編成カード選択ダイアログ用、P1-4）。 */
+/** 押したマークの位置だけ（名前・カードは持たない）。[StopVisitEventDao.getMarkPositionsExcludingSession] の行。 */
+data class MarkPositionRow(val lat: Double, val lon: Double)
+
 data class StopCardUsage(val cardId: Long, val courseName: String, val courseStopId: Long)
 
 /** 全カードの使用状況の集約結果（停留所カード一覧の使用中バッジ用）。 */
@@ -391,6 +394,18 @@ interface TimelapseFrameDao {
     suspend fun findClosestLoresAtOrAfter(sessionId: Long, tsEpochMs: Long): TimelapseFrameEntity?
 
     /**
+     * 停車区間 [[startMs], [endMs]] の中で、時刻 [midMs] に一番近い位置つきの LORES フレーム
+     * （運行の記録の時刻から停留所を足す、2026-10-22）。区間の外のコマは返さない＝そのコマの位置が
+     * 「停まっていたあいだの位置」であることを保証するため。同じ近さなら撮影の早い方。
+     */
+    @Query(
+        "SELECT * FROM timelapse_frame WHERE session_id = :sessionId AND kind = 'LORES' " +
+            "AND captured_at BETWEEN :startMs AND :endMs AND latitude IS NOT NULL AND longitude IS NOT NULL " +
+            "ORDER BY ABS(captured_at - :midMs) ASC, captured_at ASC LIMIT 1"
+    )
+    suspend fun findLoresNearestInRange(sessionId: Long, startMs: Long, endMs: Long, midMs: Long): TimelapseFrameEntity?
+
+    /**
      * 手動停留所マーク時のLORESマーカー付与用（運行記録③機能、2026-07-12）。
      * 対象フレームの `stop_card_id` を更新する（version 8で追加、[BusCourseDatabase.MIGRATION_7_8]）。
      */
@@ -446,6 +461,14 @@ interface StopVisitEventDao {
      */
     @Query("SELECT * FROM stop_visit_event WHERE id = :id")
     suspend fun getById(id: Long): StopVisitEventEntity?
+
+    /**
+     * ほかの運行で押したマークの位置（運行の記録の時刻から停留所を足す、2026-10-22）。この端末の DB にある
+     * 全運行の `stop_visit_event` から、[sessionId]（その運行自身）を除き、座標のあるものだけを返す。
+     * 押下の出自（MANUAL/AUTO）で選り分けない（AUTO を判定するコードを書かない方針、v20）。
+     */
+    @Query("SELECT lat AS lat, lon AS lon FROM stop_visit_event WHERE session_id != :sessionId AND lat IS NOT NULL AND lon IS NOT NULL")
+    suspend fun getMarkPositionsExcludingSession(sessionId: Long): List<MarkPositionRow>
 }
 
 /** `shock_event`（衝撃検知イベント）の操作（設計書§3.5）。 */

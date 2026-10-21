@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
@@ -70,14 +71,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.istech.buscourse.core.data.BusStopCardEntity
 import com.istech.buscourse.core.data.BusCourseStorage
+import com.istech.buscourse.core.data.CourseStopProvenance
 import com.istech.buscourse.core.data.identityOrNull
 import com.istech.buscourse.course.CourseEditDetails
 import com.istech.buscourse.course.CourseStopEdit
+import com.istech.buscourse.course.RecordedStopChoice
+import com.istech.buscourse.course.RecordedStopChoices
+import com.istech.buscourse.course.StopPositionsFile
 import com.istech.buscourse.course.UpdateIdentityResult
 import com.istech.buscourse.course.resolveUniqueCourseName
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 編成中の停留所1行（並べ替え用ローカル状態、S6a「コース編集画面の刷新（土台）」で改訂）。
@@ -97,8 +105,18 @@ data class StopRow(
     val errorSpaceM: Double?,
     val latitude: Double,
     val longitude: Double,
+    /**
+     * 出自（`course_stop.provenance` の [CourseStopProvenance] の name）。運行の記録の時刻から足した行は
+     * `HUMAN_CORRECTED`（2026-10-22）。保存済みの行は読み込み時の値をそのまま持つ。
+     */
+    val provenance: String = CourseStopProvenance.RECORDED.name,
+    /** 運行の記録から足したばかり（まだ保存していない）行の座標＝停車区間の真ん中の測位。保存済みの行は null。 */
+    val resolvedLatitude: Double? = null,
+    val resolvedLongitude: Double? = null,
 ) {
-    /** 状態ドット表示用: 映像（frame_id）を持つか（設計ドラフト§7.1「映像＝青」）。 */
+    /** 運行の記録の時刻から足した行か（並びに小さく「記録から」と出す・データにも出自が残る）。 */
+    val isFromRecord: Boolean get() = provenance == CourseStopProvenance.HUMAN_CORRECTED.name
+
     val hasFrame: Boolean get() = frameId != null
 
     /** 状態ドット表示用: カード（stop_card_id）を持つか（設計ドラフト§7.1「カード＝緑」）。 */
@@ -113,7 +131,11 @@ data class StopRow(
     val stableKey: String get() = "f${frameId}_e${eventId}_c${cardId}"
 
     /** 保存経路（[com.istech.buscourse.course.CourseRepository.setCourseStopsPreservingPointers]）への変換。 */
-    fun toEdit(): CourseStopEdit = CourseStopEdit(frameId = frameId, eventId = eventId, cardId = cardId)
+    fun toEdit(): CourseStopEdit = CourseStopEdit(
+        frameId = frameId, eventId = eventId, cardId = cardId,
+        provenance = provenance.takeIf { it != CourseStopProvenance.RECORDED.name },
+        resolvedLatitude = resolvedLatitude, resolvedLongitude = resolvedLongitude,
+    )
 }
 
 /** 中型マイクロバス定員（幼児、2026-07-10）。停留所カードの乗車人数を参照する運用が変わったら見直す。 */
@@ -139,6 +161,10 @@ private val STATUS_DOT_CARD_COLOR = Color(0xFF43A047)
  * - 停留所の追加（カード選択、card-onlyの点として挿入）・削除・並べ替え（長押しドラッグ&ドロップ＋
  *   繰り上げ/繰り下げボタン）・保存（[com.istech.buscourse.course.CourseRepository.setCourseStopsPreservingPointers]、
  *   frame_id/event_idを保持したまま書き換え、区間/route_pointを再構築）。
+ * - 2026-10-22: 「停留所を追加」の窓に「運行の記録から」を並べた（コースの元の運行があるときだけ）。
+ *   停まったのにマークを押し忘れた所を時刻・停車秒数つきで拾い（[com.istech.buscourse.course.RecordedStopCandidatePicker]）、
+ *   選ぶとその時刻の写真を出して［足す］。足した行は `frame_id` のみ・名前なし・出自は人の補正
+ *   （`HUMAN_CORRECTED`）で、時刻の順の位置に入る（[insertRecordedStop]）。並びに小さく「記録から」と出る。
  * - 区間（CONFIRMED/PENDING）セクション・GPX取込（`importAsSegmentTrack`）は撤去した
  *   （ボトムアップ＝試走待ちの名残。FULL_RUN由来のトップダウン創設では発生しないため）。
  * - コース削除・地図表示（[RouteMapScreen]）への導線・定員警告表示は維持。
@@ -166,6 +192,12 @@ fun CourseDetailScreen(
     var refreshKey by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
+    // 「停留所を追加」の窓の「運行の記録から」側（2026-10-22）。候補は窓を開いた・切り替えたときに読み直す。
+    var addFromRecord by remember { mutableStateOf(false) }
+    var recordChoices by remember { mutableStateOf<RecordedStopChoices?>(null) }
+    var recordLoading by remember { mutableStateOf(false) }
+    var showOtherStops by remember { mutableStateOf(false) }
+    var recordSelected by remember { mutableStateOf<RecordedStopChoice?>(null) }
     var showLeaveConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showCutConfirm by remember { mutableStateOf(false) }
@@ -204,8 +236,8 @@ fun CourseDetailScreen(
     // （フェーズ2レビュー#7。無いと、保存成功等でrefreshKey++された際にドラッグ&ドロップ/
     // 繰り上げ下げの未確定並べ替えが破棄されてしまう）。
     // 比較キーはcardIdだけでなくframe_id/event_idも含める（S6a改。cardIdが無い点同士の区別のため）。
-    val persistedOrder = details?.stops?.map { CourseStopEdit(frameId = it.frameId, eventId = it.eventId, cardId = it.cardId) }
-    val dirty = persistedOrder != null && persistedOrder != editedStops.map { it.toEdit() }
+    val persistedOrder = details?.stops?.map { Triple(it.frameId, it.eventId, it.cardId) }
+    val dirty = persistedOrder != null && persistedOrder != editedStops.map { it.toEdit().pointerKey }
 
     LaunchedEffect(courseId, refreshKey) {
         val loaded = repository.getCourseEditDetails(courseId)
@@ -220,10 +252,10 @@ fun CourseDetailScreen(
                 // 定員警告が古い値のまま表示され続けていた）。
                 val sourceSessionId = loaded?.course?.sourceSessionId
                 val loadedByPointers = loaded?.stops?.associateBy {
-                    CourseStopEdit(frameId = it.frameId, eventId = it.eventId, cardId = it.cardId)
+                    Triple(it.frameId, it.eventId, it.cardId)
                 }.orEmpty()
                 draftOrder.forEachIndexed { index, edit ->
-                    val loadedStop = loadedByPointers[edit]
+                    val loadedStop = loadedByPointers[edit.pointerKey]
                     if (edit.cardId != null) {
                         // getActiveStopCards()（未アーカイブのみ）だと、下書きに含まれるカードが後から
                         // 他画面でアーカイブされていた場合に一覧から消えてしまう（実機検証で発覚）ため、
@@ -247,18 +279,28 @@ fun CourseDetailScreen(
                     } else {
                         // カードの無い点（映像/イベントのみ）。表示名はロード時と同じ導出則
                         // （`S{sourceSessionId}-{通番}`。通番は下書き内の並び順=index+1）で組み立てる。
+                        // 運行の記録から足したばかり（保存前）の点は読み込み結果に無いので、写真・時刻・位置・出自を
+                        // 下書きの印とコマから引き直す（2026-10-22）。
+                        val unsavedFrame = if (loadedStop == null && edit.frameId != null) {
+                            repository.getTimelapseFrame(edit.frameId)
+                        } else {
+                            null
+                        }
                         editedStops.add(
                             StopRow(
                                 frameId = edit.frameId,
                                 eventId = edit.eventId,
                                 cardId = null,
-                                displayName = "S${sourceSessionId ?: "?"}-${index + 1}",
+                                displayName = recordedStopName(sourceSessionId, index),
                                 riderCount = 0,
-                                thumbRelPath = loadedStop?.thumbRelPath,
-                                capturedAt = loadedStop?.capturedAt,
+                                thumbRelPath = loadedStop?.thumbRelPath ?: unsavedFrame?.fileRelPath,
+                                capturedAt = loadedStop?.capturedAt ?: unsavedFrame?.capturedAt,
                                 errorSpaceM = loadedStop?.errorSpaceM,
-                                latitude = loadedStop?.latitude ?: 0.0,
-                                longitude = loadedStop?.longitude ?: 0.0,
+                                latitude = loadedStop?.latitude ?: edit.resolvedLatitude ?: unsavedFrame?.latitude ?: 0.0,
+                                longitude = loadedStop?.longitude ?: edit.resolvedLongitude ?: unsavedFrame?.longitude ?: 0.0,
+                                provenance = loadedStop?.provenance ?: edit.provenance ?: CourseStopProvenance.RECORDED.name,
+                                resolvedLatitude = if (loadedStop == null) edit.resolvedLatitude else null,
+                                resolvedLongitude = if (loadedStop == null) edit.resolvedLongitude else null,
                             )
                         )
                     }
@@ -277,6 +319,7 @@ fun CourseDetailScreen(
                             errorSpaceM = stop.errorSpaceM,
                             latitude = stop.latitude,
                             longitude = stop.longitude,
+                            provenance = stop.provenance,
                         )
                     )
                 }
@@ -309,6 +352,67 @@ fun CourseDetailScreen(
         cutIndexes = emptySet()
         editedStops.add(target, editedStops.removeAt(index))
         persistDraft()
+    }
+
+    /**
+     * 「運行の記録から」へ切り替え、停まったのにマークが無い所の候補を読み直す（2026-10-22）。
+     * 元の運行（source session）が無いコースでは呼ばれない（切り替えの口を出さない）。
+     */
+    fun openRecordMode() {
+        val sessionId = details?.course?.sourceSessionId ?: return
+        addFromRecord = true
+        recordSelected = null
+        showOtherStops = false
+        recordChoices = null
+        recordLoading = true
+        scope.launch {
+            val positions = withContext(Dispatchers.IO) {
+                StopPositionsFile.read(context.getExternalFilesDir(null)?.let { File(it, StopPositionsFile.FILE_NAME) })
+            }
+            recordChoices = repository.findRecordedStopCandidates(sessionId, positions, addedFromRecordTimes(editedStops))
+            recordLoading = false
+        }
+    }
+
+    /**
+     * 選んだ停車を、時刻の順の位置に足す（2026-10-22）。`frame_id` = その時刻に一番近い LORES コマ・
+     * `event_id`/`card_id` = なし・出自 = 人の補正（停車の検出は機械、選ぶのは人）。**名前は付けない**。
+     * 位置 = 停車区間の真ん中の時刻の測位。
+     */
+    fun addRecordedStop(choice: RecordedStopChoice) {
+        val frame = choice.frame ?: return
+        if (editedStops.any { it.frameId == frame.id }) {
+            Toast.makeText(context, "この時刻はすでに入っています", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val candidate = choice.candidate
+        val row = StopRow(
+            frameId = frame.id,
+            eventId = null,
+            cardId = null,
+            displayName = "",
+            riderCount = 0,
+            thumbRelPath = frame.fileRelPath,
+            capturedAt = frame.capturedAt,
+            errorSpaceM = null,
+            latitude = candidate.lat,
+            longitude = candidate.lon,
+            provenance = CourseStopProvenance.HUMAN_CORRECTED.name,
+            resolvedLatitude = candidate.lat,
+            resolvedLongitude = candidate.lon,
+        )
+        val merged = insertRecordedStop(editedStops.toList(), row, details?.course?.sourceSessionId)
+        editedStops.clear()
+        editedStops.addAll(merged)
+        cutIndexes = emptySet()
+        persistDraft()
+        showAddDialog = false
+        val newIndex = merged.indexOfFirst { it.frameId == frame.id }
+        selectedIndex = newIndex
+        scope.launch {
+            // index 0 のヘッダが先行するため、停留所indexへ1を足す。
+            dragState.lazyListState.animateScrollToItem(newIndex + stopRangeStart)
+        }
     }
 
     // GPXエクスポート（コース全体の書き出し）は 2026-07-26 に撤去した。
@@ -562,6 +666,13 @@ fun CourseDetailScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                                if (stop.isFromRecord) {
+                                    Text(
+                                        "記録から",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                    )
+                                }
                                 if (stop.riderCount > 0) {
                                     Text(
                                         "乗車 ${stop.riderCount}名（累計 $cumulativeRiders / $BUS_CAPACITY 名）",
@@ -712,6 +823,10 @@ fun CourseDetailScreen(
                                 scope.launch {
                                     activeCards = repository.getActiveStopCards()
                                     usageMap = repository.getStopCardUsage(courseId)
+                                    addFromRecord = false
+                                    recordChoices = null
+                                    recordSelected = null
+                                    showOtherStops = false
                                     showAddDialog = true
                                 }
                             },
@@ -813,81 +928,112 @@ fun CourseDetailScreen(
             title = { Text("停留所を追加") },
             text = {
                 Column {
-                    FilterChip(
-                        selected = unusedOnlyFilter,
-                        onClick = { unusedOnlyFilter = !unusedOnlyFilter },
-                        label = { Text("未使用のみ") },
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    if (activeCards.isEmpty()) {
-                        Text("停留所カードがありません。先にカードを作成してください。")
-                    } else if (availableCards.isEmpty()) {
-                        Text("追加できる停留所カードがありません（すべて追加済みです）。")
+                    // 追加元の切り替え。「運行の記録から」はコースの元の運行（source session）が無いコースでは出さない。
+                    val recordSessionId = details?.course?.sourceSessionId
+                    if (recordSessionId != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = !addFromRecord,
+                                onClick = { addFromRecord = false },
+                                label = { Text("停留所カードから") },
+                            )
+                            FilterChip(
+                                selected = addFromRecord,
+                                onClick = { if (!addFromRecord) openRecordMode() },
+                                label = { Text("運行の記録から") },
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (addFromRecord && recordSessionId != null) {
+                        RecordedStopPane(
+                            sessionId = recordSessionId,
+                            choices = recordChoices,
+                            loading = recordLoading,
+                            showOthers = showOtherStops,
+                            selected = recordSelected,
+                            onToggleOthers = { showOtherStops = !showOtherStops },
+                            onSelect = { recordSelected = it },
+                            onAdd = { addRecordedStop(it) },
+                            photoFile = { frame -> BusCourseStorage.resolve(context, frame.fileRelPath) },
+                        )
                     } else {
-                        LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                            itemsIndexed(availableCards, key = { _, card -> card.id }) { _, card ->
-                                val usedInCourseName = usageMap[card.id]
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            // 「＋停留所を追加」＝card-onlyの点として挿入する
-                                            // （frame_id/event_idは持たない、設計ドラフト§5）
-                                            editedStops.add(
-                                                StopRow(
-                                                    frameId = null,
-                                                    eventId = null,
-                                                    cardId = card.id,
-                                                    displayName = card.name,
-                                                    riderCount = card.riderCount,
-                                                    thumbRelPath = "stopcards/${card.id}/photo_thumb.jpg",
-                                                    capturedAt = null,
-                                                    errorSpaceM = null,
-                                                    latitude = card.latitude,
-                                                    longitude = card.longitude,
+                        FilterChip(
+                            selected = unusedOnlyFilter,
+                            onClick = { unusedOnlyFilter = !unusedOnlyFilter },
+                            label = { Text("未使用のみ") },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        if (activeCards.isEmpty()) {
+                            Text("停留所カードがありません。先にカードを作成してください。")
+                        } else if (availableCards.isEmpty()) {
+                            Text("追加できる停留所カードがありません（すべて追加済みです）。")
+                        } else {
+                            LazyColumn(Modifier.heightIn(max = 400.dp)) {
+                                itemsIndexed(availableCards, key = { _, card -> card.id }) { _, card ->
+                                    val usedInCourseName = usageMap[card.id]
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                // 「＋停留所を追加」＝card-onlyの点として挿入する
+                                                // （frame_id/event_idは持たない、設計ドラフト§5）
+                                                editedStops.add(
+                                                    StopRow(
+                                                        frameId = null,
+                                                        eventId = null,
+                                                        cardId = card.id,
+                                                        displayName = card.name,
+                                                        riderCount = card.riderCount,
+                                                        thumbRelPath = "stopcards/${card.id}/photo_thumb.jpg",
+                                                        capturedAt = null,
+                                                        errorSpaceM = null,
+                                                        latitude = card.latitude,
+                                                        longitude = card.longitude,
+                                                    )
                                                 )
-                                            )
-                                            cutIndexes = emptySet()
-                                            persistDraft()
-                                            showAddDialog = false
-                                        }
-                                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    StopCardThumbnail(
-                                        file = repository.stopCardThumbFile(card),
-                                        modifier = Modifier.size(40.dp),
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    // 名前とバッジをRow内で横並び競合させない（レビュー指摘の修正: 実機の
-                                    // 文字サイズ大設定でSuggestionChipの実測幅が広がり、weight(1f)の
-                                    // 名前列が潰れてカード名が全く見えなくなっていた）。バッジは名前の
-                                    // 下に縦積みし、常にカード名を優先表示する。
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            card.name,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                                cutIndexes = emptySet()
+                                                persistDraft()
+                                                showAddDialog = false
+                                            }
+                                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        StopCardThumbnail(
+                                            file = repository.stopCardThumbFile(card),
+                                            modifier = Modifier.size(40.dp),
                                         )
-                                        if (card.riderCount > 0) {
+                                        Spacer(Modifier.width(10.dp))
+                                        // 名前とバッジをRow内で横並び競合させない（レビュー指摘の修正: 実機の
+                                        // 文字サイズ大設定でSuggestionChipの実測幅が広がり、weight(1f)の
+                                        // 名前列が潰れてカード名が全く見えなくなっていた）。バッジは名前の
+                                        // 下に縦積みし、常にカード名を優先表示する。
+                                        Column(Modifier.weight(1f)) {
                                             Text(
-                                                "${card.riderCount}名",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        if (usedInCourseName != null) {
-                                            Text(
-                                                "使用中: $usedInCourseName",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.primary,
+                                                card.name,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
+                                            if (card.riderCount > 0) {
+                                                Text(
+                                                    "${card.riderCount}名",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                            if (usedInCourseName != null) {
+                                                Text(
+                                                    "使用中: $usedInCourseName",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
                                         }
                                     }
+                                    HorizontalDivider()
                                 }
-                                HorizontalDivider()
                             }
                         }
                     }
@@ -1141,6 +1287,9 @@ private fun StopDetailDialog(
                 } else {
                     StopDetailLine("名前", "（まだ付いていません）", pending = true)
                 }
+                if (stop.isFromRecord) {
+                    StopDetailLine("出自", "運行の記録の時刻から足した（人の補正）")
+                }
                 StopDetailLine(
                     "座標",
                     String.format(Locale.JAPAN, "%.5f, %.5f", stop.latitude, stop.longitude),
@@ -1192,6 +1341,121 @@ private fun StopDetailLine(label: String, value: String, pending: Boolean = fals
             fontStyle = if (pending) FontStyle.Italic else FontStyle.Normal,
         )
     }
+}
+
+/**
+ * 「停留所を追加」の窓の「運行の記録から」側（2026-10-22）。
+ * 一覧（停まったのにマークが無い所を時刻・停車秒数つきで）→ 1件選ぶとその時刻の写真を大きめに出し［足す］。
+ * 一覧に出るのは「停留所の位置・ほかの運行のマークの近くで停まった所」だけ。それ以外の停車は
+ * 「その他の停車を見る」を押したときだけ出す（新しい停留所はここから拾う）。
+ */
+@Composable
+private fun RecordedStopPane(
+    sessionId: Long,
+    choices: RecordedStopChoices?,
+    loading: Boolean,
+    showOthers: Boolean,
+    selected: RecordedStopChoice?,
+    onToggleOthers: () -> Unit,
+    onSelect: (RecordedStopChoice?) -> Unit,
+    onAdd: (RecordedStopChoice) -> Unit,
+    photoFile: (com.istech.buscourse.core.data.TimelapseFrameEntity) -> File,
+) {
+    if (selected != null) {
+        val candidate = selected.candidate
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(recordedStopLabel(selected), style = MaterialTheme.typography.titleSmall)
+            val frame = selected.frame
+            if (frame != null) {
+                StopThumbnail(
+                    file = photoFile(frame),
+                    sizeDp = 240,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                )
+                Text(
+                    "写真 ${formatTimeOfDay(frame.capturedAt)}（停まっていたあいだの真ん中ごろ）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text(
+                    "この時刻の写真がないので足せません",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Text(
+                String.format(Locale.JAPAN, "位置 %.5f, %.5f", candidate.lat, candidate.lon),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { onSelect(null) }) { Text("一覧に戻る") }
+                Button(onClick = { onAdd(selected) }, enabled = frame != null) { Text("足す") }
+            }
+        }
+        return
+    }
+    if (loading || choices == null) {
+        Text("運行の記録を調べています…")
+        return
+    }
+    Column {
+        Text(
+            "停まったのにマークが無い所（#$sessionId）",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        LazyColumn(Modifier.heightIn(max = 400.dp)) {
+            if (choices.listed.isEmpty()) {
+                item {
+                    Text(
+                        "停留所の近くで停まったのにマークが無い所はありません。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                }
+            }
+            items(choices.listed, key = { it.candidate.startMs }) { choice ->
+                RecordedStopRow(choice, onClick = { onSelect(choice) })
+            }
+            item {
+                TextButton(onClick = onToggleOthers) {
+                    Text(if (showOthers) "その他の停車を隠す" else "その他の停車を見る（${choices.others.size}件）")
+                }
+            }
+            if (showOthers) {
+                item {
+                    Text(
+                        "その他の停車（信号待ちなども混ざります。新しい停留所はここから拾えます）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                items(choices.others, key = { it.candidate.startMs }) { choice ->
+                    RecordedStopRow(choice, onClick = { onSelect(choice) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordedStopRow(choice: RecordedStopChoice, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp, horizontal = 4.dp),
+    ) {
+        Text(recordedStopLabel(choice))
+    }
+    HorizontalDivider()
+}
+
+/** 候補1件の表示＝`07:46:58〜07:47:15　18秒停車`（時刻・停車秒数）。 */
+private fun recordedStopLabel(choice: RecordedStopChoice): String {
+    val c = choice.candidate
+    return "${formatTimeOfDay(c.startMs)}〜${formatTimeOfDay(c.endMs)}　${c.durationSec.roundToInt()}秒停車"
 }
 
 /** 状態ドット1行分（設計ドラフト§7.1「小さいドット＋凡例」）。映像＝青・カード＝緑を小さい丸で示す。 */
