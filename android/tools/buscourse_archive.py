@@ -919,7 +919,12 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     receipt_path = stage / 'archive_receipt.json'
                     make_receipt(root, run.get('deviceModel', ''), receipt_path)
                     adb_call(adb, serial, 'push', str(receipt_path), DEVICE_PATH + '/archive_receipt.json')
-                    adb_call(adb, serial, 'shell', 'rm', '-r', remote)
+                    # 写しの片付けは任せる側がある: microSD の Android/data は adb（shell）から消せない端末がある
+                    #   （OPPO で実測 2026-10-21）。消せなくても、受領票を見たアプリが受領済みの写しを消す。
+                    try:
+                        adb_call(adb, serial, 'shell', 'rm', '-r', remote)
+                    except subprocess.CalledProcessError:
+                        pass
                     counts['ingested'] += 1
                     counts['bytes'] += sizes[name] or tree_size(folder)
                     announce(number, name, run)
