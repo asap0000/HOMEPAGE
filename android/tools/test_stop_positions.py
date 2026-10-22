@@ -71,6 +71,15 @@ class StopPositionsTests(unittest.TestCase):
 
         self.assertEqual(master.read_bytes(), before)
 
+    def test_位置は既定で小数第4位に丸め_丸めて同じ点は1つにする(self):
+        # 架空の位置（1軒の家の前を指す高精度の値にしない＝オーナー裁定 2026-10-22）
+        master = [{'lat': 10.123456, 'lon': 20.987654}, {'lat': 10.123462, 'lon': 20.987651},
+                  {'lat': 10.2, 'lon': 20.3}]
+        points, skipped = tool.extract_points(master)
+        self.assertEqual(points, [{'lat': 10.1235, 'lon': 20.9877}, {'lat': 10.2, 'lon': 20.3}])
+        self.assertEqual(skipped, 0)
+        self.assertEqual(tool.extract_points(master, 6)[0][0], {'lat': 10.123456, 'lon': 20.987654})
+
     def test_マスタの形が違っても位置だけを取り出す(self):
         records = synthetic_master()
         shapes = {

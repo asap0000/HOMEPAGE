@@ -23,8 +23,11 @@ import time
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-22 00:57'
+BUILT_AT = '2026-10-22 22:10'
 SCHEMA = 'stop-positions/1'
+# 位置の桁（小数第4位＝およそ 10m）。オーナー裁定 2026-10-22「桁を落とす」: 1軒の家の前を指す高精度の位置にしない。
+#   アプリが候補を絞る距離は 30m なので、10m に丸めても絞り込みは変わらない。
+DEFAULT_DECIMALS = 4
 FILE_NAME = 'stop_positions.json'
 # 記録用の実機に入る側（実データを持つ field ビルド）が既定。debug ビルドへ置くときは --app-id で指す。
 DEFAULT_APP_ID = 'com.istech.buscourse'
@@ -55,15 +58,19 @@ def _number(value):
     return value if math.isfinite(value) else None
 
 
-def extract_points(master):
+def extract_points(master, decimals=DEFAULT_DECIMALS):
     """(points, skipped)。points は [{'lat':..,'lon':..}]。`lat`/`lon` が数でない・範囲外の記録は数えて読み飛ばす。
-    **名前など他のキーは見ない・持ち出さない。**"""
-    points, skipped = [], 0
+    **名前など他のキーは見ない・持ち出さない。** 位置は小数第 [decimals] 位に丸め、丸めて同じになった点は1つにする。"""
+    points, skipped, seen = [], 0, set()
     for record in _records(master):
         lat, lon = _number(record.get('lat')), _number(record.get('lon'))
         if lat is None or lon is None or not -90.0 <= lat <= 90.0 or not -180.0 <= lon <= 180.0:
             skipped += 1
             continue
+        lat, lon = round(lat, decimals), round(lon, decimals)
+        if (lat, lon) in seen:
+            continue
+        seen.add((lat, lon))
         points.append({'lat': lat, 'lon': lon})
     return points, skipped
 
@@ -125,12 +132,14 @@ def main(argv=None):
     parser.add_argument('--push', metavar='SERIAL', help='書き出したあと、この端末へ adb push する')
     parser.add_argument('--app-id', default=DEFAULT_APP_ID, help='置き先のアプリ ID（既定: %s）' % DEFAULT_APP_ID)
     parser.add_argument('--adb', help='adb のパス（省略時は SDK の adb）')
+    parser.add_argument('--decimals', type=int, default=DEFAULT_DECIMALS, choices=range(3, 7),
+                        help='位置の小数の桁（既定: %d＝およそ 10m）' % DEFAULT_DECIMALS)
     args = parser.parse_args(argv)
     print('stop_positions.py（作成 %s）' % BUILT_AT)
 
     try:
         master = json.loads(Path(args.master).read_text(encoding='utf-8-sig'))
-        points, skipped = extract_points(master)
+        points, skipped = extract_points(master, args.decimals)
     except (OSError, ValueError) as exc:
         # 入力の中身（名前など）を出さないよう、例外の種類だけを言う。
         print('マスタを読めません（%s）' % type(exc).__name__, file=sys.stderr)
