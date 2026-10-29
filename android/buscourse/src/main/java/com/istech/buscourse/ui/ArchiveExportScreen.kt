@@ -62,6 +62,8 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
     var naviWaiting by remember { mutableStateOf<List<NaviArchiveCandidate>>(emptyList()) }
     var naviReceived by remember { mutableStateOf(0) }
     var naviBytes by remember { mutableStateOf(0L) }
+    // 走行ごとの大きさ。数千枚のファイルを数えるので画面の描き直しのたびには数えない（microSD では数秒かかり、応答なしになった 2026-10-29）。
+    var runBytes by remember { mutableStateOf<Map<Long, Long>>(emptyMap()) }
     var busy by remember { mutableStateOf(false) }
     var fraction by remember { mutableFloatStateOf(0f) }
     var progress by remember { mutableStateOf("") }
@@ -73,12 +75,14 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
         withContext(Dispatchers.IO) {
             store.prepareOutDirs()
             val pending = store.pending()
+            val bytes = pending.associate { it.id to store.size(it) }
             val unavailable = store.unavailable().size
             val naviPending = navi.pending()
             val allNaviBytes = navi.candidates().sumOf { it.bytes }
             val received = navi.receivedCount()
             withContext(Dispatchers.Main) {
                 missingSd = unavailable
+                runBytes = bytes
                 waiting = pending.filter(store::isExported)
                 toExport = pending.filterNot(store::isExported)
                 naviWaiting = naviPending.filter(navi::isExported)
@@ -98,7 +102,7 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
             val runs = toExport
             val naviRuns = naviToExport
             if (runs == null || naviRuns == null) { CircularProgressIndicator(); return@Column }
-            val total = runs.sumOf(store::size)
+            val total = runs.sumOf { runBytes[it.id] ?: 0L }
             Text("書き出す走行 ${runs.size}本・${total / mb}MB")
             if (waiting.isNotEmpty()) Text("書き出し済み・PC の取り込み待ち ${waiting.size}本")
             val naviCount = naviRuns.size + naviWaiting.size + naviReceived
@@ -161,7 +165,7 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                                 progress = "${i + 1}/${runs.size}本目"
                                 if (!store.export(run)) { shortage = true; break }
                                 written++
-                                writtenBytes += store.size(run)
+                                writtenBytes += runBytes[run.id] ?: 0L
                                 fraction = if (total > 0) (writtenBytes.toFloat() / total).coerceIn(0f, 1f) else 1f
                             }
                             if (!shortage) for (candidate in naviRuns) {
