@@ -54,6 +54,7 @@ class StorageRotationWorker(appContext: Context, params: WorkerParameters) : Cor
                 if (archive.isUnavailable(run)) continue
                 try {
                     repo.deleteSession(run.id)
+                    archive.deletePrep(run)
                     deleted++
                     deletedIds += run.id
                     val bytes = sizes.getValue(run.id)
@@ -68,6 +69,11 @@ class StorageRotationWorker(appContext: Context, params: WorkerParameters) : Cor
             for (run in runs) if (matched[run.id] != null) {
                 archive.deleteExport(run)
             }
+            // 消えた走行を指す新形の書き出し（写真を写さない形）と、その走行の指紋の作り置きを片付ける。
+            // 旧形（frames/ を持つ写し）は自己完結なので消さない。
+            val remainingRuns = app.database.recordingSessionDao().getAll()
+            archive.deleteDanglingExports(remainingRuns)
+            archive.deleteOrphanPrep(remainingRuns)
             val remaining = runs.size - deleted
             fun summary(predicate: (com.istech.buscourse.core.data.RecordingSessionEntity) -> Boolean): String {
                 val selected = runs.filter { it.id !in deletedIds && predicate(it) }

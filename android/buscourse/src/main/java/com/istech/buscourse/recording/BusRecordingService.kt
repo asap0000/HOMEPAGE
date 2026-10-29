@@ -24,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import com.istech.buscourse.BuildConfig
 import com.istech.buscourse.BusCourseApplication
 import com.istech.buscourse.R
+import com.istech.buscourse.archive.ArchivePrepWorker
 import com.istech.buscourse.core.data.BusCourseDatabase
 import com.istech.buscourse.core.data.BusCourseStorage
 import com.istech.buscourse.core.data.RecordingSessionEntity
@@ -783,6 +784,9 @@ class BusRecordingService : LifecycleService() {
             runCatching { sessionRepository.endSession(status) }
                 .onSuccess {
                     courseRepository.logWork(WorkLogCategory.RECORDING, "運行記録を終了（${status.name}）")
+                    // 記録が終わった走行の指紋を、充電中に裏で作り置きする（「書き出す」を速くする）。
+                    runCatching { ArchivePrepWorker.enqueueAfterRecording(applicationContext) }
+                        .onFailure { Log.w(TAG, "指紋の作り置きの登録に失敗しました", it) }
                 }
                 .onFailure {
                     Log.e(TAG, "セッション終了処理に失敗しました", it)

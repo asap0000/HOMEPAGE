@@ -74,6 +74,8 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
     suspend fun reload() {
         withContext(Dispatchers.IO) {
             store.prepareOutDirs()
+            // PC の取り込みで新形が合わなかった走行は、新形の書き出しと作り置きを消して書き出し待ちに戻す。
+            store.applyRetry()
             val pending = store.pending()
             val bytes = pending.associate { it.id to store.size(it) }
             val unavailable = store.unavailable().size
@@ -163,7 +165,13 @@ fun ArchiveExportScreen(onBack: () -> Unit) {
                         try {
                             for ((i, run) in runs.withIndex()) {
                                 progress = "${i + 1}/${runs.size}本目"
-                                if (!store.export(run)) { shortage = true; break }
+                                val before = writtenBytes
+                                // 指紋を作る間（作り置きが無い走行）、画面が止まって見えないよう読んだ量を棒に反映する。
+                                val exported = store.export(run) { read ->
+                                    fraction = if (total > 0) ((before + read).toFloat() / total).coerceIn(0f, 1f) else 1f
+                                    progress = "${i + 1}/${runs.size}本目（${read / mb}MB 確認）"
+                                }
+                                if (!exported) { shortage = true; break }
                                 written++
                                 writtenBytes += runBytes[run.id] ?: 0L
                                 fraction = if (total > 0) (writtenBytes.toFloat() / total).coerceIn(0f, 1f) else 1f

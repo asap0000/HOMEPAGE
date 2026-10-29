@@ -15,6 +15,7 @@ import com.istech.buscourse.core.data.StorageSettings
 import com.istech.buscourse.recording.RecordingSessionRepository
 import com.istech.buscourse.recording.RecordingSessionType
 import kotlinx.coroutines.test.runTest
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -269,6 +270,14 @@ class SdCardRecordingTest {
             assertThat(store.outDirFor(ended).path).contains("sdcard-card")
             assertThat(store.export(ended)).isTrue()
             assertThat(File(File(store.sdOutDir!!, store.runKey(ended)), "DONE").isFile).isTrue()
+            // 同じ microSD の archive_out に作るのは小さなフォルダだけ（写真・記録の写しは作らない）。元の場所は microSD の走行フォルダ。
+            val exported = File(store.sdOutDir!!, store.runKey(ended))
+            assertThat(exported.list()!!.toSet()).containsExactly("run.json", "manifest.sha256", "source.json", "DONE")
+            val source = JSONObject(File(exported, "source.json").readText())
+            assertThat(source.getString("sessionDir")).isEqualTo(BusCourseStorage.sessionDir(context, ended.id).absolutePath)
+            assertThat(source.getString("sessionDir")).contains("sdcard-card")
+            val listed = source.getJSONArray("files").let { array -> (0 until array.length()).map { array.getString(it) } }
+            assertThat(listed).containsExactly("gps_raw.jsonl", "meta.json").inOrder()
             // 本体の archive_out には作らない。
             assertThat(File(store.outDir, store.runKey(ended)).exists()).isFalse()
             assertThat(store.isExported(ended)).isTrue()
@@ -284,6 +293,30 @@ class SdCardRecordingTest {
             assertThat(File(store.outDir, store.runKey(ended)).exists()).isFalse()
             assertThat(store.pending().map { it.id }).doesNotContain(session.id)
             assertThat(store.unavailable().map { it.id }).containsExactly(session.id)
+        } finally {
+            repository.shutdown()
+        }
+    }
+
+    @Test
+    fun `microSDが抜けている間の走行の大きさは覚えず カードが戻れば数え直す`() = runTest {
+        val repository = RecordingSessionRepository(context, db)
+        val store = ArchiveStore(context, db)
+        try {
+            startOne(repository)
+            val ended = repository.endSession()!!
+            val real = store.size(ended)
+            assertThat(real).isGreaterThan(0L)
+            // 覚えたものを消してから、カードを抜いて数える（中身が見えないので 0。これを覚えてはいけない）。
+            store.deletePrep(ended)
+            ShadowEnvironment.setExternalStorageState(card, Environment.MEDIA_UNMOUNTED)
+            pastCache()
+            assertThat(store.isUnavailable(ended)).isTrue()
+            assertThat(store.size(ended)).isEqualTo(0L)
+            // カードが戻ったら、本当の大きさ。
+            ShadowEnvironment.setExternalStorageState(card, Environment.MEDIA_MOUNTED)
+            pastCache()
+            assertThat(store.size(ended)).isEqualTo(real)
         } finally {
             repository.shutdown()
         }

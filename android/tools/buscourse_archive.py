@@ -20,7 +20,7 @@ import zipfile
 
 # この道具は版数を持たないので、作った日時を焼き込んで画面と記録に出す（新しい・古いを見分けるため。
 # オーナー裁定 2026-10-10）。直したら必ずこの日時も書き換える。
-BUILT_AT = '2026-10-20 07:14'
+BUILT_AT = '2026-10-29 20:35'
 SCHEMA = 'buscourse-archive-run/1'
 RECEIPT_SCHEMA = 'buscourse-archive-receipt/1'
 CUTOFF = int(dt.datetime(2026, 8, 1, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp() * 1000)
@@ -31,6 +31,11 @@ SKIPPED_VOLUMES = ('emulated', 'self')
 TABLES = {'session': 'recording_session', 'gps': 'gps_point', 'frames': 'timelapse_frame',
           'stopVisits': 'stop_visit_event', 'shocks': 'shock_event'}
 NAVI_SCHEMA = 'buscourse-archive-receipt/2'
+# 新形の書き出し（2026-10-29）: 端末は写真を写さず、元の場所（sessions）を source.json で指す。PC がそこから持っていく。
+SOURCE_SCHEMA = 'buscourse-archive-source/1'
+SOURCE_EXTRAS = ('meta.json', 'gps_raw.jsonl', 'sensors.jsonl.gz')
+# 新形が合わなかった走行を端末へ知らせる（端末は新形の書き出しと指紋の作り置きを消して、書き出し待ちに戻す）。
+RETRY_SCHEMA = 'buscourse-archive-retry/1'
 
 
 def safe_navi(value):
@@ -776,6 +781,11 @@ def remote_size(adb, serial, name, directory='archive_out', base=None):
     # base を渡さないときは、本体と microSD の順に探す（ナビの走った跡は本体だけ）。
     bases = [base] if base else (device_bases(adb, serial) if directory == 'archive_out' else [DEVICE_PATH])
     for candidate in bases:
+        if directory == 'archive_out':
+            # 新形は archive_out の中身が小さな目録だけなので、du では移す大きさが出ない。source.json の合計を使う。
+            total = remote_source_total(adb, serial, candidate + '/archive_out/' + name)
+            if total is not None:
+                return total
         result = adb_call(adb, serial, 'shell', 'du', '-sk', candidate + '/' + directory + '/' + name)
         try:
             if result.returncode == 0:
@@ -783,6 +793,100 @@ def remote_size(adb, serial, name, directory='archive_out', base=None):
         except (IndexError, ValueError):
             pass
     return 0
+
+
+def parse_source(text):
+    """新形の source.json を検めて返す。形が違えば ValueError。"""
+    try:
+        info = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError('source.json is not JSON') from exc
+    if not isinstance(info, dict) or info.get('schema') != SOURCE_SCHEMA:
+        raise ValueError('source.json schema')
+    session, files, total = info.get('sessionDir'), info.get('files'), info.get('totalBytes')
+    if (not isinstance(session, str) or not session.startswith('/') or any(c in session for c in '\r\n\0')
+            or '..' in session.split('/')):
+        raise ValueError('source.json sessionDir')
+    if not isinstance(files, list) or len(set(files)) != len(files):
+        raise ValueError('source.json files')
+    for rel in files:
+        if not isinstance(rel, str):
+            raise ValueError('source.json files')
+        if rel in SOURCE_EXTRAS:
+            continue
+        head, _, leaf = rel.partition('/')
+        if head != 'frames' or leaf in ('', '.', '..') or '/' in leaf or '\\' in leaf:
+            raise ValueError('source.json unsafe file ' + rel)
+    if type(total) is not int or total < 0:
+        raise ValueError('source.json totalBytes')
+    if type(info.get('sessionId')) is not int:
+        raise ValueError('source.json sessionId')
+    return info
+
+
+def check_binding(folder, info):
+    """source.json が、この書き出しの走行を指していることを確かめる（別の走行の写真を取り込まない）。
+    run.json の session.id と sessionId が一致し、sessionDir の末尾が /sessions/<sessionId> であること。違えば ValueError。"""
+    session = load(folder / 'run.json').get('session')
+    session_id = session.get('id') if isinstance(session, dict) else None
+    if type(session_id) is not int or session_id != info['sessionId']:
+        raise ValueError('source.json sessionId does not match run.json')
+    if not info['sessionDir'].rstrip('/').endswith('/sessions/' + str(session_id)):
+        raise ValueError('source.json sessionDir does not match the run')
+
+
+def retry_identity(folder):
+    """端末へ知らせるときの走行の見分け（startedAt と機種）。run.json が読めなければ None。"""
+    try:
+        run = load(folder / 'run.json')
+        started = run['startedAt']
+        if type(started) is not int:
+            return None
+        return {'startedAt': started, 'deviceModel': run.get('deviceModel') or ''}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def push_retry(adb, serial, stage, identities):
+    """本体側 archive_retry.json に足して送る（既存の中身は残し、同じ走行は重ねない）。送れなくても取り込みは続ける。"""
+    remote = DEVICE_PATH + '/archive_retry.json'
+    rows = []
+    result = adb_call(adb, serial, 'shell', 'cat', remote)
+    if result.returncode == 0:
+        try:
+            old = json.loads(result.stdout)
+            if old.get('schema') == RETRY_SCHEMA:
+                rows = [row for row in old.get('runs', []) if isinstance(row, dict)]
+        except (ValueError, AttributeError):
+            pass
+    for ident in identities:
+        if not any(row.get('startedAt') == ident['startedAt'] and row.get('deviceModel') == ident['deviceModel'] for row in rows):
+            rows.append(ident)
+    path = stage / 'archive_retry.json'
+    dump(path, {'schema': RETRY_SCHEMA, 'runs': rows})
+    try:
+        adb_call(adb, serial, 'push', str(path), remote)
+    except subprocess.CalledProcessError:
+        pass
+
+
+def read_source(folder):
+    """引き取った書き出しフォルダの source.json（新形）。旧形（無い）なら None。"""
+    path = folder / 'source.json'
+    if not path.is_file():
+        return None
+    return parse_source(path.read_text(encoding='utf-8'))
+
+
+def remote_source_total(adb, serial, remote):
+    """端末の書き出しフォルダが新形なら、移す元の合計バイト（source.json の totalBytes）。旧形・読めないときは None。"""
+    result = adb_call(adb, serial, 'shell', 'cat', remote + '/source.json')
+    if result.returncode != 0:
+        return None
+    try:
+        return parse_source(result.stdout)['totalBytes']
+    except ValueError:
+        return None
 
 
 def remote_run(adb, serial, name, base=DEVICE_PATH):
@@ -797,6 +901,11 @@ def remote_run(adb, serial, name, base=DEVICE_PATH):
 
 def tree_size(folder):
     total = 0
+    if folder.is_file():
+        try:
+            return folder.stat().st_size
+        except OSError:
+            return 0
     if folder.exists():
         for path in folder.rglob('*'):
             try:
@@ -807,15 +916,30 @@ def tree_size(folder):
     return total
 
 
-def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
-    folder = stage / name
+def discard(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds, dest=None):
+    """remote を dest（既定は stage）の下へ name という名前で引き取る（adb pull は既存のフォルダの下に基本名で置く）。
+    止まり見張り・取り消し・3回のやり直しはどの行き先でも同じ。"""
+    parent = dest or stage
+    folder = parent / name
     for _ in range(3):
         if cancel.is_set():
             return 'cancelled'
-        shutil.rmtree(folder, ignore_errors=True)
-        process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(stage)], **HIDE,
+        discard(folder)
+        process = subprocess.Popen([adb, '-s', serial, 'pull', remote, str(parent)], **HIDE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         last_size, last_change, seen_activity = 0, time.monotonic(), False
+        interval = max(0.01, stall_seconds / 4)
+        pause = min(0.05, interval)
         while process.poll() is None:
             size = tree_size(folder)
             if size > last_size:
@@ -833,14 +957,50 @@ def pull_one(adb, serial, remote, stage, name, cancel, stall_seconds):
                     process.kill(); process.wait()
                 break
             # 7,000 ほどのファイルを数え直すので、見張りは 2秒ごとで足りる（止まりの判定は 60秒）。
-            time.sleep(min(2.0, max(0.01, stall_seconds / 4)))
+            # 小さな引き取り（記録の1ファイルなど）をすぐ終えられるよう、最初は短く見て、だんだん 2秒に伸ばす。
+            time.sleep(pause)
+            pause = min(pause * 2, 2.0, interval)
         if cancel.is_set():
-            shutil.rmtree(folder, ignore_errors=True)
+            discard(folder)
             return 'cancelled'
-        if process.returncode == 0 and folder.is_dir():
+        if process.returncode == 0 and folder.exists():
             return 'ok'
-        shutil.rmtree(folder, ignore_errors=True)
+        discard(folder)
     return 'failed'
+
+
+def pull_source(adb, serial, folder, info, cancel, stall_seconds):
+    """新形の書き出し（folder は引き取り済みの archive_out/<名前>）の写真と記録を、source.json が指す元の場所から持ってくる。
+    写真は sessions/<id>/frames をフォルダごと1回の adb pull（1枚ずつにしない）。元は読むだけで、端末のものは何も消さない。
+    戻りは 'ok' / 'cancelled' / 'failed'。成功したら source.json を消し、files に無い写真は混ぜない。"""
+    session = info['sessionDir'].rstrip('/')
+    wanted = set(info['files'])
+    stage = folder.parent
+    if any(rel.startswith('frames/') for rel in wanted):
+        outcome = pull_one(adb, serial, session + '/frames', stage, 'frames', cancel, stall_seconds, dest=folder)
+        if outcome != 'ok':
+            return outcome
+    for rel in info['files']:
+        if rel in SOURCE_EXTRAS:
+            outcome = pull_one(adb, serial, session + '/' + rel, stage, rel, cancel, stall_seconds, dest=folder)
+            if outcome != 'ok':
+                return outcome
+    frames = folder / 'frames'
+    if frames.is_dir():
+        # 元の frames の中の、目録（files）に無いファイル（記録の別の写真など）は取り込みに混ぜない。
+        for path in sorted(frames.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+            rel = path.relative_to(folder).as_posix()
+            if path.is_dir() and not path.is_symlink():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+            elif rel not in wanted:
+                path.unlink()
+        if frames.is_dir() and not any(frames.iterdir()):
+            frames.rmdir()
+    (folder / 'source.json').unlink()
+    return 'ok'
 
 
 def log_pull(root, model, counts, elapsed):
@@ -881,6 +1041,7 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
     try:
         with tempfile.TemporaryDirectory(dir=pull_stage_dir(root)) as temp:
             stage = Path(temp)
+            retry = []
             for number, name in enumerate(ready, 1):
                 if cancel.is_set():
                     counts['cancelled'] = True
@@ -895,13 +1056,34 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     counts['not_pulled'] += 1
                     continue
                 folder = stage / name
+                new_form, ident = False, None
                 try:
                     if cancel.is_set():
                         counts['cancelled'] = True
                         break
+                    # 新形（source.json あり）は、端末が写真を写していない。元の場所から持ってきて、source.json を消す。
+                    # 合わなかった新形は、端末へ知らせる（archive_retry.json）。端末は新形の書き出しと指紋の作り置きを消し、
+                    # 書き出し待ちに戻す（microSD の Android/data は adb から消せない端末があるため、消すのはアプリに任せる）。
+                    new_form = (folder / 'source.json').is_file()
+                    ident = retry_identity(folder) if new_form else None
+                    info = read_source(folder)
+                    if info is not None:
+                        check_binding(folder, info)
+                        sourced = pull_source(adb, serial, folder, info, cancel, stall_seconds)
+                        if sourced == 'cancelled':
+                            counts['cancelled'] = True
+                            break
+                        if sourced == 'failed':
+                            # 元が無い・引き取れない。何も取り込まず、端末のものは何も消さない（次の取り込みでやり直し）。
+                            counts['not_pulled'] += 1
+                            if ident:
+                                retry.append(ident)
+                            continue
                     hashes = verified_hashes(folder)
                     if hashes is None:
                         counts['mismatch'] += 1
+                        if new_form and ident:
+                            retry.append(ident)
                         continue
                     if cancel.is_set():
                         counts['cancelled'] = True
@@ -909,6 +1091,8 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     run = load(folder / 'run.json')
                     if run.get('schema') != SCHEMA:
                         counts['mismatch'] += 1
+                        if new_form and ident:
+                            retry.append(ident)
                         continue
                     announce(number, name, run)
                     files = {p.relative_to(folder).as_posix(): p for p in folder.rglob('*')
@@ -930,8 +1114,12 @@ def pull(root, serial, adb, cancel=None, progress=None, stall_seconds=60, model=
                     announce(number, name, run)
                 except (ValueError, KeyError, OSError, json.JSONDecodeError):
                     counts['mismatch'] += 1
+                    if new_form and ident:
+                        retry.append(ident)
                 finally:
                     shutil.rmtree(folder, ignore_errors=True)
+            if retry:
+                push_retry(adb, serial, stage, retry)
             if not cancel.is_set():
                 for navi_number, name in enumerate(navi_ready, len(ready) + 1):
                     remote = DEVICE_PATH + '/navirun_out/' + name

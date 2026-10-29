@@ -73,6 +73,7 @@ import pathlib, shutil, sys, time
 devices = {devices!r}
 stalled = {stalled!r}
 counter = pathlib.Path({counter!r})
+log = pathlib.Path({log!r})
 argv = sys.argv[1:]
 if argv == ['devices']:
     print('List of devices attached')
@@ -101,19 +102,22 @@ elif args[:2] == ['shell', 'cat']:
 elif args[0] == 'pull':
     source = local(args[1])
     target = pathlib.Path(args[2]) / source.name
+    with log.open('a') as out: out.write(args[1] + '\\n')
     if source.name in stalled:
         counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
         target.mkdir()
         (target / 'partial').write_bytes(b'x')
         time.sleep(3)
-    else:
+    elif source.is_dir():
         shutil.copytree(source, target)
+    else:
+        shutil.copy2(source, target)
 elif args[0] == 'push':
     shutil.copy2(args[1], local(args[2]))
 elif args[:2] == ['shell', 'rm']:
     shutil.rmtree(local(args[3]))
 '''.format(devices={k: str(v) for k, v in devices.items()}, stalled=list(stalled),
-           counter=str(self.base / 'pull_count.txt')))
+           counter=str(self.base / 'pull_count.txt'), log=str(self.base / 'pull_log.txt')))
         script.chmod(0o755)
         if os.name == 'nt':
             wrapper = script.with_suffix('.cmd')
@@ -529,6 +533,228 @@ elif args[:2] == ['shell', 'rm']:
         adb = self.fake_adb_with_volumes({archive.DEVICE_PATH: self.base / 'device'}, ['emulated', 'self'])
         self.assertEqual(archive.device_bases(adb, 'SER_VOL'), [archive.DEVICE_PATH])
         self.assertEqual(archive.export_list(adb, 'SER_VOL'), ([], []))
+
+    # ---- 新形の書き出し（2026-10-29 委託指示書 M）: 端末は写真を写さず、source.json で元の場所を指す ----
+    SESSIONS_REMOTE = '/sdcard/Android/data/com.istech.buscourse/files/buscourse/sessions/'
+
+    def export_new(self, device, started, frames=None, extras=None, listed=None, session_id=1, total=None,
+                   source_id=None, source_dir_id=None):
+        """端末（偽）に、元の場所（sessions/<id>）と、新形の archive_out（run.json・manifest.sha256・source.json・DONE だけ）を作る。"""
+        frames = {'a.jpg': b'photo one', 'b.jpg': b'photo two'} if frames is None else frames
+        extras = {'meta.json': b'{"id":1}', 'gps_raw.jsonl': b'{"seq":1}\n'} if extras is None else extras
+        session = device / 'buscourse' / 'sessions' / str(session_id)
+        (session / 'frames').mkdir(parents=True, exist_ok=True)
+        for name, data in frames.items():
+            (session / 'frames' / name).write_bytes(data)
+        for name, data in extras.items():
+            (session / name).write_bytes(data)
+        files = sorted(['frames/' + name for name in frames] + list(extras)) if listed is None else listed
+        folder = device / 'archive_out' / archive.run_key(started)
+        folder.mkdir(parents=True)
+        run = {'schema': archive.SCHEMA, 'startedAt': started, 'endedAt': started + 1000,
+               'deviceModel': 'SyntheticDevice', 'runUid': None, 'type': 'FULL_RUN',
+               'status': 'COMPLETED', 'totalDistanceM': 400, 'appVersion': 'test',
+               'dbVersion': 24, 'session': {'id': session_id}, 'gps': [],
+               'frames': [{'id': i + 1, 'session_id': session_id, 'seq': i,
+                           'file_rel_path': f'sessions/{session_id}/frames/{name}'} for i, name in enumerate(frames)],
+               'stopVisits': [], 'shocks': [], 'missingFiles': []}
+        archive.dump(folder / 'run.json', run)
+        entries = {rel: archive.sha(session / rel) for rel in files}
+        entries['run.json'] = archive.sha(folder / 'run.json')
+        (folder / 'manifest.sha256').write_text(''.join(f'{sha}  {rel}\n' for rel, sha in sorted(entries.items())),
+                                               encoding='utf-8', newline='\n')
+        size = sum((session / rel).stat().st_size for rel in files) if total is None else total
+        archive.dump(folder / 'source.json', {'schema': 'buscourse-archive-source/1',
+                                              'sessionId': session_id if source_id is None else source_id,
+                                              'sessionDir': self.SESSIONS_REMOTE + str(session_id if source_dir_id is None else source_dir_id),
+                                              'files': files, 'totalBytes': size})
+        (folder / 'DONE').touch()
+        return folder, session
+
+    def export_old_equivalent(self, device, started, frames, extras):
+        """export_new と同じ中身を、旧形（写真も記録も archive_out に写した形）で作る。"""
+        folder, session = self.export_new(device, started, frames, extras)
+        (folder / 'source.json').unlink()
+        for name in frames:
+            (folder / 'frames').mkdir(exist_ok=True)
+            shutil.copy2(session / 'frames' / name, folder / 'frames' / name)
+        for name in extras:
+            shutil.copy2(session / name, folder / name)
+        (folder / 'DONE').unlink()
+        archive.write_manifest(folder)
+        (folder / 'DONE').touch()
+        return folder
+
+    def vault_hashes(self, root, folder):
+        return {p.relative_to(folder).as_posix(): archive.sha(p) for p in folder.rglob('*')
+                if p.is_file() and p.name != 'provenance.json'}
+
+    def pull_log(self):
+        log = self.base / 'pull_log.txt'
+        return log.read_text().splitlines() if log.exists() else []
+
+    def test_新形は元の場所から写真を引き取り_旧形と同じフォルダで取り込む(self):
+        frames = {'a.jpg': b'photo one', 'b.jpg': b'photo two'}
+        extras = {'meta.json': b'{"id":1}', 'gps_raw.jsonl': b'{"seq":1}\n'}
+        device = self.base / 'device'
+        folder, session = self.export_new(device, self.new, frames, extras)
+        legacy = self.export(device, self.new + 2000)
+        # 旧形の写しの中身が同じ走行を別の端末で作り、取り込んだ結果のフォルダを比べる。
+        reference_root = self.base / 'reference_vault'
+        reference_root.mkdir()
+        self.export_old_equivalent(self.base / 'reference_device', self.new, frames, extras)
+        reference = archive.pull(reference_root, 'SER_REF', self.fake_adb({'SER_REF': self.base / 'reference_device'}))
+        self.assertEqual((reference['ingested'], reference['mismatch'], reference['not_pulled']), (1, 0, 0))
+
+        (self.base / 'pull_log.txt').write_text('')
+        adb = self.fake_adb({'SER_A': device})
+        result = archive.pull(self.root, 'SER_A', adb)
+        self.assertEqual((result['ingested'], result['mismatch'], result['not_pulled']), (2, 0, 0))
+        # 写真は sessions の frames をフォルダごと1回で引き取る（1枚ずつ引かない）。旧形の走行は今までどおり archive_out を引く。
+        pulls = self.pull_log()
+        self.assertEqual([p for p in pulls if p.endswith('/frames')], [self.SESSIONS_REMOTE + '1/frames'])
+        self.assertFalse([p for p in pulls if p.endswith('.jpg')])
+        self.assertIn(self.SESSIONS_REMOTE + '1/meta.json', pulls)
+        # 取り込んだフォルダは、旧形で取り込んだものと同じ（provenance 以外）。source.json は混ざらない。
+        mine = next(f for f, run in archive.archive_runs(self.root) if run['startedAt'] == self.new)
+        theirs = next(f for f, run in archive.archive_runs(reference_root) if run['startedAt'] == self.new)
+        self.assertEqual(self.vault_hashes(self.root, mine), self.vault_hashes(reference_root, theirs))
+        self.assertEqual(sorted(self.vault_hashes(self.root, mine)),
+                         ['frames/a.jpg', 'frames/b.jpg', 'gps_raw.jsonl', 'manifest.sha256', 'meta.json', 'run.json'])
+        self.assertEqual((mine / 'frames' / 'a.jpg').read_bytes(), b'photo one')
+        # 端末: 書き出し（archive_out）だけが片付き、元の sessions は何も消えていない。受領票は届いている。
+        self.assertFalse(folder.exists())
+        self.assertFalse(legacy.exists())
+        self.assertEqual(sorted(p.name for p in (session / 'frames').iterdir()), ['a.jpg', 'b.jpg'])
+        self.assertTrue((session / 'meta.json').is_file())
+        self.assertEqual(len(archive.load(device / 'archive_receipt.json')['runs']), 2)
+
+    def test_新形で元が消えていたら取り込まず端末に何も消さない(self):
+        # (1) 元のフォルダごと無い
+        device = self.base / 'gone'
+        folder, session = self.export_new(device, self.new)
+        shutil.rmtree(session)
+        result = archive.pull(self.root, 'SER_G', self.fake_adb({'SER_G': device}))
+        self.assertEqual(result['ingested'], 0)
+        self.assertEqual(result['mismatch'] + result['not_pulled'], 1)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['DONE', 'manifest.sha256', 'run.json', 'source.json'])
+        self.assertFalse((device / 'archive_receipt.json').exists())
+        self.assertEqual(list(archive.archive_runs(self.root)), [])
+        # (2) 元のフォルダはあるが、書き出した後で写真が1枚消えた（指紋に合わない）
+        device = self.base / 'lost_photo'
+        folder, session = self.export_new(device, self.new + 2000)
+        (session / 'frames' / 'b.jpg').unlink()
+        result = archive.pull(self.root, 'SER_L', self.fake_adb({'SER_L': device}))
+        self.assertEqual((result['ingested'], result['mismatch']), (0, 1))
+        self.assertTrue((folder / 'source.json').is_file() and (folder / 'DONE').is_file())
+        self.assertEqual(sorted(p.name for p in (session / 'frames').iterdir()), ['a.jpg'])
+        self.assertFalse((device / 'archive_receipt.json').exists())
+        # (3) 写真が書き出した後で書き換わった（指紋に合わない）
+        device = self.base / 'changed_photo'
+        folder, session = self.export_new(device, self.new + 4000)
+        (session / 'frames' / 'a.jpg').write_bytes(b'changed')
+        result = archive.pull(self.root, 'SER_C', self.fake_adb({'SER_C': device}))
+        self.assertEqual((result['ingested'], result['mismatch']), (0, 1))
+        self.assertTrue(folder.exists())
+        self.assertEqual((session / 'frames' / 'a.jpg').read_bytes(), b'changed')
+        self.assertEqual(list(archive.archive_runs(self.root)), [])
+
+    def test_新形の余分な写真は取り込みに混ぜない(self):
+        device = self.base / 'device'
+        folder, session = self.export_new(device, self.new)
+        # 記録の別の写真（目録に無い）が元の frames にある。
+        (session / 'frames' / 'unlisted.jpg').write_bytes(b'not exported')
+        result = archive.pull(self.root, 'SER_A', self.fake_adb({'SER_A': device}))
+        self.assertEqual((result['ingested'], result['mismatch'], result['not_pulled']), (1, 0, 0))
+        vault = self.folder()
+        self.assertEqual(sorted(p.name for p in (vault / 'frames').iterdir()), ['a.jpg', 'b.jpg'])
+        self.assertFalse(any('unlisted' in str(p) for p in vault.rglob('*')))
+        # 端末の元の写真は残っている。
+        self.assertTrue((session / 'frames' / 'unlisted.jpg').is_file())
+
+    def test_旧形の写しは今まで通り取り込める(self):
+        device = self.base / 'device'
+        legacy = self.export(device, self.new)
+        (self.base / 'pull_log.txt').write_text('')
+        result = archive.pull(self.root, 'SER_A', self.fake_adb({'SER_A': device}))
+        self.assertEqual((result['ingested'], result['mismatch'], result['not_pulled']), (1, 0, 0))
+        self.assertEqual((self.folder() / 'frames' / 'synthetic.bin').read_bytes(), b'synthetic bytes')
+        self.assertFalse(legacy.exists())
+        # 旧形は archive_out の1か所を引くだけ（sessions へは行かない）。
+        self.assertEqual(self.pull_log(), [archive.DEVICE_PATH + '/archive_out/' + legacy.name])
+
+    def test_新形の大きさはsource_jsonの合計を使う(self):
+        device = self.base / 'device'
+        new_folder, _ = self.export_new(device, self.new, total=123456789)
+        old_folder = self.export(device, self.new + 2000)
+        adb = self.fake_adb({'SER_A': device})
+        # du だと小さな目録の大きさになる。新形は source.json の totalBytes を使う。
+        self.assertEqual(archive.remote_size(adb, 'SER_A', new_folder.name), 123456789)
+        self.assertEqual(archive.remote_size(adb, 'SER_A', old_folder.name),
+                         (sum(p.stat().st_size for p in old_folder.rglob('*') if p.is_file()) + 1023) // 1024 * 1024)
+        expected = 123456789 + archive.remote_size(adb, 'SER_A', old_folder.name)
+        totals = []
+        archive.pull(self.root, 'SER_A', adb, progress=lambda info: totals.append(info['total_bytes']))
+        self.assertEqual(totals[0], expected)
+
+    def retry_rows(self, device):
+        path = device / 'archive_retry.json'
+        if not path.exists():
+            return None
+        data = archive.load(path)
+        self.assertEqual(data['schema'], 'buscourse-archive-retry/1')
+        return data['runs']
+
+    def test_別の走行を指すsource_jsonは取り込まない(self):
+        # (1) sessionId が run.json の session.id と違う  (2) sessionDir の末尾が別の走行  (3) sessionId の型が違う
+        for index, (kind, kwargs) in enumerate([('id', {'source_id': 2}), ('dir', {'source_dir_id': 2}), ('type', {'source_id': '1'})]):
+            device = self.base / ('other_' + kind)
+            started = self.new + index * 2000
+            folder, session = self.export_new(device, started, **kwargs)
+            other = device / 'buscourse' / 'sessions' / '2' / 'frames'
+            other.mkdir(parents=True)
+            (other / 'a.jpg').write_bytes(b'photo of another run')
+            (self.base / 'pull_log.txt').write_text('')
+            result = archive.pull(self.root, 'SER_' + kind, self.fake_adb({'SER_' + kind: device}))
+            self.assertEqual((result['ingested'], result['mismatch']), (0, 1), kind)
+            # 取り込む前に止める: 元の場所からは何も引かない。端末は何も消さない。
+            self.assertFalse([p for p in self.pull_log() if '/sessions/' in p], kind)
+            self.assertTrue((folder / 'source.json').is_file() and (folder / 'DONE').is_file(), kind)
+            self.assertTrue((session / 'frames' / 'a.jpg').is_file(), kind)
+            self.assertFalse((device / 'archive_receipt.json').exists(), kind)
+            self.assertEqual(self.retry_rows(device), [{'startedAt': started, 'deviceModel': 'SyntheticDevice'}], kind)
+        self.assertEqual(list(archive.archive_runs(self.root)), [])
+
+    def test_新形が合わなければarchive_retry_jsonを送る(self):
+        device = self.base / 'device'
+        gone, gone_session = self.export_new(device, self.new, session_id=1)
+        shutil.rmtree(gone_session)                                   # 元が無い
+        bad, bad_session = self.export_new(device, self.new + 2000, session_id=2)
+        (bad_session / 'frames' / 'a.jpg').write_bytes(b'changed')    # 指紋に合わない
+        good, _ = self.export_new(device, self.new + 4000, session_id=3)
+        legacy = self.export(device, self.new + 6000)                 # 旧形が合わなくても送らない
+        (legacy / 'frames' / 'synthetic.bin').write_bytes(b'wrong')
+        # 端末には前から別の行がある。足されて、重ならない。
+        archive.dump(device / 'archive_retry.json', {'schema': 'buscourse-archive-retry/1',
+                     'runs': [{'startedAt': 1, 'deviceModel': 'Other'}, {'startedAt': self.new, 'deviceModel': 'SyntheticDevice'}]})
+        adb = self.fake_adb({'SER_A': device})
+        result = archive.pull(self.root, 'SER_A', adb)
+        self.assertEqual((result['ingested'], result['mismatch'], result['not_pulled']), (1, 2, 1))
+        self.assertEqual(self.retry_rows(device), [{'startedAt': 1, 'deviceModel': 'Other'},
+                                                   {'startedAt': self.new, 'deviceModel': 'SyntheticDevice'},
+                                                   {'startedAt': self.new + 2000, 'deviceModel': 'SyntheticDevice'}])
+        # 端末側の書き出しはそのまま（消すのはアプリ）。
+        self.assertTrue(gone.exists() and bad.exists() and legacy.exists())
+        # もう一度取り込んでも重ならない。
+        archive.pull(self.root, 'SER_A', adb)
+        self.assertEqual(len(self.retry_rows(device)), 3)
+
+    def test_新形が全部合えばarchive_retry_jsonは作らない(self):
+        device = self.base / 'device'
+        self.export_new(device, self.new)
+        result = archive.pull(self.root, 'SER_A', self.fake_adb({'SER_A': device}))
+        self.assertEqual(result['ingested'], 1)
+        self.assertIsNone(self.retry_rows(device))
 
     def test_second_pull_does_not_hash_existing_vault_file(self):
         device = self.base / 'device'

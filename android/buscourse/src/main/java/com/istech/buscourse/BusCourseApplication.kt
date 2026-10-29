@@ -12,6 +12,7 @@ import java.io.File
 import com.istech.buscourse.map.FailClosedNetworkInterceptor
 import com.istech.buscourse.recording.RecordingSessionRepository
 import com.istech.buscourse.recording.RecordingStateStore
+import com.istech.buscourse.archive.ArchivePrepWorker
 import com.istech.buscourse.recording.StorageRotationWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,7 @@ class BusCourseApplication : Application() {
         val processStartedAtMs = System.currentTimeMillis()
         super.onCreate()
         StorageRotationWorker.schedule(this)
+        ArchivePrepWorker.schedule(this)
         applicationScope.launch {
             runCatching { database.naviMapDao().deletePreviewMaps() }
                 .onFailure { Log.w("BusCourseApplication", "確認用ナビデータの起動時削除に失敗しました", it) }
